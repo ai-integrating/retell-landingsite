@@ -1,27 +1,6 @@
 // /api/retell-create-call.js
 const axios = require("axios");
 
-function toE164US(raw) {
-  if (!raw) return raw;
-
-  const trimmed = String(raw).trim();
-
-  // If they already typed +something, keep it
-  if (trimmed.startsWith("+")) return trimmed;
-
-  // Keep only digits
-  const digits = trimmed.replace(/\D/g, "");
-
-  // US number with country code + 10 digits
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-
-  // Plain 10-digit US number
-  if (digits.length === 10) return `+1${digits}`;
-
-  // Fallback: best effort (adds + in front of remaining digits)
-  return digits ? `+${digits}` : raw;
-}
-
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -29,7 +8,6 @@ function setCors(res) {
 }
 
 async function readJsonBody(req) {
-  // Vercel sometimes gives req.body already; sometimes it's a string; sometimes you must read the stream.
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
     try {
@@ -38,7 +16,6 @@ async function readJsonBody(req) {
       return {};
     }
   }
-
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
@@ -53,23 +30,31 @@ async function readJsonBody(req) {
   });
 }
 
+// Helper: safe JSON
+function pick(obj, keys, fallback = undefined) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  }
+  return fallback;
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
 
-  // Preflight
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // Friendly GET (so visiting the URL in a browser doesn't look "broken")
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      message: "retell-create-call is live. Send a POST with JSON to create a web call.",
-      expected_fields: {
-        to_number: "recommended (string) - phone number in any format; will be normalized to E.164",
-        business_name: "optional",
-        package_type: "optional",
-        retell_llm_dynamic_variables: "optional object",
-        metadata: "optional object",
+      message:
+        "Provision endpoint is live. POST JSON to create a new Retell agent + phone number bound for inbound calls.",
+      expects: {
+        business_name: "string (recommended)",
+        area_code: "string (optional) e.g. '617'",
+        voice_id: "string (optional; can be set in env)",
+        response_engine: "object (optional; can be set in env)",
+        dynamic_variables: "object (optional)",
+        metadata: "object (optional)"
       },
     });
   }
@@ -81,84 +66,133 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
 
+    // ===== Required env =====
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    const agent_id = body.agent_id || process.env.AGENT_ID;
-
     if (!RETELL_API_KEY) {
-      return res
-        .status(500)
-        .json({ error: "Missing RETELL_API_KEY in Vercel environment variables." });
+      return res.status(500).json({
+        error: "Missing RETELL_API_KEY in Vercel environment variables.",
+      });
     }
+
+    // ===== Inputs (prefer env defaults) =====
+    const business_name = pick(body, ["business_name", "businessName"], "New Client");
+
+    // These two are REQUIRED by Retell create-agent per docs:
+    // voice_id (string) and response_engine (object)
+    // Recommend setting defaults in env:
+    // DEFAULT_VOICE_ID, DEFAULT_RESPONSE_ENGINE_JSON
+    const voice_id =
+      pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
+
+    const response_engine_from_body = pick(body, ["response_engine", "responseEngine"], null);
+    const response_engine_from_env = process.env.DEFAULT_RESPONSE_ENGINE_JSON
+      ? JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON)
+      : null;
+
+    const response_engine = response_engine_from_body || response_engine_from_env;
+
+    if (!voice_id || !response_engine) {
+      return res.status(400).json({
+        error:
+          "Missing voice_id or response_engine. Provide in POST body OR set DEFAULT_VOICE_ID and DEFAULT_RESPONSE_ENGINE_JSON env vars.",
+        hint:
+          'DEFAULT_RESPONSE_ENGINE_JSON should be a JSON string like {"type":"retell-llm","llm_id":"...","version":0}',
+      });
+    }
+
+    const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
+
+    const dynamic_variables =
+      pick(body, ["retell_llm_dynamic_variables", "dynamic_variables", "dynamicVariables"], {}) || {};
+
+    const metadata = pick(body, ["metadata"], {}) || {};
+
+    // ===== 1) Create agent =====
+    // Docs: Create Voice Agent (POST) returns agent_id + version :contentReference[oaicite:5]{index=5}
+    const createAgentResp = await axios.post(
+      "https://api.retellai.com/create-agent",
+      {
+        voice_id,
+        response_engine,
+        // Optional: store your client context here (Retell may expose fields differently depending on product updates)
+        metadata: {
+          business_name,
+          ...metadata,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${RETELL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
+
+    const agent_id = createAgentResp.data?.agent_id;
+    const agent_version = createAgentResp.data?.version;
 
     if (!agent_id) {
-      return res.status(400).json({
-        error: "Missing agent_id. Provide it in POST body or set AGENT_ID in env.",
+      return res.status(500).json({
+        error: "Retell did not return agent_id from create-agent.",
+        raw: createAgentResp.data || null,
       });
     }
 
-    // Normalize phone if provided (you can choose to require it by uncommenting the required check below)
-    const to_number_raw = body.to_number || body.phone_number || body.toNumber;
-    const to_number = toE164US(to_number_raw);
+    // ===== 2) Buy/provision phone number bound to inbound agent =====
+    // Docs: Create Phone Number includes inbound_agent_id and returns phone_number_pretty :contentReference[oaicite:6]{index=6}
+    const createNumberBody = {
+      inbound_agent_id: agent_id,
+      inbound_agent_version: agent_version ?? 0,
+      // You can optionally set outbound_agent_id too, but not required for inbound receptionist
+      // outbound_agent_id: agent_id,
 
-    // If you want to REQUIRE phone number, uncomment this:
-    // if (!to_number_raw) {
-    //   return res.status(400).json({ error: "Missing to_number (phone number)." });
-    // }
+      // If you want a specific area code:
+      ...(area_code ? { area_code } : {}),
 
-    // Retell endpoint (keep as you had it)
-    const url = "https://api.retellai.com/v2/create-web-call";
-
-    // Build payload
-    const payload = {
-      agent_id,
-
-      // If you want Retell to prefill a phone field inside your agent (as a dynamic var), keep using dynamic vars.
-      // This does NOT "call" the number; it just passes info.
-      retell_llm_dynamic_variables:
-        body.retell_llm_dynamic_variables || body.dynamic_variables || {},
-
-      metadata: body.metadata || {},
+      nickname: `${business_name} Receptionist`,
     };
 
-    // OPTIONAL: If Retell supports a direct "to_number" param for your use-case, you can pass it here.
-    // Only do this if Retell's API expects it for the endpoint you're using.
-    // if (to_number) payload.to_number = to_number;
+    const createNumberResp = await axios.post(
+      "https://api.retellai.com/create-phone-number",
+      createNumberBody,
+      {
+        headers: {
+          Authorization: `Bearer ${RETELL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
 
-    // OPTIONAL: Add your own metadata consistently
-    if (to_number) payload.metadata.to_number = to_number;
-    if (body.business_name) payload.metadata.business_name = body.business_name;
-    if (body.package_type) payload.metadata.package_type = body.package_type;
+    const phone_number = createNumberResp.data?.phone_number;
+    const phone_number_pretty = createNumberResp.data?.phone_number_pretty;
 
-    const response = await axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${RETELL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
-    });
-
-    const { access_token, call_id } = response.data || {};
-
-    if (!access_token) {
+    if (!phone_number) {
       return res.status(500).json({
-        error: "Retell did not return access_token",
-        raw: response.data || null,
+        error: "Retell did not return phone_number from create-phone-number.",
+        raw: createNumberResp.data || null,
       });
     }
 
+    // Return what Zapier needs to email the customer
     return res.status(200).json({
-      access_token,
-      call_id,
-      normalized_to_number: to_number || null,
+      ok: true,
+      business_name,
+      agent_id,
+      agent_version: agent_version ?? 0,
+      phone_number,
+      phone_number_pretty: phone_number_pretty || phone_number,
+      inbound_agent_id: agent_id,
+      // Pass through any variables so Zapier can store/log if desired
+      dynamic_variables,
     });
   } catch (error) {
     const status = error?.response?.status || 500;
     const details = error?.response?.data || error?.message || "Unknown error";
-
-    console.error("retell-create-call error:", details);
-
+    console.error("provision-receptionist error:", details);
     return res.status(status).json({
-      error: "Failed to create Retell web call",
+      error: "Failed to provision receptionist line",
       details,
     });
   }
