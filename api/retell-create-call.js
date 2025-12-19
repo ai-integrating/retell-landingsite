@@ -54,7 +54,7 @@ module.exports = async function handler(req, res) {
         voice_id: "string (optional; can be set in env)",
         response_engine: "object (optional; can be set in env)",
         dynamic_variables: "object (optional)",
-        metadata: "object (optional)"
+        metadata: "object (optional)",
       },
     });
   }
@@ -66,7 +66,6 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
 
-    // ===== Required env =====
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     if (!RETELL_API_KEY) {
       return res.status(500).json({
@@ -74,20 +73,23 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ===== Inputs (prefer env defaults) =====
     const business_name = pick(body, ["business_name", "businessName"], "New Client");
 
-    // These two are REQUIRED by Retell create-agent per docs:
-    // voice_id (string) and response_engine (object)
-    // Recommend setting defaults in env:
-    // DEFAULT_VOICE_ID, DEFAULT_RESPONSE_ENGINE_JSON
-    const voice_id =
-      pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
+    // Required for create-agent: voice_id + response_engine
+    const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
 
     const response_engine_from_body = pick(body, ["response_engine", "responseEngine"], null);
-    const response_engine_from_env = process.env.DEFAULT_RESPONSE_ENGINE_JSON
-      ? JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON)
-      : null;
+
+    let response_engine_from_env = null;
+    if (process.env.DEFAULT_RESPONSE_ENGINE_JSON) {
+      try {
+        response_engine_from_env = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
+      } catch (e) {
+        return res.status(500).json({
+          error: "DEFAULT_RESPONSE_ENGINE_JSON is not valid JSON in Vercel env vars.",
+        });
+      }
+    }
 
     const response_engine = response_engine_from_body || response_engine_from_env;
 
@@ -96,25 +98,28 @@ module.exports = async function handler(req, res) {
         error:
           "Missing voice_id or response_engine. Provide in POST body OR set DEFAULT_VOICE_ID and DEFAULT_RESPONSE_ENGINE_JSON env vars.",
         hint:
-          'DEFAULT_RESPONSE_ENGINE_JSON should be a JSON string like {"type":"retell-llm","llm_id":"...","version":0}',
+          'DEFAULT_RESPONSE_ENGINE_JSON example: {"type":"retell-llm","llm_id":"...","version":0}',
       });
     }
 
-    const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
+    const area_code = pick(
+      body,
+      ["area_code", "areaCode"],
+      process.env.DEFAULT_AREA_CODE || null
+    );
 
     const dynamic_variables =
-      pick(body, ["retell_llm_dynamic_variables", "dynamic_variables", "dynamicVariables"], {}) || {};
+      pick(body, ["retell_llm_dynamic_variables", "dynamic_variables", "dynamicVariables"], {}) ||
+      {};
 
     const metadata = pick(body, ["metadata"], {}) || {};
 
-    // ===== 1) Create agent =====
-    // Docs: Create Voice Agent (POST) returns agent_id + version :contentReference[oaicite:5]{index=5}
+    // 1) Create agent
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         voice_id,
         response_engine,
-        // Optional: store your client context here (Retell may expose fields differently depending on product updates)
         metadata: {
           business_name,
           ...metadata,
@@ -139,17 +144,11 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ===== 2) Buy/provision phone number bound to inbound agent =====
-    // Docs: Create Phone Number includes inbound_agent_id and returns phone_number_pretty :contentReference[oaicite:6]{index=6}
+    // 2) Buy/provision phone number bound to inbound agent
     const createNumberBody = {
       inbound_agent_id: agent_id,
       inbound_agent_version: agent_version ?? 0,
-      // You can optionally set outbound_agent_id too, but not required for inbound receptionist
-      // outbound_agent_id: agent_id,
-
-      // If you want a specific area code:
-      ...(area_code ? { area_code } : {}),
-
+      ...(area_code ? { area_code: Number(area_code) } : {}),
       nickname: `${business_name} Receptionist`,
     };
 
@@ -175,7 +174,6 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Return what Zapier needs to email the customer
     return res.status(200).json({
       ok: true,
       business_name,
@@ -184,7 +182,6 @@ module.exports = async function handler(req, res) {
       phone_number,
       phone_number_pretty: phone_number_pretty || phone_number,
       inbound_agent_id: agent_id,
-      // Pass through any variables so Zapier can store/log if desired
       dynamic_variables,
     });
   } catch (error) {
