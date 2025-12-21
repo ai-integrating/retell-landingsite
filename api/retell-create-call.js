@@ -41,13 +41,14 @@ module.exports = async function handler(req, res) {
     const isDryRun = String(body.is_test_mode).toLowerCase() === "true";
 
     // 2. CREATE UNIQUE LLM (The Brain)
-    // Hardcoding biz_name here means we don't need a webhook to "fetch" it later
+    // We hardcode the business name into the prompt so it's permanent
     const llmResp = await axios.post(
       "https://api.retellai.com/create-retell-llm",
       {
         general_prompt: `You are a professional AI receptionist for ${biz_name}. Your background info: ${biz_info}. If you don't know a caller's name, refer to them as 'valued guest'.`,
-        begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you?`,
+        begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
         model: "gpt-4o-mini",
+        // Using your template ID as the base if needed (Note: Retell typically uses create-llm to spawn a new instance)
       },
       { headers, timeout: 8000 }
     );
@@ -59,17 +60,26 @@ module.exports = async function handler(req, res) {
       {
         agent_name: `${biz_name} - Personalized Agent`,
         voice_id: body.voice_id || process.env.DEFAULT_VOICE_ID,
-        response_engine: { type: "retell-llm", llm_id: llm_id }
+        response_engine: { 
+          type: "retell-llm", 
+          llm_id: llm_id // Link to the fresh personalized brain
+        }
       },
       { headers, timeout: 8000 }
     );
+    
     const agent_id = agentResp.data.agent_id;
-    // Capture version to ensure number binding works
+    // Capture version for number binding
     const agent_version = agentResp.data.agent_version ?? 0; 
 
     // 4. STOP IF TEST MODE
     if (isDryRun) {
-      return res.status(200).json({ ok: true, agent_id, llm_id, message: "Test Successful: No number purchased." });
+      return res.status(200).json({ 
+        ok: true, 
+        agent_id, 
+        llm_id, 
+        message: "SUCCESS: Unique LLM and Agent Created. No number purchased." 
+      });
     }
 
     // 5. LIVE PURCHASE
@@ -77,7 +87,7 @@ module.exports = async function handler(req, res) {
       "https://api.retellai.com/create-phone-number",
       {
         inbound_agent_id: agent_id,
-        inbound_agent_version: agent_version, // Critical version parameter
+        inbound_agent_version: agent_version, // Ensures number binds correctly
         nickname: `${biz_name} Main Line`
       },
       { headers, timeout: 8000 }
