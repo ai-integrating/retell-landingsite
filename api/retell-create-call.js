@@ -11,6 +11,7 @@ async function readJsonBody(req) {
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
+    req.on("data", () => {});
     req.on("end", () => {
       try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
     });
@@ -39,12 +40,21 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json",
     };
 
+    // ---- DEBUG (helps confirm Zap keys) ----
+    console.log("PROVISION BODY KEYS:", Object.keys(body || {}));
+
     // ---- Client data extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
     const website = pick(body, ["website"], "");
     const business_hours = pick(body, ["business_hours"], "");
     const services = pick(body, ["services"], "");
     const extra_info = pick(body, ["extra_info"], "");
+
+    // ✅ NEW: package/add-ons/timezone fields (clean + flexible)
+    const package_type = pick(body, ["package_type", "packageType"], "");
+    const addons = pick(body, ["addons", "add_ons", "addOns"], "");
+    const time_zone = pick(body, ["time_zone", "timezone", "timeStamp"], "");
+
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
     // ---- MASTER prompt (Behavioral rules) ----
@@ -81,6 +91,9 @@ BUSINESS PROFILE (use this as the source of truth)
 - Website: ${website || "Not provided"}
 - Business Hours: ${business_hours || "Not provided"}
 - Services: ${services || "Not provided"}
+- Package Type: ${package_type || "Not provided"}
+- Add-Ons Enabled: ${addons || "None"}
+- Time Zone: ${time_zone || "Not provided"}
 - Additional Notes: ${extra_info || "None provided"}
 
 IF ANY FIELD IS "Not provided":
@@ -116,6 +129,10 @@ IF ANY FIELD IS "Not provided":
           business_hours,
           services,
           extra_info,
+          // ✅ NEW: store these in metadata too
+          package_type,
+          addons,
+          time_zone,
         },
       },
       { headers, timeout: 15000 }
@@ -129,7 +146,18 @@ IF ANY FIELD IS "Not provided":
       message: "Agent and LLM created successfully. No phone number was purchased.",
       agent_id,
       llm_id,
-      agent_name: `${biz_name} - Receptionist`
+      agent_name: `${biz_name} - Receptionist`,
+      // ✅ NEW: echo back so Zap “Data Out” proves the mapping
+      variables_echo: {
+        business_name: biz_name,
+        website,
+        business_hours,
+        services,
+        extra_info,
+        package_type,
+        addons,
+        time_zone,
+      },
     });
 
   } catch (error) {
