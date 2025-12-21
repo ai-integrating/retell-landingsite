@@ -1,5 +1,6 @@
 const axios = require("axios");
 
+// --- CRITICAL HELPERS (DO NOT REMOVE) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -24,6 +25,7 @@ function pick(obj, keys, fallback = "") {
   return String(fallback);
 }
 
+// --- MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -33,31 +35,21 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
 
-    // 1. Map Variables as Strings (Crucial!)
+    // 1. EXTRACT DATA AS STRINGS (Retell requirement)
     const dynamic_variables = {
       business_name: pick(body, ["business_name"], "New Client"),
       name: pick(body, ["name"], "Lead"),
-      website: pick(body, ["website"], "N/A"),
       extra_info: pick(body, ["extra_info"], "None provided"),
       services: pick(body, ["services"], "AI Support")
     };
 
-    // 2. Identify if this is a live Inbound call request
-    const isRetellInboundRequest = body.event === "call_inbound";
-
-    if (isRetellInboundRequest) {
-      // Return variables in the specific format Retell's Inbound Webhook requires
-      return res.status(200).json({
-        call_inbound: {
-          retell_llm_dynamic_variables: dynamic_variables
-        }
-      });
+    // 2. STOP 504 TIMEOUT: If this is just a Zapier test, reply immediately
+    const isDryRun = pick(body, ["is_test_mode", "Is_Test_mode"], "false").toLowerCase() === "true";
+    if (isDryRun) {
+      return res.status(200).json({ ok: true, message: "Test successful", variables_received: dynamic_variables });
     }
 
-    // 3. For Provisioning (Zapier Trigger)
-    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
-    
-    // Create Agent with shorter timeout to prevent Vercel 504
+    // 3. HANDLE LIVE INBOUND/OUTBOUND
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       { 
@@ -65,20 +57,16 @@ module.exports = async function handler(req, res) {
         response_engine: JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}"),
         metadata: { ...dynamic_variables } 
       },
-      { headers: { Authorization: `Bearer ${RETELL_API_KEY}` }, timeout: 8000 }
+      { headers: { Authorization: `Bearer ${RETELL_API_KEY}` }, timeout: 8000 } // Shortened timeout
     );
-
-    const agent_id = createAgentResp.data?.agent_id;
 
     return res.status(200).json({
       ok: true,
-      agent_id,
-      variables_received: dynamic_variables
+      agent_id: createAgentResp.data?.agent_id,
+      retell_llm_dynamic_variables: dynamic_variables
     });
 
   } catch (error) {
-    // Log the actual error to Vercel dashboard for visibility
-    console.error("CRASH ERROR:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Server Error", details: error.message });
+    return res.status(500).json({ error: "Failed", details: error.message });
   }
 };
