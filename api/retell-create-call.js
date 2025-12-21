@@ -1,6 +1,6 @@
 const axios = require("axios");
 
-// --- HELPERS (DO NOT CHANGE) ---
+// --- HELPERS (Keep these for stability) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -25,7 +25,6 @@ function pick(obj, keys, fallback = "") {
   return fallback;
 }
 
-// --- MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -34,48 +33,57 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY env var" });
+    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
     // 1. DATA EXTRACTION
-    const business_name = pick(body, ["business_name"], "New Client");
-    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
+    const business_name = pick(body, ["business_name", "businessName"], "New Client");
+    const person_name = pick(body, ["name"], "Lead");
+    
+    const dynamic_variables = {
+      business_name: business_name,
+      name: person_name,
+      website: pick(body, ["website"], ""),
+      extra_info: pick(body, ["extra_info"], "No info"),
+      services: pick(body, ["services"], "Receptionist")
+    };
 
-    // 2. CREATE AGENT
+    // 2. CREATE PERSONALIZED AGENT
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
+        agent_name: `${business_name} - Personalized Agent`, // Sets the name in dashboard
         voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
-        response_engine: JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}"),
-        // This is the important part for Inbound Vars
-        inbound_dynamic_variable_webhook_url: "https://your-project.vercel.app/api/retell-inbound-vars"
+        // This injects the variables into the Agent's permanent knowledge
+        retell_llm_dynamic_variables: dynamic_variables, 
+        response_engine: {
+          ...(JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || '{}')),
+          retell_llm_dynamic_variables: dynamic_variables // Double-injection for safety
+        }
       },
-      { 
-        headers: { 
-          Authorization: `Bearer ${RETELL_API_KEY}`, 
-          "Content-Type": "application/json" 
-        }, 
-        timeout: 9000 // Keep under Vercel's 10s limit
-      }
+      { headers, timeout: 10000 }
     );
 
     const agent_id = createAgentResp.data?.agent_id;
 
-    // 3. STOP HERE FOR TEST (Prevents buying numbers or making calls yet)
-    if (isDryRun) {
-      return res.status(200).json({
-        ok: true,
-        message: "SUCCESS: Agent Created.",
-        agent_id: agent_id,
-        received_keys: Object.keys(body)
-      });
-    }
+    // 3. BUY NUMBER (Linked to this new agent)
+    const numberResp = await axios.post(
+      "https://api.retellai.com/create-phone-number",
+      {
+        inbound_agent_id: agent_id,
+        nickname: `${business_name} Main Line`
+      },
+      { headers, timeout: 10000 }
+    );
 
-    // (Code for buying numbers would follow here for live mode)
-    return res.status(200).json({ ok: true, agent_id });
+    return res.status(200).json({
+      ok: true,
+      agent_id: agent_id,
+      agent_name: `${business_name} - Personalized Agent`,
+      phone_number: numberResp.data?.phone_number,
+      variables_injected: dynamic_variables
+    });
 
   } catch (error) {
-    const details = error.response?.data || error.message;
-    console.error("FAILED TO CREATE AGENT:", details);
-    return res.status(500).json({ error: "Failed to provision", details });
+    return res.status(500).json({ error: "Failed", details: error.response?.data || error.message });
   }
 };
