@@ -1,6 +1,5 @@
 const axios = require("axios");
 
-// --- HELPERS (Keep for stability) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -35,47 +34,65 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // 1. DATA EXTRACTION
-    const business_name = pick(body, ["business_name", "businessName"], "New Client");
-    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode", "dry_run"], "false")).toLowerCase() === "true";
+    // 1. EXTRACT PERSONALIZED DATA
+    const business_name = pick(body, ["business_name"], "New Client");
+    const person_name = pick(body, ["name"], "Lead");
+    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
 
     const dynamic_variables = {
       business_name,
-      name: pick(body, ["name"], "Lead"),
+      name: person_name,
+      website: pick(body, ["website"], ""),
       extra_info: pick(body, ["extra_info"], "N/A"),
-      services: pick(body, ["services"], "AI Services")
+      services: pick(body, ["services"], "AI Receptionist")
     };
 
-    // 2. CREATE PERSONALIZED AGENT
+    // 2. STEP 1: CREATE A PERSONALIZED LLM (The Brain)
+    const llmResp = await axios.post(
+      "https://api.retellai.com/create-retell-llm",
+      {
+        general_prompt: `You are a professional AI receptionist for ${business_name}. Your goal is to assist callers using the following context: {{extra_info}}. Current caller is {{name}}.`,
+        begin_message: `Hi there! Thanks for calling ${business_name}. How can I help you today?`,
+        // Required for LLM agents to recognize your Zapier keys
+        retell_llm_dynamic_variables: [
+          { name: "business_name", type: "string" },
+          { name: "name", type: "string" },
+          { name: "extra_info", type: "string" }
+        ],
+        model: "gpt-4.1-mini",
+        start_speaker: "agent"
+      },
+      { headers, timeout: 10000 }
+    );
+    const llm_id = llmResp.data?.llm_id;
+
+    // 3. STEP 2: CREATE THE AGENT (The Body)
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         agent_name: `${business_name} - Personalized Agent`,
         voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
-        // This makes the variables available to be fetched later
-        response_engine: JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}"),
-        metadata: { ...dynamic_variables } 
+        response_engine: {
+          type: "retell-llm",
+          llm_id: llm_id
+        }
       },
       { headers, timeout: 10000 }
     );
     const agent_id = createAgentResp.data?.agent_id;
 
-    // --- STOP HERE IF TEST MODE ---
     if (isDryRun) {
-      return res.status(200).json({
-        ok: true,
-        message: "TEST MODE: Agent created, no number purchased.",
-        agent_id,
-        variables_received: dynamic_variables
-      });
+      return res.status(200).json({ ok: true, test_mode: true, agent_id, llm_id });
     }
 
-    // 3. LIVE PURCHASE (Only runs if isDryRun is false)
+    // 4. STEP 3: BUY NUMBER & LINK WEBHOOK
     const numberResp = await axios.post(
       "https://api.retellai.com/create-phone-number",
       {
         inbound_agent_id: agent_id,
-        nickname: `${business_name} Main Line`
+        nickname: `${business_name} Main Line`,
+        // Point this to your Endpoint B URL
+        inbound_webhook_url: "https://your-project.vercel.app/api/retell-inbound-vars"
       },
       { headers, timeout: 10000 }
     );
@@ -83,8 +100,9 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       agent_id,
+      llm_id,
       phone_number: numberResp.data?.phone_number,
-      status: "Live provisioning complete"
+      variables_injected: dynamic_variables
     });
 
   } catch (error) {
