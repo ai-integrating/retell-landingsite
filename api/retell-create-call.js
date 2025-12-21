@@ -1,6 +1,5 @@
 const axios = require("axios");
 
-// --- STABLE HELPERS ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -18,89 +17,142 @@ async function readJsonBody(req) {
   });
 }
 
-// --- MAIN HANDLER ---
+function pick(obj, keys, fallback = "") {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  }
+  return fallback;
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  
+  if (req.method !== "POST") return res.status(405).json({ error: "Use POST." });
+
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
+    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
 
-    // API Key Guard
-    if (!RETELL_API_KEY) {
-      console.error("CRITICAL: RETELL_API_KEY is missing from Vercel Env Vars");
-      return res.status(500).json({ error: "Server Configuration Error" });
-    }
+    const headers = {
+      Authorization: `Bearer ${RETELL_API_KEY}`,
+      "Content-Type": "application/json",
+    };
 
-    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
+    // ---- Client data ----
+    const biz_name = pick(body, ["business_name", "businessName"], "New Client");
+    const website = pick(body, ["website"], "");
+    const business_hours = pick(body, ["business_hours"], "");
+    const services = pick(body, ["services"], "");
+    const extra_info = pick(body, ["extra_info"], "");
+    const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
-    // 1. DATA EXTRACTION
-    const biz_name = body.business_name || "New Client";
-    const biz_info = body.extra_info || "A professional service provider.";
-    const isDryRun = String(body.is_test_mode).toLowerCase() === "true";
+    const isDryRunRaw = pick(body, ["is_test_mode", "dry_run"], "false");
+    const isDryRun = String(isDryRunRaw).toLowerCase() === "true";
 
-    // 2. CREATE UNIQUE LLM (The Brain)
-    // We hardcode the business name into the prompt so it's permanent
+    // ---- MASTER prompt (behavior) ----
+    // Paste your full universal receptionist rules here (the long one).
+    const MASTER_PROMPT = `
+You are a professional AI receptionist.
+
+STYLE
+- Warm, calm, concise, human.
+- Do not mention you are an AI unless asked.
+- Do not invent facts. If unsure, take a message.
+
+GOAL
+- Help inbound callers quickly: answer basic questions OR take a detailed message.
+- Never sell anything. Never discuss your own packages/pricing.
+- Confirm spelling for names, phone numbers, emails.
+
+INTAKE (when needed)
+- Caller name
+- Best callback number
+- Address/city (if relevant)
+- What they need help with (1–2 sentences)
+- Timeframe/urgency
+- Preferred contact method
+
+CLOSING
+- Summarize what you captured.
+- Tell them what will happen next: someone will call them back.
+`.trim();
+
+    // ---- Business Profile (data) ----
+    // This gets "locked in" per agent at creation time.
+    const BUSINESS_PROFILE = `
+BUSINESS PROFILE (use this as the source of truth)
+- Business Name: ${biz_name}
+- Website: ${website || "Not provided"}
+- Business Hours: ${business_hours || "Not provided"}
+- Services: ${services || "Not provided"}
+- Additional Notes: ${extra_info || "None provided"}
+
+IF ANY FIELD IS "Not provided":
+- politely ask the caller for what you need, or offer to take a message.
+`.trim();
+
+    const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
+
+    // 1) Create LLM (the brain)
     const llmResp = await axios.post(
       "https://api.retellai.com/create-retell-llm",
       {
-        general_prompt: `You are a professional AI receptionist for ${biz_name}. Your background info: ${biz_info}. If you don't know a caller's name, refer to them as 'valued guest'.`,
+        general_prompt: FINAL_PROMPT,
         begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
         model: "gpt-4o-mini",
-        // Using your template ID as the base if needed (Note: Retell typically uses create-llm to spawn a new instance)
       },
-      { headers, timeout: 8000 }
+      { headers, timeout: 15000 }
     );
-    const llm_id = llmResp.data.llm_id;
 
-    // 3. CREATE AGENT (The Body)
+    const llm_id = llmResp.data?.llm_id;
+    if (!llm_id) return res.status(500).json({ error: "No llm_id returned from Retell" });
+
+    // 2) Create agent (the body)
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
-        agent_name: `${biz_name} - Personalized Agent`,
-        voice_id: body.voice_id || process.env.DEFAULT_VOICE_ID,
-        response_engine: { 
-          type: "retell-llm", 
-          llm_id: llm_id // Link to the fresh personalized brain
-        }
+        agent_name: `${biz_name} - Receptionist`,
+        voice_id,
+        response_engine: { type: "retell-llm", llm_id },
+        metadata: {
+          business_name: biz_name,
+          website,
+          business_hours,
+          services,
+          extra_info,
+        },
       },
-      { headers, timeout: 8000 }
+      { headers, timeout: 15000 }
     );
-    
-    const agent_id = agentResp.data.agent_id;
-    // Capture version for number binding
-    const agent_version = agentResp.data.agent_version ?? 0; 
 
-    // 4. STOP IF TEST MODE
+    const agent_id = agentResp.data?.agent_id;
+    const agent_version = agentResp.data?.version ?? 0;
+
     if (isDryRun) {
-      return res.status(200).json({ 
-        ok: true, 
-        agent_id, 
-        llm_id, 
-        message: "SUCCESS: Unique LLM and Agent Created. No number purchased." 
-      });
+      return res.status(200).json({ ok: true, test_mode: true, agent_id, agent_version, llm_id });
     }
 
-    // 5. LIVE PURCHASE
+    // 3) Buy phone number (inbound line)
     const numberResp = await axios.post(
       "https://api.retellai.com/create-phone-number",
       {
         inbound_agent_id: agent_id,
-        inbound_agent_version: agent_version, // Ensures number binds correctly
-        nickname: `${biz_name} Main Line`
+        inbound_agent_version: agent_version,
+        nickname: `${biz_name} Main Line`,
       },
-      { headers, timeout: 8000 }
+      { headers, timeout: 15000 }
     );
 
     return res.status(200).json({
       ok: true,
       agent_id,
-      phone_number: numberResp.data.phone_number
+      agent_version,
+      llm_id,
+      phone_number: numberResp.data?.phone_number,
+      phone_number_pretty: numberResp.data?.phone_number_pretty || numberResp.data?.phone_number,
     });
-
   } catch (error) {
-    console.error("PROVISIONING FAILED:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Provisioning Failed", details: error.message });
+    return res.status(500).json({ error: "Provisioning Failed", details: error?.response?.data || error?.message });
   }
 };
