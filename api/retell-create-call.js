@@ -1,6 +1,6 @@
 const axios = require("axios");
 
-// --- CRITICAL HELPERS (DO NOT REMOVE) ---
+// --- HELPERS (DO NOT CHANGE) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -20,9 +20,9 @@ async function readJsonBody(req) {
 
 function pick(obj, keys, fallback = "") {
   for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return String(obj[k]);
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
   }
-  return String(fallback);
+  return fallback;
 }
 
 // --- MAIN HANDLER ---
@@ -34,39 +34,48 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
+    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY env var" });
 
-    // 1. EXTRACT DATA AS STRINGS (Retell requirement)
-    const dynamic_variables = {
-      business_name: pick(body, ["business_name"], "New Client"),
-      name: pick(body, ["name"], "Lead"),
-      extra_info: pick(body, ["extra_info"], "None provided"),
-      services: pick(body, ["services"], "AI Support")
-    };
+    // 1. DATA EXTRACTION
+    const business_name = pick(body, ["business_name"], "New Client");
+    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
 
-    // 2. STOP 504 TIMEOUT: If this is just a Zapier test, reply immediately
-    const isDryRun = pick(body, ["is_test_mode", "Is_Test_mode"], "false").toLowerCase() === "true";
-    if (isDryRun) {
-      return res.status(200).json({ ok: true, message: "Test successful", variables_received: dynamic_variables });
-    }
-
-    // 3. HANDLE LIVE INBOUND/OUTBOUND
+    // 2. CREATE AGENT
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
-      { 
+      {
         voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
         response_engine: JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}"),
-        metadata: { ...dynamic_variables } 
+        // This is the important part for Inbound Vars
+        inbound_dynamic_variable_webhook_url: "https://your-project.vercel.app/api/retell-inbound-vars"
       },
-      { headers: { Authorization: `Bearer ${RETELL_API_KEY}` }, timeout: 8000 } // Shortened timeout
+      { 
+        headers: { 
+          Authorization: `Bearer ${RETELL_API_KEY}`, 
+          "Content-Type": "application/json" 
+        }, 
+        timeout: 9000 // Keep under Vercel's 10s limit
+      }
     );
 
-    return res.status(200).json({
-      ok: true,
-      agent_id: createAgentResp.data?.agent_id,
-      retell_llm_dynamic_variables: dynamic_variables
-    });
+    const agent_id = createAgentResp.data?.agent_id;
+
+    // 3. STOP HERE FOR TEST (Prevents buying numbers or making calls yet)
+    if (isDryRun) {
+      return res.status(200).json({
+        ok: true,
+        message: "SUCCESS: Agent Created.",
+        agent_id: agent_id,
+        received_keys: Object.keys(body)
+      });
+    }
+
+    // (Code for buying numbers would follow here for live mode)
+    return res.status(200).json({ ok: true, agent_id });
 
   } catch (error) {
-    return res.status(500).json({ error: "Failed", details: error.message });
+    const details = error.response?.data || error.message;
+    console.error("FAILED TO CREATE AGENT:", details);
+    return res.status(500).json({ error: "Failed to provision", details });
   }
 };
