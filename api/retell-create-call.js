@@ -1,6 +1,5 @@
 const axios = require("axios");
 
-// --- HELPER FUNCTIONS (DO NOT REMOVE) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -9,9 +8,6 @@ function setCors(res) {
 
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
-  if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
-  }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
@@ -21,14 +17,13 @@ async function readJsonBody(req) {
   });
 }
 
-function pick(obj, keys, fallback = undefined) {
+function pick(obj, keys, fallback = "") {
   for (const k of keys) {
     if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
   }
   return fallback;
 }
 
-// --- MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -37,63 +32,73 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
+    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
 
-    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY env var." });
+    console.log("RECEIVED KEYS:", Object.keys(body));
 
-    // 1. EXTRACT DATA FROM ZAPIER
     const business_name = pick(body, ["business_name", "businessName"], "New Client");
-    const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
-    
-    // Safety check for your Zapier key "Is_Test_mode"
-    const bodyTest = pick(body, ["Is_Test_mode", "is test mode", "dry_run"], false);
-    const isDryRun = bodyTest === true || bodyTest === "true" || bodyTest === "yes";
+    const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
+    const to_number = pick(body, ["to_number", "phone_number", "lead_phone"], "");
 
-    // Bundle variables for Retell
+    const isDryRunRaw = pick(body, ["is_test_mode", "Is_Test_mode", "is test mode", "dry_run"], "false");
+    const isDryRun = String(isDryRunRaw).toLowerCase() === "true";
+
     const dynamic_variables = {
       business_name,
       name: pick(body, ["name"], "Lead"),
       website: pick(body, ["website"], ""),
-      extra_info: pick(body, ["extra_info", "Areas And Business Information To Answer Calls More Accurately"], ""),
-      business_hours: pick(body, ["business_hours"], "Not Specified"),
-      services: pick(body, ["services"], "Not Specified")
+      extra_info: pick(body, ["extra_info"], "No extra info provided"),
+      business_hours: pick(body, ["business_hours"], "Mon-Fri 9-5"),
+      services: pick(body, ["services"], "AI Receptionist")
     };
 
-    // 2. CREATE RETELL AGENT
+    let response_engine = {};
+    try {
+      response_engine = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}");
+    } catch {
+      return res.status(500).json({ error: "DEFAULT_RESPONSE_ENGINE_JSON invalid JSON" });
+    }
+
+    const headers = {
+      Authorization: `Bearer ${RETELL_API_KEY}`,
+      "Content-Type": "application/json"
+    };
+
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
-      {
-        voice_id,
-        // Injected here so variables are present during tests
-        retell_llm_dynamic_variables: dynamic_variables, 
-        response_engine: {
-          ...(JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || '{}')),
-          retell_llm_dynamic_variables: dynamic_variables 
-        }
-      },
-      {
-        headers: { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" },
-        timeout: 15000,
-      }
+      { voice_id, response_engine, metadata: { business_name, ...dynamic_variables } },
+      { headers, timeout: 10000 }
     );
 
     const agent_id = createAgentResp.data?.agent_id;
 
-    // 3. TEST MODE RETURN (Stops the 504 Timeout)
     if (isDryRun) {
       return res.status(200).json({
         ok: true,
-        is_test_mode: true,
-        message: "SUCCESS: Agent created with variables.",
+        test_mode: true,
         agent_id,
-        variables_sent: dynamic_variables
+        variables_echo: dynamic_variables
       });
     }
 
-    // 4. REAL PURCHASE (Only happens if Is_Test_mode is NOT true)
-    // ... logic for create-phone-number would follow here ...
+    if (to_number) {
+      const callResp = await axios.post(
+        "https://api.retellai.com/create-call",
+        { agent_id, to_number, retell_llm_dynamic_variables: dynamic_variables },
+        { headers, timeout: 10000 }
+      );
+
+      return res.status(200).json({
+        ok: true,
+        agent_id,
+        call_id: callResp.data?.call_id,
+        variables_echo: dynamic_variables
+      });
+    }
+
+    return res.status(200).json({ ok: true, agent_id, message: "No phone number provided for call." });
 
   } catch (error) {
-    const details = error?.response?.data || error?.message || "Unknown error";
-    return res.status(500).json({ error: "Failed to provision", details });
+    return res.status(500).json({ error: "Failed", details: error.response?.data || error.message });
   }
 };
