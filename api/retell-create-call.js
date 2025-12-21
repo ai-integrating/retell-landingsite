@@ -45,10 +45,13 @@ module.exports = async function handler(req, res) {
 
     // ---- Client data extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
-    const website = pick(body, ["website"], "");
-    const business_hours = pick(body, ["business_hours"], "");
-    const services = pick(body, ["services"], "");
-    const extra_info = pick(body, ["extra_info"], "");
+const website = pick(body, ["website", "Website", "site_url", "Site"], "");
+const business_hours = pick(body, ["business_hours", "Business Hours", "hours", "business hours"], "");
+const services = pick(body, ["services", "Services", "service_list", "business_services", "Primary Type Of Business"], "");
+const extra_info = pick(body, ["extra_info", "Extra Info", "notes", "compiled_notes", "additional_notes"], "");
+
+const time_zone = pick(body, ["time_zone", "timezone", "timeStamp", "time_stamp", "time zone"], "");
+
 
     // ✅ NEW: package/add-ons/timezone fields (clean + flexible)
     const package_type = pick(body, ["package_type", "packageType"], "");
