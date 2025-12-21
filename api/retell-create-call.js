@@ -30,7 +30,6 @@ async function readJsonBody(req) {
   });
 }
 
-// Helper: safe JSON
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
@@ -46,16 +45,7 @@ module.exports = async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      message:
-        "Provision endpoint is live. POST JSON to create a new Retell agent + phone number bound for inbound calls.",
-      expects: {
-        business_name: "string (recommended)",
-        area_code: "string (optional) e.g. '617'",
-        voice_id: "string (optional; can be set in env)",
-        response_engine: "object (optional; can be set in env)",
-        dynamic_variables: "object (optional)",
-        metadata: "object (optional)",
-      },
+      message: "Provision endpoint is live.",
     });
   }
 
@@ -73,57 +63,40 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // --- LOOKING FOR YOUR KEY "is test mode" ---
+    const testFlag = pick(body, ["is test mode", "is_test_mode", "dry_run", "dryRun"], false);
+    const isDryRun = testFlag === true || testFlag === "true" || testFlag === "yes";
+
     const business_name = pick(body, ["business_name", "businessName"], "New Client");
-
-    // Required for create-agent: voice_id + response_engine
     const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
-
+    
     const response_engine_from_body = pick(body, ["response_engine", "responseEngine"], null);
-
     let response_engine_from_env = null;
     if (process.env.DEFAULT_RESPONSE_ENGINE_JSON) {
       try {
         response_engine_from_env = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
       } catch (e) {
-        return res.status(500).json({
-          error: "DEFAULT_RESPONSE_ENGINE_JSON is not valid JSON in Vercel env vars.",
-        });
+        return res.status(500).json({ error: "Invalid DEFAULT_RESPONSE_ENGINE_JSON" });
       }
     }
 
     const response_engine = response_engine_from_body || response_engine_from_env;
 
     if (!voice_id || !response_engine) {
-      return res.status(400).json({
-        error:
-          "Missing voice_id or response_engine. Provide in POST body OR set DEFAULT_VOICE_ID and DEFAULT_RESPONSE_ENGINE_JSON env vars.",
-        hint:
-          'DEFAULT_RESPONSE_ENGINE_JSON example: {"type":"retell-llm","llm_id":"...","version":0}',
-      });
+      return res.status(400).json({ error: "Missing voice_id or response_engine." });
     }
 
-    const area_code = pick(
-      body,
-      ["area_code", "areaCode"],
-      process.env.DEFAULT_AREA_CODE || null
-    );
-
-    const dynamic_variables =
-      pick(body, ["retell_llm_dynamic_variables", "dynamic_variables", "dynamicVariables"], {}) ||
-      {};
-
+    const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
+    const dynamic_variables = pick(body, ["retell_llm_dynamic_variables", "dynamic_variables"], {}) || {};
     const metadata = pick(body, ["metadata"], {}) || {};
 
-    // 1) Create agent
+    // 1) Create agent (This is usually free/cheap, so we let it run to give you a real agent_id)
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         voice_id,
         response_engine,
-        metadata: {
-          business_name,
-          ...metadata,
-        },
+        metadata: { business_name, ...metadata },
       },
       {
         headers: {
@@ -138,13 +111,26 @@ module.exports = async function handler(req, res) {
     const agent_version = createAgentResp.data?.version;
 
     if (!agent_id) {
-      return res.status(500).json({
-        error: "Retell did not return agent_id from create-agent.",
-        raw: createAgentResp.data || null,
+      return res.status(500).json({ error: "Retell did not return agent_id." });
+    }
+
+    // --- SAFETY CHECK: IF TEST MODE IS ACTIVE, STOP HERE ---
+    if (isDryRun) {
+      return res.status(200).json({
+        ok: true,
+        is_test_mode: true,
+        message: "SUCCESS (TEST MODE): Agent created, but no phone number was purchased.",
+        business_name,
+        agent_id,
+        agent_version: agent_version ?? 0,
+        phone_number: "+15550000000",
+        phone_number_pretty: "(555) 000-0000",
+        inbound_agent_id: agent_id,
+        dynamic_variables,
       });
     }
 
-    // 2) Buy/provision phone number bound to inbound agent
+    // 2) Buy/provision phone number (REAL ACTION - ONLY IF NOT TEST MODE)
     const createNumberBody = {
       inbound_agent_id: agent_id,
       inbound_agent_version: agent_version ?? 0,
@@ -167,13 +153,6 @@ module.exports = async function handler(req, res) {
     const phone_number = createNumberResp.data?.phone_number;
     const phone_number_pretty = createNumberResp.data?.phone_number_pretty;
 
-    if (!phone_number) {
-      return res.status(500).json({
-        error: "Retell did not return phone_number from create-phone-number.",
-        raw: createNumberResp.data || null,
-      });
-    }
-
     return res.status(200).json({
       ok: true,
       business_name,
@@ -184,13 +163,9 @@ module.exports = async function handler(req, res) {
       inbound_agent_id: agent_id,
       dynamic_variables,
     });
+
   } catch (error) {
-    const status = error?.response?.status || 500;
     const details = error?.response?.data || error?.message || "Unknown error";
-    console.error("provision-receptionist error:", details);
-    return res.status(status).json({
-      error: "Failed to provision receptionist line",
-      details,
-    });
+    return res.status(500).json({ error: "Failed to provision", details });
   }
 };
