@@ -45,34 +45,43 @@ module.exports = async function handler(req, res) {
     const business_name = pick(body, ["business_name", "businessName"], "New Client");
     const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
     
-    // Safety check for the specific key you used in Zapier
+    // Safety check for your Zapier key "is test mode"
     const bodyTest = pick(body, ["is test mode", "is_test_mode", "dry_run"], false);
     const isDryRun = bodyTest === true || bodyTest === "true" || bodyTest === "yes" || process.env.IS_TEST_MODE === "true";
 
     const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
-    const dynamic_variables = pick(body, ["retell_llm_dynamic_variables", "dynamic_variables"], {}) || {};
     const metadata = pick(body, ["metadata"], {}) || {};
+
+    // Gather all dynamic variables for Retell
+    const dynamic_variables = {
+      business_name,
+      name: pick(body, ["name"], "Lead"),
+      website: pick(body, ["website"], ""),
+      extra_info: pick(body, ["extra_info"], ""),
+      // Also include anything sent in the nested block just in case
+      ...(pick(body, ["retell_llm_dynamic_variables", "dynamic_variables"], {}) || {})
+    };
 
     // Setup Response Engine
     let response_engine = pick(body, ["response_engine", "responseEngine"], null);
     if (!response_engine && process.env.DEFAULT_RESPONSE_ENGINE_JSON) {
-      try {
-        response_engine = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
-      } catch (e) {
-        return res.status(500).json({ error: "DEFAULT_RESPONSE_ENGINE_JSON is invalid." });
-      }
+      response_engine = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
     }
 
     if (!voice_id || !response_engine) {
       return res.status(400).json({ error: "voice_id or response_engine not found." });
     }
 
-    // --- 2. CREATE RETELL AGENT ---
+    // --- 2. CREATE RETELL AGENT (WITH VARIABLES INJECTED) ---
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         voice_id,
-        response_engine,
+        response_engine: {
+          ...response_engine,
+          // DATA IS INJECTED HERE SO TEST MODE WORKS
+          retell_llm_dynamic_variables: dynamic_variables 
+        },
         metadata: { business_name, ...metadata },
       },
       {
@@ -84,21 +93,20 @@ module.exports = async function handler(req, res) {
     const agent_id = createAgentResp.data?.agent_id;
     const agent_version = createAgentResp.data?.version;
 
-    // --- 3. THE SAFETY CHECK ---
+    // --- 3. THE SAFETY CHECK (TEST MODE STOP) ---
     if (isDryRun) {
       return res.status(200).json({
         ok: true,
         is_test_mode: true,
-        message: "SUCCESS (TEST MODE): No number purchased.",
+        message: "SUCCESS (TEST MODE): Agent created with variables. No number purchased.",
         business_name,
         agent_id,
         phone_number: "+15550000000",
-        phone_number_pretty: "(555) 000-0000",
-        dynamic_variables
+        variables_sent: dynamic_variables // Verification for Zapier
       });
     }
 
-    // --- 4. REAL PURCHASE ---
+    // --- 4. REAL PURCHASE (ONLY IF NOT TEST MODE) ---
     const createNumberResp = await axios.post(
       "https://api.retellai.com/create-phone-number",
       {
@@ -118,7 +126,7 @@ module.exports = async function handler(req, res) {
       business_name,
       agent_id,
       phone_number: createNumberResp.data?.phone_number,
-      phone_number_pretty: createNumberResp.data?.phone_number_pretty || createNumberResp.data?.phone_number
+      variables_sent: dynamic_variables
     });
 
   } catch (error) {
