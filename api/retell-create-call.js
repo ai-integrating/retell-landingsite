@@ -10,22 +10,13 @@ function setCors(res) {
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(req.body); } catch { return {}; }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
-      if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch {
-        resolve({});
-      }
+      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
     });
   });
 }
@@ -39,42 +30,44 @@ function pick(obj, keys, fallback = undefined) {
 
 module.exports = async function handler(req, res) {
   setCors(res);
-
   if (req.method === "OPTIONS") return res.status(200).end();
-
-  if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      message: "Provision endpoint is live.",
-    });
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed. Use POST." });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Use POST." });
 
   try {
     const body = await readJsonBody(req);
-
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
+
     if (!RETELL_API_KEY) {
-      return res.status(500).json({
-        error: "Missing RETELL_API_KEY in Vercel environment variables.",
-      });
+      return res.status(500).json({ error: "Missing RETELL_API_KEY env var." });
     }
 
-    // --- LOOKING FOR YOUR KEY "is test mode" ---
-  // --- TEST MODE (from env OR body) ---
-const envTest = (process.env.IS_TEST_MODE || "").toLowerCase();
-const envIsTestMode = envTest === "true" || envTest === "1" || envTest === "yes";
+    // --- 1. EXTRACT DATA FROM ZAPIER ---
+    const business_name = pick(body, ["business_name", "businessName"], "New Client");
+    const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
+    
+    // Safety check for the specific key you used in Zapier
+    const bodyTest = pick(body, ["is test mode", "is_test_mode", "dry_run"], false);
+    const isDryRun = bodyTest === true || bodyTest === "true" || bodyTest === "yes" || process.env.IS_TEST_MODE === "true";
 
-const bodyTest = pick(body, ["is_test_mode", "dry_run", "dryRun"], false);
-const bodyIsTestMode = bodyTest === true || bodyTest === "true" || bodyTest === "1" || bodyTest === "yes";
+    const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
+    const dynamic_variables = pick(body, ["retell_llm_dynamic_variables", "dynamic_variables"], {}) || {};
+    const metadata = pick(body, ["metadata"], {}) || {};
 
-// final flag
-const isDryRun = envIsTestMode || bodyIsTestMode;
+    // Setup Response Engine
+    let response_engine = pick(body, ["response_engine", "responseEngine"], null);
+    if (!response_engine && process.env.DEFAULT_RESPONSE_ENGINE_JSON) {
+      try {
+        response_engine = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
+      } catch (e) {
+        return res.status(500).json({ error: "DEFAULT_RESPONSE_ENGINE_JSON is invalid." });
+      }
+    }
 
-    // 1) Create agent (This is usually free/cheap, so we let it run to give you a real agent_id)
+    if (!voice_id || !response_engine) {
+      return res.status(400).json({ error: "voice_id or response_engine not found." });
+    }
+
+    // --- 2. CREATE RETELL AGENT ---
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
@@ -83,10 +76,7 @@ const isDryRun = envIsTestMode || bodyIsTestMode;
         metadata: { business_name, ...metadata },
       },
       {
-        headers: {
-          Authorization: `Bearer ${RETELL_API_KEY}`,
-          "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" },
         timeout: 30000,
       }
     );
@@ -94,58 +84,41 @@ const isDryRun = envIsTestMode || bodyIsTestMode;
     const agent_id = createAgentResp.data?.agent_id;
     const agent_version = createAgentResp.data?.version;
 
-    if (!agent_id) {
-      return res.status(500).json({ error: "Retell did not return agent_id." });
-    }
-
-    // --- SAFETY CHECK: IF TEST MODE IS ACTIVE, STOP HERE ---
+    // --- 3. THE SAFETY CHECK ---
     if (isDryRun) {
       return res.status(200).json({
         ok: true,
         is_test_mode: true,
-        message: "SUCCESS (TEST MODE): Agent created, but no phone number was purchased.",
+        message: "SUCCESS (TEST MODE): No number purchased.",
         business_name,
         agent_id,
-        agent_version: agent_version ?? 0,
         phone_number: "+15550000000",
         phone_number_pretty: "(555) 000-0000",
-        inbound_agent_id: agent_id,
-        dynamic_variables,
+        dynamic_variables
       });
     }
 
-    // 2) Buy/provision phone number (REAL ACTION - ONLY IF NOT TEST MODE)
-    const createNumberBody = {
-      inbound_agent_id: agent_id,
-      inbound_agent_version: agent_version ?? 0,
-      ...(area_code ? { area_code: Number(area_code) } : {}),
-      nickname: `${business_name} Receptionist`,
-    };
-
+    // --- 4. REAL PURCHASE ---
     const createNumberResp = await axios.post(
       "https://api.retellai.com/create-phone-number",
-      createNumberBody,
       {
-        headers: {
-          Authorization: `Bearer ${RETELL_API_KEY}`,
-          "Content-Type": "application/json",
-        },
+        inbound_agent_id: agent_id,
+        inbound_agent_version: agent_version ?? 0,
+        ...(area_code ? { area_code: Number(area_code) } : {}),
+        nickname: `${business_name} Receptionist`,
+      },
+      {
+        headers: { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" },
         timeout: 30000,
       }
     );
-
-    const phone_number = createNumberResp.data?.phone_number;
-    const phone_number_pretty = createNumberResp.data?.phone_number_pretty;
 
     return res.status(200).json({
       ok: true,
       business_name,
       agent_id,
-      agent_version: agent_version ?? 0,
-      phone_number,
-      phone_number_pretty: phone_number_pretty || phone_number,
-      inbound_agent_id: agent_id,
-      dynamic_variables,
+      phone_number: createNumberResp.data?.phone_number,
+      phone_number_pretty: createNumberResp.data?.phone_number_pretty || createNumberResp.data?.phone_number
     });
 
   } catch (error) {
