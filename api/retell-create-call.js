@@ -1,6 +1,5 @@
 const axios = require("axios");
 
-// --- 1. HELPERS (REQUIRED) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -20,107 +19,78 @@ async function readJsonBody(req) {
 
 function pick(obj, keys, fallback = "") {
   for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return String(obj[k]);
   }
-  return fallback;
+  return String(fallback);
 }
 
-// --- 2. MAIN PROVISIONING HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Use POST." });
 
   try {
     const body = await readJsonBody(req);
-    const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
+    console.log("INCOMING DATA FROM ZAPIER:", JSON.stringify(body)); // See this in Vercel Logs
 
+    const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // ---- A. Client Data Extraction ----
+    // 1. DATA EXTRACTION
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
-    const website = pick(body, ["website"], "");
-    const business_hours = pick(body, ["business_hours"], "");
-    const services = pick(body, ["services"], "");
-    const extra_info = pick(body, ["extra_info"], "");
-    const package_type = pick(body, ["package_type", "package"], "Receptionist");
-    const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
-    const isDryRun = String(pick(body, ["is_test_mode", "dry_run"], "false")).toLowerCase() === "true";
+    const website = pick(body, ["website"], "Not provided");
+    const hours = pick(body, ["business_hours"], "Not provided");
+    const services = pick(body, ["services"], "Not provided");
+    const extra = pick(body, ["extra_info"], "None");
+    const package_type = pick(body, ["package_type"], "Receptionist");
+    const isDryRun = pick(body, ["is_test_mode"], "false").toLowerCase() === "true";
 
-    // ---- B. Package-Specific Brain Logic ----
-    let package_instructions = "";
-    if (package_type === "Full Staff") {
-        package_instructions = `
-ROLE: FULL STAFF AI
-- You have full authority to schedule appointments.
-- You should actively collect lead details and push for a booking.
-- Act as a senior team member who knows the business inside out.`;
-    } else {
-        package_instructions = `
-ROLE: BASIC RECEPTIONIST
-- Your primary goal is to take messages and answer basic questions.
-- Do NOT schedule appointments; tell the caller a manager will contact them.
-- Keep interactions professional but brief.`;
-    }
+    // 2. BUILD THE FINAL PROMPT
+    const FINAL_PROMPT = `
+You are a professional AI receptionist for ${biz_name}.
+BUSINESS PROFILE:
+- Website: ${website}
+- Hours: ${hours}
+- Services: ${services}
+- Extra Info: ${extra}
 
-    // ---- C. Master Prompt (Universal Rules) ----
-    const MASTER_PROMPT = `
-You are a professional AI receptionist.
-STYLE: Warm, calm, concise, human. Do not mention you are an AI.
-GOAL: Help inbound callers quickly. Confirm spelling for names and numbers.
-INTAKE: Caller name, callback number, and what they need help with.
-CLOSING: Summarize what you captured and tell them someone will call back.`.trim();
+GOAL: ${package_type === 'full_staff' ? 'Handle full intake and scheduling.' : 'Take a message only.'}
+`.trim();
 
-    // ---- D. Business Profile (Locked-in Data) ----
-    const BUSINESS_PROFILE = `
-BUSINESS PROFILE (Source of Truth)
-- Business Name: ${biz_name}
-- Website: ${website || "Not provided"}
-- Business Hours: ${business_hours || "Not provided"}
-- Services: ${services || "Not provided"}
-- Additional Notes: ${extra_info || "None provided"}`.trim();
-
-    const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}\n\n${package_instructions}`;
-
-    // ---- E. Create LLM (The Brain) ----
+    // 3. CREATE LLM (The Brain)
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
-        general_prompt: FINAL_PROMPT,
-        begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
-        model: "gpt-4o-mini",
-    }, { headers, timeout: 15000 });
+      general_prompt: FINAL_PROMPT,
+      begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you?`,
+      model: "gpt-4o-mini"
+    }, { headers });
 
-    const llm_id = llmResp.data?.llm_id;
+    const llm_id = llmResp.data.llm_id;
 
-    // ---- F. Create Agent (The Body) ----
+    // 4. CREATE AGENT (The Body)
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-        agent_name: `${biz_name} - ${package_type}`,
-        voice_id,
-        response_engine: { type: "retell-llm", llm_id },
-    }, { headers, timeout: 15000 });
+      agent_name: `${biz_name} - ${package_type}`, // This names the agent in dashboard
+      voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
+      response_engine: { type: "retell-llm", llm_id: llm_id }
+    }, { headers });
 
-    const agent_id = agentResp.data?.agent_id;
-    const agent_version = agentResp.data?.version ?? 0;
+    const agent_id = agentResp.data.agent_id;
+    const agent_version = agentResp.data.agent_version ?? 0;
 
-    // ---- G. Safety Check ----
+    // 5. SAFETY CHECK
     if (isDryRun) {
-      return res.status(200).json({ ok: true, test_mode: true, agent_id, llm_id });
+      return res.status(200).json({ ok: true, agent_id, message: "TEST MODE: No number bought." });
     }
 
-    // ---- H. Buy Number ----
+    // 6. BUY NUMBER
     const numberResp = await axios.post("https://api.retellai.com/create-phone-number", {
-        inbound_agent_id: agent_id,
-        inbound_agent_version: agent_version,
-        nickname: `${biz_name} Main Line`,
-    }, { headers, timeout: 15000 });
+      inbound_agent_id: agent_id,
+      inbound_agent_version: agent_version,
+      nickname: `${biz_name} Line`
+    }, { headers });
 
-    return res.status(200).json({
-      ok: true,
-      agent_id,
-      phone_number: numberResp.data?.phone_number,
-      phone_number_pretty: numberResp.data?.phone_number_pretty || numberResp.data?.phone_number,
-    });
+    return res.status(200).json({ ok: true, agent_id, phone_number: numberResp.data.phone_number });
+
   } catch (error) {
-    return res.status(500).json({ error: "Provisioning Failed", details: error?.response?.data || error?.message });
+    console.error("ERROR DETAILS:", error.response?.data || error.message);
+    return res.status(500).json({ error: "Failed", details: error.message });
   }
 };
