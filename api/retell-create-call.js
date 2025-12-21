@@ -1,5 +1,6 @@
 const axios = require("axios");
 
+// --- HELPERS (Keep these exactly as they are) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -24,6 +25,7 @@ function pick(obj, keys, fallback = "") {
   return fallback;
 }
 
+// --- MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -32,71 +34,70 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
+    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    console.log("RECEIVED KEYS:", Object.keys(body));
-
-    const business_name = pick(body, ["business_name", "businessName"], "New Client");
-    const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
+    // 1. CAPTURE CONTROL FLAGS
+    const call_mode = String(pick(body, ["call_mode"], "inbound")).toLowerCase(); // "inbound" or "outbound"
+    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
     const to_number = pick(body, ["to_number", "phone_number", "lead_phone"], "");
 
-    const isDryRunRaw = pick(body, ["is_test_mode", "Is_Test_mode", "is test mode", "dry_run"], "false");
-    const isDryRun = String(isDryRunRaw).toLowerCase() === "true";
-
+    // 2. DATA MAPPING
+    const business_name = pick(body, ["business_name"], "New Client");
     const dynamic_variables = {
       business_name,
       name: pick(body, ["name"], "Lead"),
-      website: pick(body, ["website"], ""),
-      extra_info: pick(body, ["extra_info"], "No extra info provided"),
-      business_hours: pick(body, ["business_hours"], "Mon-Fri 9-5"),
-      services: pick(body, ["services"], "AI Receptionist")
+      extra_info: pick(body, ["extra_info"], "N/A"),
+      services: pick(body, ["services"], "AI Services")
     };
 
-    let response_engine = {};
-    try {
-      response_engine = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}");
-    } catch {
-      return res.status(500).json({ error: "DEFAULT_RESPONSE_ENGINE_JSON invalid JSON" });
-    }
-
-    const headers = {
-      Authorization: `Bearer ${RETELL_API_KEY}`,
-      "Content-Type": "application/json"
-    };
-
+    // 3. ALWAYS CREATE AGENT
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
-      { voice_id, response_engine, metadata: { business_name, ...dynamic_variables } },
+      {
+        voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
+        response_engine: JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON || "{}"),
+        metadata: { business_name, ...dynamic_variables }
+      },
       { headers, timeout: 10000 }
     );
-
     const agent_id = createAgentResp.data?.agent_id;
 
     if (isDryRun) {
-      return res.status(200).json({
-        ok: true,
-        test_mode: true,
-        agent_id,
-        variables_echo: dynamic_variables
-      });
+      return res.status(200).json({ ok: true, test_mode: true, agent_id, variables: dynamic_variables });
     }
 
-    if (to_number) {
+    // 4. ALWAYS PROVISION INBOUND NUMBER
+    const numberResp = await axios.post(
+      "https://api.retellai.com/create-phone-number",
+      {
+        inbound_agent_id: agent_id,
+        nickname: `${business_name} Main Line`
+      },
+      { headers, timeout: 10000 }
+    );
+
+    // 5. CONDITIONALLY TRIGGER OUTBOUND CALL
+    let outbound_call = null;
+    if (call_mode === "outbound" && to_number) {
       const callResp = await axios.post(
         "https://api.retellai.com/create-call",
-        { agent_id, to_number, retell_llm_dynamic_variables: dynamic_variables },
+        {
+          agent_id,
+          to_number,
+          retell_llm_dynamic_variables: dynamic_variables
+        },
         { headers, timeout: 10000 }
       );
-
-      return res.status(200).json({
-        ok: true,
-        agent_id,
-        call_id: callResp.data?.call_id,
-        variables_echo: dynamic_variables
-      });
+      outbound_call = callResp.data;
     }
 
-    return res.status(200).json({ ok: true, agent_id, message: "No phone number provided for call." });
+    return res.status(200).json({
+      ok: true,
+      call_mode,
+      agent_id,
+      inbound_number: numberResp.data?.phone_number,
+      outbound_call_id: outbound_call?.call_id || "none"
+    });
 
   } catch (error) {
     return res.status(500).json({ error: "Failed", details: error.response?.data || error.message });
