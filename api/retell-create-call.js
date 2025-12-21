@@ -64,31 +64,15 @@ module.exports = async function handler(req, res) {
     }
 
     // --- LOOKING FOR YOUR KEY "is test mode" ---
-    const testFlag = pick(body, ["is test mode", "is_test_mode", "dry_run", "dryRun"], false);
-    const isDryRun = testFlag === true || testFlag === "true" || testFlag === "yes";
+  // --- TEST MODE (from env OR body) ---
+const envTest = (process.env.IS_TEST_MODE || "").toLowerCase();
+const envIsTestMode = envTest === "true" || envTest === "1" || envTest === "yes";
 
-    const business_name = pick(body, ["business_name", "businessName"], "New Client");
-    const voice_id = pick(body, ["voice_id", "voiceId"], null) || process.env.DEFAULT_VOICE_ID;
-    
-    const response_engine_from_body = pick(body, ["response_engine", "responseEngine"], null);
-    let response_engine_from_env = null;
-    if (process.env.DEFAULT_RESPONSE_ENGINE_JSON) {
-      try {
-        response_engine_from_env = JSON.parse(process.env.DEFAULT_RESPONSE_ENGINE_JSON);
-      } catch (e) {
-        return res.status(500).json({ error: "Invalid DEFAULT_RESPONSE_ENGINE_JSON" });
-      }
-    }
+const bodyTest = pick(body, ["is_test_mode", "dry_run", "dryRun"], false);
+const bodyIsTestMode = bodyTest === true || bodyTest === "true" || bodyTest === "1" || bodyTest === "yes";
 
-    const response_engine = response_engine_from_body || response_engine_from_env;
-
-    if (!voice_id || !response_engine) {
-      return res.status(400).json({ error: "Missing voice_id or response_engine." });
-    }
-
-    const area_code = pick(body, ["area_code", "areaCode"], process.env.DEFAULT_AREA_CODE || null);
-    const dynamic_variables = pick(body, ["retell_llm_dynamic_variables", "dynamic_variables"], {}) || {};
-    const metadata = pick(body, ["metadata"], {}) || {};
+// final flag
+const isDryRun = envIsTestMode || bodyIsTestMode;
 
     // 1) Create agent (This is usually free/cheap, so we let it run to give you a real agent_id)
     const createAgentResp = await axios.post(
