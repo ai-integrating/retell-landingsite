@@ -1,5 +1,6 @@
 const axios = require("axios");
 
+// --- 1. HELPERS (REQUIRED) ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -24,6 +25,7 @@ function pick(obj, keys, fallback = "") {
   return fallback;
 }
 
+// --- 2. MAIN PROVISIONING HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -34,121 +36,87 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
 
-    const headers = {
-      Authorization: `Bearer ${RETELL_API_KEY}`,
-      "Content-Type": "application/json",
-    };
+    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // ---- Client data ----
+    // ---- A. Client Data Extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
     const website = pick(body, ["website"], "");
     const business_hours = pick(body, ["business_hours"], "");
     const services = pick(body, ["services"], "");
     const extra_info = pick(body, ["extra_info"], "");
+    const package_type = pick(body, ["package_type", "package"], "Receptionist");
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
+    const isDryRun = String(pick(body, ["is_test_mode", "dry_run"], "false")).toLowerCase() === "true";
 
-    const isDryRunRaw = pick(body, ["is_test_mode", "dry_run"], "false");
-    const isDryRun = String(isDryRunRaw).toLowerCase() === "true";
+    // ---- B. Package-Specific Brain Logic ----
+    let package_instructions = "";
+    if (package_type === "Full Staff") {
+        package_instructions = `
+ROLE: FULL STAFF AI
+- You have full authority to schedule appointments.
+- You should actively collect lead details and push for a booking.
+- Act as a senior team member who knows the business inside out.`;
+    } else {
+        package_instructions = `
+ROLE: BASIC RECEPTIONIST
+- Your primary goal is to take messages and answer basic questions.
+- Do NOT schedule appointments; tell the caller a manager will contact them.
+- Keep interactions professional but brief.`;
+    }
 
-    // ---- MASTER prompt (behavior) ----
-    // Paste your full universal receptionist rules here (the long one).
+    // ---- C. Master Prompt (Universal Rules) ----
     const MASTER_PROMPT = `
 You are a professional AI receptionist.
+STYLE: Warm, calm, concise, human. Do not mention you are an AI.
+GOAL: Help inbound callers quickly. Confirm spelling for names and numbers.
+INTAKE: Caller name, callback number, and what they need help with.
+CLOSING: Summarize what you captured and tell them someone will call back.`.trim();
 
-STYLE
-- Warm, calm, concise, human.
-- Do not mention you are an AI unless asked.
-- Do not invent facts. If unsure, take a message.
-
-GOAL
-- Help inbound callers quickly: answer basic questions OR take a detailed message.
-- Never sell anything. Never discuss your own packages/pricing.
-- Confirm spelling for names, phone numbers, emails.
-
-INTAKE (when needed)
-- Caller name
-- Best callback number
-- Address/city (if relevant)
-- What they need help with (1–2 sentences)
-- Timeframe/urgency
-- Preferred contact method
-
-CLOSING
-- Summarize what you captured.
-- Tell them what will happen next: someone will call them back.
-`.trim();
-
-    // ---- Business Profile (data) ----
-    // This gets "locked in" per agent at creation time.
+    // ---- D. Business Profile (Locked-in Data) ----
     const BUSINESS_PROFILE = `
-BUSINESS PROFILE (use this as the source of truth)
+BUSINESS PROFILE (Source of Truth)
 - Business Name: ${biz_name}
 - Website: ${website || "Not provided"}
 - Business Hours: ${business_hours || "Not provided"}
 - Services: ${services || "Not provided"}
-- Additional Notes: ${extra_info || "None provided"}
+- Additional Notes: ${extra_info || "None provided"}`.trim();
 
-IF ANY FIELD IS "Not provided":
-- politely ask the caller for what you need, or offer to take a message.
-`.trim();
+    const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}\n\n${package_instructions}`;
 
-    const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
-
-    // 1) Create LLM (the brain)
-    const llmResp = await axios.post(
-      "https://api.retellai.com/create-retell-llm",
-      {
+    // ---- E. Create LLM (The Brain) ----
+    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
         begin_message: `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
         model: "gpt-4o-mini",
-      },
-      { headers, timeout: 15000 }
-    );
+    }, { headers, timeout: 15000 });
 
     const llm_id = llmResp.data?.llm_id;
-    if (!llm_id) return res.status(500).json({ error: "No llm_id returned from Retell" });
 
-    // 2) Create agent (the body)
-    const agentResp = await axios.post(
-      "https://api.retellai.com/create-agent",
-      {
-        agent_name: `${biz_name} - Receptionist`,
+    // ---- F. Create Agent (The Body) ----
+    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
+        agent_name: `${biz_name} - ${package_type}`,
         voice_id,
         response_engine: { type: "retell-llm", llm_id },
-        metadata: {
-          business_name: biz_name,
-          website,
-          business_hours,
-          services,
-          extra_info,
-        },
-      },
-      { headers, timeout: 15000 }
-    );
+    }, { headers, timeout: 15000 });
 
     const agent_id = agentResp.data?.agent_id;
     const agent_version = agentResp.data?.version ?? 0;
 
+    // ---- G. Safety Check ----
     if (isDryRun) {
-      return res.status(200).json({ ok: true, test_mode: true, agent_id, agent_version, llm_id });
+      return res.status(200).json({ ok: true, test_mode: true, agent_id, llm_id });
     }
 
-    // 3) Buy phone number (inbound line)
-    const numberResp = await axios.post(
-      "https://api.retellai.com/create-phone-number",
-      {
+    // ---- H. Buy Number ----
+    const numberResp = await axios.post("https://api.retellai.com/create-phone-number", {
         inbound_agent_id: agent_id,
         inbound_agent_version: agent_version,
         nickname: `${biz_name} Main Line`,
-      },
-      { headers, timeout: 15000 }
-    );
+    }, { headers, timeout: 15000 });
 
     return res.status(200).json({
       ok: true,
       agent_id,
-      agent_version,
-      llm_id,
       phone_number: numberResp.data?.phone_number,
       phone_number_pretty: numberResp.data?.phone_number_pretty || numberResp.data?.phone_number,
     });
