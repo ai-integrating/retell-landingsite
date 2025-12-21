@@ -1,10 +1,3 @@
-Here is the reliable, split-architecture code you need. This version follows the best practice of separating Provisioning (creating the agent and buying the number) from the Inbound Variables (the fast data lookup).
-
-Endpoint A: The Provisioning Script
-File: /api/retell-create-call.js Replace your current file with this. It includes the inbound_agent_version fix and the logs needed to debug your Zapier keys.
-
-JavaScript
-
 const axios = require("axios");
 
 function setCors(res) {
@@ -41,15 +34,12 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // DEBUG LOGS - Check these in Vercel to see your Zapier mapping
+    // Debug logs for Zapier mapping
     console.log("PROVISION BODY KEYS:", Object.keys(body));
 
     const business_name = pick(body, ["business_name", "businessName"], "New Client");
     const to_number = pick(body, ["to_number", "phone_number", "lead_phone"], "");
-    const isDryRunRaw = pick(body, ["is_test_mode", "Is_Test_mode", "dry_run"], "false");
-    const isDryRun = String(isDryRunRaw).toLowerCase() === "true";
-
-    console.log("BUSINESS:", business_name, "TO_NUMBER:", to_number || "(none)", "DRY_RUN:", isDryRun);
+    const isDryRun = String(pick(body, ["is_test_mode", "Is_Test_mode"], "false")).toLowerCase() === "true";
 
     const dynamic_variables = {
       business_name,
@@ -58,7 +48,7 @@ module.exports = async function handler(req, res) {
       services: pick(body, ["services"], "Receptionist")
     };
 
-    // 1. CREATE AGENT
+    // 1. Create Agent
     const createAgentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       { 
@@ -75,18 +65,22 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, test_mode: true, agent_id, variables: dynamic_variables });
     }
 
-    // 2. BUY PHONE NUMBER (Reliable parameters)
+    // 2. Buy Phone Number & Auto-Set Inbound Webhook
+    // REPLACE THIS URL with your live Endpoint B URL once deployed
+    const INBOUND_VARS_URL = "https://your-project.vercel.app/api/retell-inbound-vars";
+
     const numberResp = await axios.post(
       "https://api.retellai.com/create-phone-number",
       {
         inbound_agent_id: agent_id,
-        inbound_agent_version: agent_version, // Critical for many accounts
-        nickname: `${business_name} Main Line`
+        inbound_agent_version: agent_version, 
+        nickname: `${business_name} Main Line`,
+        inbound_webhook_url: INBOUND_VARS_URL // Automated handshake
       },
       { headers, timeout: 10000 }
     );
 
-    // 3. OPTIONAL OUTBOUND CALL (For Demo/Outbound packages)
+    // 3. Optional Outbound Call
     let outbound_call_id = "none";
     if (to_number) {
       const callResp = await axios.post(
@@ -109,28 +103,3 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "Failed", details: error.response?.data || error.message });
   }
 };
-Endpoint B: The Inbound Variables Script
-File: /api/retell-inbound-vars.js This is the "pure" endpoint Retell will call every time the phone rings to get the "McDuffy" data.
-
-JavaScript
-
-// /api/retell-inbound-vars.js
-module.exports = async function handler(req, res) {
-  // Retell pings this when someone calls
-  
-  // Later you can use body.from_number to look up specific lead names
-  return res.status(200).json({
-    retell_llm_dynamic_variables: {
-      business_name: "McDuffy and Son Asphalt",
-      business_hours: "Mon–Fri 5am–5pm",
-      services: "Asphalt paving, sealcoating, and repair",
-      extra_info: "Ask for Rose for scheduling."
-    }
-  });
-};
-The "Safety Handshake" (Final Step)
-Deploy both files to Vercel.
-
-Manual Webhook Link: In the Retell Dashboard, go to your Agent Settings -> Inbound Call Webhook URL and paste: https://your-project.vercel.app/api/retell-inbound-vars.
-
-This architecture is "locked-in." It works for outbound because the create-call step injects the variables, and it works for inbound because the new webhook endpoint serves them up.
