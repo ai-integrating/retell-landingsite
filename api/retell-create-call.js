@@ -12,14 +12,19 @@ async function readJsonBody(req) {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        resolve({});
+      }
     });
   });
 }
 
 function pick(obj, keys, fallback = "") {
   for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "")
+      return obj[k];
   }
   return fallback;
 }
@@ -32,7 +37,8 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    if (!RETELL_API_KEY) return res.status(500).json({ error: "Missing RETELL_API_KEY" });
+    if (!RETELL_API_KEY)
+      return res.status(500).json({ error: "Missing RETELL_API_KEY" });
 
     const headers = {
       Authorization: `Bearer ${RETELL_API_KEY}`,
@@ -49,10 +55,26 @@ module.exports = async function handler(req, res) {
     const services = pick(body, ["services"], "");
     const extra_info = pick(body, ["extra_info"], "");
 
-    // ✅ NEW (canonical keys only)
-    const package_type = pick(body, ["package_type"], "");
-    const addons = pick(body, ["addons"], "");
+    // ✅ package/add-ons/timezone (canonical keys only)
+    const package_type = String(pick(body, ["package_type"], "")).toLowerCase();
+    let addons = pick(body, ["addons"], "");
     const time_zone = pick(body, ["time_zone"], "");
+
+    // ✅ NEW: normalize add-ons by package so your prompt is always correct
+    // - full_staff: always includes the full digital staff suite
+    // - receptionist: always none
+    // - custom: uses whatever Zap passed; if empty -> None
+    if (package_type === "full_staff") {
+      addons =
+        "Ava (Scheduling), Mia (Job Intake), Lexi (Emergency Dispatch), Samuel (Lead Revival)";
+    } else if (package_type === "receptionist") {
+      addons = "None";
+    } else if (package_type === "custom") {
+      addons = addons || "None";
+    } else {
+      // If package_type is missing/unknown, keep whatever came in but default cleanly
+      addons = addons || "None";
+    }
 
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
@@ -91,7 +113,7 @@ BUSINESS PROFILE (use this as the source of truth)
 - Business Hours: ${business_hours || "Not provided"}
 - Services: ${services || "Not provided"}
 - Package Type: ${package_type || "Not provided"}
-- Add-Ons Enabled: ${addons || "None"}
+- Add-Ons Enabled: ${addons}
 - Time Zone: ${time_zone || "Not provided"}
 - Additional Notes: ${extra_info || "None provided"}
 
@@ -113,7 +135,8 @@ IF ANY FIELD IS "Not provided":
     );
 
     const llm_id = llmResp.data?.llm_id;
-    if (!llm_id) return res.status(500).json({ error: "No llm_id returned from Retell" });
+    if (!llm_id)
+      return res.status(500).json({ error: "No llm_id returned from Retell" });
 
     // 2) Create Agent (The Body)
     const agentResp = await axios.post(
@@ -128,7 +151,7 @@ IF ANY FIELD IS "Not provided":
           business_hours,
           services,
           package_type,
-          addons,
+          addons, // ✅ normalized value stored here too
           time_zone,
           extra_info,
         },
@@ -144,10 +167,12 @@ IF ANY FIELD IS "Not provided":
       message: "Agent and LLM created successfully. No phone number was purchased.",
       agent_id,
       llm_id,
-      agent_name: `${biz_name} - Receptionist`
+      agent_name: `${biz_name} - Receptionist`,
     });
-
   } catch (error) {
-    return res.status(500).json({ error: "Provisioning Failed", details: error?.response?.data || error?.message });
+    return res.status(500).json({
+      error: "Provisioning Failed",
+      details: error?.response?.data || error?.message,
+    });
   }
 };
