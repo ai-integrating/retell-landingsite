@@ -47,7 +47,6 @@ module.exports = async function handler(req, res) {
     const biz_phone = pick(body, ["business_phone"], "Not provided");
     const service_area = pick(body, ["service_area"], "Not provided");
     const summary_req = pick(body, ["post_call_summary_request"], "Not provided");
-    
     const website = pick(body, ["website"], "");
     const business_hours = pick(body, ["business_hours"], "");
     const services = pick(body, ["services", "primary_type_of_business"], "");
@@ -55,41 +54,39 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
-    // Add-on Content
+    // Protocol Details
     const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
     const scheduling_details = pick(body, ["scheduling_details"], "");
     const intake_details = pick(body, ["job_intake_details"], "");
     const lead_revival_details = pick(body, ["lead_revival_questions"], "");
     
-    // Determine Identity based on Add-ons
+    // Identity Logic
+    const package_type = String(pick(body, ["package_type"], "Receptionist"));
     let identityName = "a professional AI receptionist";
-    if (scheduling_details) identityName = "Ava, a professional AI receptionist";
-    else if (emergency_details) identityName = "Lexi, a professional emergency dispatcher";
+    if (scheduling_details && package_type !== "Receptionist") identityName = "Ava, a professional AI receptionist";
 
-    // ---- MASTER PROMPT (Now with Dynamic Identity) ----
+    // ---- MASTER PROMPT ----
     const MASTER_PROMPT = `
 IDENTITY & ROLE
 You are ${identityName} for ${biz_name}.
 Answer calls clearly and confidently, follow business rules exactly, and never guess.
-If information is missing, politely ask the caller for what you need or offer to take a message.
+If information is missing, politely ask the caller or offer to take a message.
 
 STYLE
 - Warm, calm, concise, human.
 - Do not mention you are an AI unless asked.
-- Do not invent facts. If unsure, take a message.
+- Do not invent facts.
 
 GOAL
 - Help inbound callers quickly: answer basic questions OR take a detailed message.
 - Confirm spelling for names, phone numbers, emails.
-
-INTAKE (Standard)
-- Caller name, Best callback number, What they need help with.
 `.trim();
 
     // ---- BUSINESS PROFILE ----
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
+- Package Type: ${package_type}
 - Main Contact: ${contact_name}
 - Business Email: ${biz_email}
 - Business Phone: ${biz_phone}
@@ -101,11 +98,19 @@ BUSINESS PROFILE
 - Summary Requirements: ${summary_req}
 - Additional Notes: ${extra_info || "None provided"}
 
+RECEPTIONIST PACKAGE SCHEDULING POLICY (DO NOT OVERRIDE):
+If package_type is "Receptionist", you do NOT directly book appointments or confirm exact time slots unless a valid Calendar Link is provided in Scheduling Details.
+- If Scheduling Details include a usable Calendar Link and clear booking rules, you may offer to schedule within those rules.
+- If the Calendar Link is missing, blank, or "Not provided/No data", do NOT schedule. Instead:
+  1) Collect the caller’s name, callback number, address/location, service needed, and preferred day/time windows.
+  2) Confirm you will pass the message to the main contact for scheduling.
+  3) End politely and confidently without guessing availability.
+
 ACTIVE PROTOCOLS:
-${emergency_details ? `- EMERGENCY DISPATCH (Lexi): ${emergency_details}` : ""}
-${scheduling_details ? `- SCHEDULING (Ava): ${scheduling_details}` : ""}
-${intake_details ? `- JOB INTAKE (Mia): ${intake_details}` : ""}
-${lead_revival_details ? `- LEAD REVIVAL (Samuel): ${lead_revival_details}` : ""}
+${emergency_details ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
+${scheduling_details ? `- SCHEDULING: ${scheduling_details}` : ""}
+${intake_details ? `- JOB INTAKE: ${intake_details}` : ""}
+${lead_revival_details ? `- LEAD REVIVAL: ${lead_revival_details}` : ""}
 
 IF ANY FIELD IS "Not provided":
 - politely ask the caller for what you need, or offer to take a message.
@@ -126,7 +131,7 @@ IF ANY FIELD IS "Not provided":
         agent_name: `${biz_name} - Receptionist`,
         voice_id: pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID),
         response_engine: { type: "retell-llm", llm_id },
-        metadata: { business_name: biz_name },
+        metadata: { business_name: biz_name, package_type },
     }, { headers, timeout: 15000 });
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data?.agent_id, llm_id });
