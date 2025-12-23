@@ -45,8 +45,6 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json",
     };
 
-    console.log("RECEIVED BODY KEYS:", Object.keys(body));
-
     // ---- Client data extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
     const website = pick(body, ["website"], "");
@@ -54,30 +52,33 @@ module.exports = async function handler(req, res) {
     const services = pick(body, ["services", "primary_type_of_business"], "");
     const extra_info = pick(body, ["extra_info"], "");
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
-    
-    // ✅ Specific Add-on Details
-    const emergency_details = pick(body, ["emergency_dispatch_questions", "emergency_info"], "None");
-    const scheduling_details = pick(body, ["scheduling_details", "scheduling_info"], "None");
-    const intake_details = pick(body, ["job_intake_details", "intake_info"], "None");
-    const lead_revival_details = pick(body, ["lead_revival_questions", "lead_revival_info"], "None");
-
-    const package_type = String(pick(body, ["package_type"], "")).toLowerCase();
-    let addons = pick(body, ["addons"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
+    // ✅ Map specific add-on data fields from Zapier
+    const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
+    const scheduling_details = pick(body, ["scheduling_details"], "");
+    const intake_details = pick(body, ["job_intake_details"], "");
+    const lead_revival_details = pick(body, ["lead_revival_questions"], "");
+
+    const package_type = String(pick(body, ["package_type"], "")).toLowerCase();
+    let addons = String(pick(body, ["addons"], ""));
+
+    // Normalize addons based on package
     if (package_type === "full_staff") {
       addons = "Ava (Scheduling), Mia (Job Intake), Lexi (Emergency Dispatch), Samuel (Lead Revival)";
     } else if (package_type === "receptionist") {
       addons = "None";
-    } else if (package_type === "custom") {
-      addons = addons || "None";
-    } else {
-      addons = addons || "None";
     }
+
+    // Prepare case-insensitive check for protocols
+    const addonsLower = addons.toLowerCase();
+    const hasEmergency = addonsLower.includes("lexi") || addonsLower.includes("emergency");
+    const hasScheduling = addonsLower.includes("ava") || addonsLower.includes("scheduling");
+    const hasIntake = addonsLower.includes("mia") || addonsLower.includes("intake");
+    const hasLead = addonsLower.includes("samuel") || addonsLower.includes("lead");
 
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
-    // ---- MASTER prompt ----
     const MASTER_PROMPT = `
 You are a professional AI receptionist.
 
@@ -94,7 +95,6 @@ INTAKE (Standard)
 - Caller name, Best callback number, What they need help with.
 `.trim();
 
-    // ---- Business Profile (Updated with Specific Add-on Logic) ----
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
@@ -105,10 +105,10 @@ BUSINESS PROFILE
 - Additional Notes: ${extra_info || "None provided"}
 
 ACTIVE ADD-ONS & PROTOCOLS:
-${addons.includes("Lexi") || addons.includes("Emergency") ? `- EMERGENCY DISPATCH: Follow these requirements: ${emergency_details}` : ""}
-${addons.includes("Ava") || addons.includes("Scheduling") ? `- SCHEDULING: Collect these details for booking: ${scheduling_details}` : ""}
-${addons.includes("Mia") || addons.includes("Intake") ? `- JOB INTAKE: Ask these specific questions: ${intake_details}` : ""}
-${addons.includes("Samuel") || addons.includes("Lead") ? `- LEAD REVIVAL: Use this info: ${lead_revival_details}` : ""}
+${hasEmergency && emergency_details ? `- EMERGENCY DISPATCH (Lexi): ${emergency_details}` : ""}
+${hasScheduling && scheduling_details ? `- SCHEDULING (Ava): ${scheduling_details}` : ""}
+${hasIntake && intake_details ? `- JOB INTAKE (Mia): ${intake_details}` : ""}
+${hasLead && lead_revival_details ? `- LEAD REVIVAL (Samuel): ${lead_revival_details}` : ""}
 
 IF ANY FIELD IS "Not provided":
 - politely ask the caller for what you need, or offer to take a message.
@@ -116,12 +116,10 @@ IF ANY FIELD IS "Not provided":
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
-    // 1) Create LLM
     const llmResp = await axios.post(
       "https://api.retellai.com/create-retell-llm",
       {
         general_prompt: FINAL_PROMPT,
-        // Use custom greeting if provided, otherwise fallback to default
         begin_message: greeting || `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
         model: "gpt-4o-mini",
       },
@@ -129,31 +127,22 @@ IF ANY FIELD IS "Not provided":
     );
 
     const llm_id = llmResp.data?.llm_id;
-    if (!llm_id)
-      return res.status(500).json({ error: "No llm_id returned from Retell" });
+    if (!llm_id) return res.status(500).json({ error: "No llm_id returned" });
 
-    // 2) Create Agent
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         agent_name: `${biz_name} - Receptionist`,
         voice_id,
         response_engine: { type: "retell-llm", llm_id },
-        metadata: {
-          business_name: biz_name,
-          package_type,
-          addons,
-          time_zone,
-        },
+        metadata: { business_name: biz_name, package_type, addons },
       },
       { headers, timeout: 15000 }
     );
 
-    const agent_id = agentResp.data?.agent_id;
-
     return res.status(200).json({
       ok: true,
-      agent_id,
+      agent_id: agentResp.data?.agent_id,
       llm_id,
       agent_name: `${biz_name} - Receptionist`,
     });
