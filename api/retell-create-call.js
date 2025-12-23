@@ -14,20 +14,9 @@ async function readJsonBody(req) {
     req.on("end", () => {
       try {
         resolve(data ? JSON.parse(data) : {});
-      } catch {
-        resolve({});
-      }
+      } catch { resolve({}); }
     });
   });
-}
-
-// Improved formatting to help the AI read concatenated strings
-function formatDetails(text) {
-  if (!text) return "";
-  return String(text)
-    .replace(/([0-9])([a-zA-Z])/g, '$1 $2') 
-    .replace(/([a-z])([A-Z])/g, '$1 $2')   
-    .replace(/([a-zA-Z])([0-9])/g, '$1 $2'); 
 }
 
 function pick(obj, keys, fallback = "") {
@@ -52,7 +41,7 @@ module.exports = async function handler(req, res) {
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
     // ---- Data Extraction ----
-    const biz_name = pick(body, ["business_name", "businessName"], "New Client");
+    const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const contact_name = pick(body, ["name", "main_contact_name"], "Not provided");
     const biz_email = pick(body, ["business_email"], "Not provided");
     const biz_phone = pick(body, ["business_phone"], "Not provided");
@@ -66,18 +55,23 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
-    // Protocol Details
-    const emergency_details = formatDetails(pick(body, ["emergency_dispatch_questions"], ""));
-    const scheduling_details = formatDetails(pick(body, ["scheduling_details"], ""));
-    const intake_details = formatDetails(pick(body, ["job_intake_details"], ""));
-    const lead_revival_details = formatDetails(pick(body, ["lead_revival_questions"], ""));
+    // Add-on Content
+    const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
+    const scheduling_details = pick(body, ["scheduling_details"], "");
+    const intake_details = pick(body, ["job_intake_details"], "");
+    const lead_revival_details = pick(body, ["lead_revival_questions"], "");
     
-    const package_type = String(pick(body, ["package_type"], "custom")).toLowerCase();
-    const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
+    // Determine Identity based on Add-ons
+    let identityName = "a professional AI receptionist";
+    if (scheduling_details) identityName = "Ava, a professional AI receptionist";
+    else if (emergency_details) identityName = "Lexi, a professional emergency dispatcher";
 
-    // ---- MASTER PROMPT (Original Behavioral Info) ----
+    // ---- MASTER PROMPT (Now with Dynamic Identity) ----
     const MASTER_PROMPT = `
-You are a professional AI receptionist.
+IDENTITY & ROLE
+You are ${identityName} for ${biz_name}.
+Answer calls clearly and confidently, follow business rules exactly, and never guess.
+If information is missing, politely ask the caller for what you need or offer to take a message.
 
 STYLE
 - Warm, calm, concise, human.
@@ -92,7 +86,7 @@ INTAKE (Standard)
 - Caller name, Best callback number, What they need help with.
 `.trim();
 
-    // ---- BUSINESS PROFILE (Updated with missing info) ----
+    // ---- BUSINESS PROFILE ----
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
@@ -108,10 +102,10 @@ BUSINESS PROFILE
 - Additional Notes: ${extra_info || "None provided"}
 
 ACTIVE PROTOCOLS:
-${emergency_details ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
-${scheduling_details ? `- SCHEDULING: ${scheduling_details}` : ""}
-${intake_details ? `- JOB INTAKE: ${intake_details}` : ""}
-${lead_revival_details ? `- LEAD REVIVAL: ${lead_revival_details}` : ""}
+${emergency_details ? `- EMERGENCY DISPATCH (Lexi): ${emergency_details}` : ""}
+${scheduling_details ? `- SCHEDULING (Ava): ${scheduling_details}` : ""}
+${intake_details ? `- JOB INTAKE (Mia): ${intake_details}` : ""}
+${lead_revival_details ? `- LEAD REVIVAL (Samuel): ${lead_revival_details}` : ""}
 
 IF ANY FIELD IS "Not provided":
 - politely ask the caller for what you need, or offer to take a message.
@@ -130,12 +124,12 @@ IF ANY FIELD IS "Not provided":
 
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
         agent_name: `${biz_name} - Receptionist`,
-        voice_id,
+        voice_id: pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID),
         response_engine: { type: "retell-llm", llm_id },
-        metadata: { business_name: biz_name, package_type },
+        metadata: { business_name: biz_name },
     }, { headers, timeout: 15000 });
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data?.agent_id, llm_id, agent_name: `${biz_name} - Receptionist` });
+    return res.status(200).json({ ok: true, agent_id: agentResp.data?.agent_id, llm_id });
   } catch (error) {
     return res.status(500).json({ error: "Provisioning Failed", details: error?.response?.data || error?.message });
   }
