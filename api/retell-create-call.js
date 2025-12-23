@@ -21,7 +21,16 @@ async function readJsonBody(req) {
   });
 }
 
-// Robust picker to catch nested Zapier "output" objects or raw strings
+// ✅ NEW: This function adds a space between numbers and letters 
+// to prevent the "smushed" look from Zapier.
+function formatDetails(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/([0-9])([a-zA-Z])/g, '$1 $2') // Space between number and letter
+    .replace(/([a-z])([A-Z])/g, '$1 $2')   // Space between lowercase and uppercase
+    .replace(/([a-zA-Z])([0-9])/g, '$1 $2'); // Space between letter and number
+}
+
 function pick(obj, keys, fallback = "") {
   for (const k of keys) {
     let val = obj[k];
@@ -46,7 +55,7 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json",
     };
 
-    // ---- Standard Extraction ----
+    // ---- Data Extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
     const website = pick(body, ["website"], "");
     const business_hours = pick(body, ["business_hours"], "");
@@ -55,18 +64,16 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
-    // ✅ ADD-ON CONTENT: If these have text, the AI will use them
-    const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
-    const scheduling_details = pick(body, ["scheduling_details"], "");
-    const intake_details = pick(body, ["job_intake_details"], "");
-    const lead_revival_details = pick(body, ["lead_revival_questions"], "");
+    // ✅ Formatting the "smushed" details for the AI
+    const emergency_details = formatDetails(pick(body, ["emergency_dispatch_questions"], ""));
+    const scheduling_details = formatDetails(pick(body, ["scheduling_details"], ""));
+    const intake_details = formatDetails(pick(body, ["job_intake_details"], ""));
+    const lead_revival_details = formatDetails(pick(body, ["lead_revival_questions"], ""));
     
-    // Captured for metadata only
     const package_type = String(pick(body, ["package_type"], "custom")).toLowerCase();
-
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
-    // ---- MASTER PROMPT (Original Behavioral Info) ----
+    // ---- MASTER PROMPT (Original Behavioral Info Preserved) ----
     const MASTER_PROMPT = `
 You are a professional AI receptionist.
 
@@ -83,7 +90,7 @@ INTAKE (Standard)
 - Caller name, Best callback number, What they need help with.
 `.trim();
 
-    // ---- BUSINESS PROFILE (Protocol Injection) ----
+    // ---- BUSINESS PROFILE ----
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
@@ -93,7 +100,7 @@ BUSINESS PROFILE
 - Time Zone: ${time_zone || "Not provided"}
 - Additional Notes: ${extra_info || "None provided"}
 
-ACTIVE PROTOCOLS (Only follow if data is provided):
+ACTIVE PROTOCOLS:
 ${emergency_details ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
 ${scheduling_details ? `- SCHEDULING: ${scheduling_details}` : ""}
 ${intake_details ? `- JOB INTAKE: ${intake_details}` : ""}
