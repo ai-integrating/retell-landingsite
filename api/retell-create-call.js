@@ -21,10 +21,14 @@ async function readJsonBody(req) {
   });
 }
 
+// Robust picker to catch nested Zapier "output" objects or raw strings
 function pick(obj, keys, fallback = "") {
   for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "")
-      return obj[k];
+    let val = obj[k];
+    if (val !== undefined && val !== null && val !== "") {
+      if (typeof val === 'object' && val.output) return val.output;
+      return val;
+    }
   }
   return fallback;
 }
@@ -37,15 +41,12 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    if (!RETELL_API_KEY)
-      return res.status(500).json({ error: "Missing RETELL_API_KEY" });
-
     const headers = {
       Authorization: `Bearer ${RETELL_API_KEY}`,
       "Content-Type": "application/json",
     };
 
-    // ---- Client data extraction ----
+    // ---- Standard Extraction ----
     const biz_name = pick(body, ["business_name", "businessName"], "New Client");
     const website = pick(body, ["website"], "");
     const business_hours = pick(body, ["business_hours"], "");
@@ -54,31 +55,18 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
-    // ✅ Map specific add-on data fields from Zapier
+    // ✅ ADD-ON CONTENT: If these have text, the AI will use them
     const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
     const scheduling_details = pick(body, ["scheduling_details"], "");
     const intake_details = pick(body, ["job_intake_details"], "");
     const lead_revival_details = pick(body, ["lead_revival_questions"], "");
-
-    const package_type = String(pick(body, ["package_type"], "")).toLowerCase();
-    let addons = String(pick(body, ["addons"], ""));
-
-    // Normalize addons based on package
-    if (package_type === "full_staff") {
-      addons = "Ava (Scheduling), Mia (Job Intake), Lexi (Emergency Dispatch), Samuel (Lead Revival)";
-    } else if (package_type === "receptionist") {
-      addons = "None";
-    }
-
-    // Prepare case-insensitive check for protocols
-    const addonsLower = addons.toLowerCase();
-    const hasEmergency = addonsLower.includes("lexi") || addonsLower.includes("emergency");
-    const hasScheduling = addonsLower.includes("ava") || addonsLower.includes("scheduling");
-    const hasIntake = addonsLower.includes("mia") || addonsLower.includes("intake");
-    const hasLead = addonsLower.includes("samuel") || addonsLower.includes("lead");
+    
+    // Captured for metadata only
+    const package_type = String(pick(body, ["package_type"], "custom")).toLowerCase();
 
     const voice_id = pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID);
 
+    // ---- MASTER PROMPT (Original Behavioral Info) ----
     const MASTER_PROMPT = `
 You are a professional AI receptionist.
 
@@ -95,6 +83,7 @@ INTAKE (Standard)
 - Caller name, Best callback number, What they need help with.
 `.trim();
 
+    // ---- BUSINESS PROFILE (Protocol Injection) ----
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
@@ -104,11 +93,11 @@ BUSINESS PROFILE
 - Time Zone: ${time_zone || "Not provided"}
 - Additional Notes: ${extra_info || "None provided"}
 
-ACTIVE ADD-ONS & PROTOCOLS:
-${hasEmergency && emergency_details ? `- EMERGENCY DISPATCH (Lexi): ${emergency_details}` : ""}
-${hasScheduling && scheduling_details ? `- SCHEDULING (Ava): ${scheduling_details}` : ""}
-${hasIntake && intake_details ? `- JOB INTAKE (Mia): ${intake_details}` : ""}
-${hasLead && lead_revival_details ? `- LEAD REVIVAL (Samuel): ${lead_revival_details}` : ""}
+ACTIVE PROTOCOLS (Only follow if data is provided):
+${emergency_details ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
+${scheduling_details ? `- SCHEDULING: ${scheduling_details}` : ""}
+${intake_details ? `- JOB INTAKE: ${intake_details}` : ""}
+${lead_revival_details ? `- LEAD REVIVAL: ${lead_revival_details}` : ""}
 
 IF ANY FIELD IS "Not provided":
 - politely ask the caller for what you need, or offer to take a message.
@@ -116,6 +105,7 @@ IF ANY FIELD IS "Not provided":
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
+    // 1) Create LLM
     const llmResp = await axios.post(
       "https://api.retellai.com/create-retell-llm",
       {
@@ -129,13 +119,14 @@ IF ANY FIELD IS "Not provided":
     const llm_id = llmResp.data?.llm_id;
     if (!llm_id) return res.status(500).json({ error: "No llm_id returned" });
 
+    // 2) Create Agent
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         agent_name: `${biz_name} - Receptionist`,
         voice_id,
         response_engine: { type: "retell-llm", llm_id },
-        metadata: { business_name: biz_name, package_type, addons },
+        metadata: { business_name: biz_name, package_type },
       },
       { headers, timeout: 15000 }
     );
