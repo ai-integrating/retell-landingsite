@@ -36,6 +36,25 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
+// ✅ NEW: Server-side Website Scraper Logic
+async function getWebsiteContext(url) {
+  if (!url || url === "Not provided" || !url.startsWith("http")) return null;
+  try {
+    // Fetches homepage content (timeout after 5s to prevent latency)
+    const response = await axios.get(url, { timeout: 5000 });
+    const html = response.data;
+    
+    // Simplistic extraction: removes tags to find key text snippets
+    const textOnly = html.replace(/<[^>]*>?/gm, ' ').replace(/\s\s+/g, ' ');
+    
+    // Limit to first 2000 characters to keep prompt window clean
+    return textOnly.substring(0, 2000); 
+  } catch (e) {
+    console.error("Website fetch failed:", e.message);
+    return null;
+  }
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -48,31 +67,31 @@ module.exports = async function handler(req, res) {
 
     // ---- Data Extraction & Cleaning ----
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
+    const website_url = cleanValue(pick(body, ["website"]));
+    
+    // ✅ TRIGGER WEBSITE ENRICHMENT
+    const website_content = await getWebsiteContext(website_url);
+
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
     const biz_email = cleanValue(pick(body, ["business_email"]));
     const biz_phone = cleanValue(pick(body, ["business_phone"]));
     const service_area = cleanValue(pick(body, ["service_area"]));
     const summary_req = cleanValue(pick(body, ["post_call_summary_request"]));
-    const website = cleanValue(pick(body, ["website"]));
     const business_hours = cleanValue(pick(body, ["business_hours"]));
     const services = cleanValue(pick(body, ["services", "primary_type_of_business"])).replace("aspahlt", "asphalt");
     const extra_info = cleanValue(pick(body, ["extra_info"], "None provided"));
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = cleanValue(pick(body, ["time_zone"]));
 
-    // Protocol Details Cleaning & Polishing
     const emergency_details = cleanValue(pick(body, ["emergency_dispatch_questions"])).replace("floor", "flood");
     const scheduling_details = cleanValue(pick(body, ["scheduling_details"])).replace("Calandar", "Calendar");
-    // Micro-fix: Clarify Location intake
     const intake_details = cleanValue(pick(body, ["job_intake_details"])).replace("[Location]", "[Service address or city/town]");
     const lead_revival_details = cleanValue(pick(body, ["lead_revival_questions"]));
     
-    // Dynamic Package Naming
     const raw_pkg = pick(body, ["package_type"], "Receptionist");
     const package_type = String(raw_pkg).toLowerCase();
     const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
-    // Identity Logic
     let identityName = "a professional AI receptionist";
     if (scheduling_details !== "Not provided" && package_type !== "receptionist") {
         identityName = "Ava, a professional AI receptionist";
@@ -83,6 +102,7 @@ IDENTITY & ROLE
 You are ${identityName} for ${biz_name}.
 Answer calls clearly and confidently, follow business rules exactly, and never guess.
 If information is missing, politely ask the caller or offer to take a message.
+If website-derived information conflicts with caller statements or is unclear, defer to the caller and offer to take a message.
 
 STYLE
 - Warm, calm, concise, human.
@@ -101,13 +121,19 @@ BUSINESS PROFILE
 - Main Contact: ${contact_name}
 - Business Email: ${biz_email}
 - Business Phone: ${biz_phone}
-- Website: ${website}
+- Website: ${website_url}
 - Business Hours: ${business_hours}
 - Service Area: ${service_area}
 - Services: ${services}
 - Time Zone: ${time_zone}
 - Summary Requirements: ${summary_req}
 - Additional Notes: ${extra_info}
+
+${website_content ? `WEBSITE-DERIVED CONTEXT (REFERENCE ONLY):
+The following information was extracted from the business website. Use it only if it aligns with caller questions and do not invent beyond it.
+---
+${website_content}
+---` : ""}
 
 RECEPTIONIST PACKAGE SCHEDULING POLICY (DO NOT OVERRIDE):
 If package_type is "custom" OR "receptionist", you do NOT directly book appointments or confirm exact time slots unless a valid Calendar Link is provided in Scheduling Details.
