@@ -1,6 +1,6 @@
 const axios = require("axios");
 
-// --- UTILITIES ---
+// --- UTILITIES & NORMALIZATION ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -37,24 +37,27 @@ function cleanValue(text) {
   return String(text).replace(/\[\]/g, "Not provided");
 }
 
-// --- URL & SCRAPING ---
 function extractFirstUrl(text) {
   if (!text) return null;
   const m = String(text).match(/https?:\/\/[^\s)]+/i);
   return m ? m[0] : null;
 }
 
+// ✅ TWEAK 1: Handle Jotform objects and messy URLs
 function normalizeWebsite(raw) {
   if (!raw || raw === "Not provided") return "Not provided";
+  if (typeof raw === "object" && raw.output) raw = raw.output;
+  raw = String(raw).trim();
   const extracted = extractFirstUrl(raw);
   if (extracted) return extracted;
   if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
   return raw.startsWith("http") ? raw : "Not provided";
 }
 
+// ✅ TWEAK 2: Strengthen Code Filter for JS-heavy sites
 function looksLikeCode(text) {
   const t = (text || "").slice(0, 1200).toLowerCase();
-  const codeHits = ["@keyframes", "view-transition", "webkit", "transform:", "opacity:", "{", "}", "::"];
+  const codeHits = ["@keyframes", "view-transition", "webkit", "transform:", "opacity:", "{", "}", "::", "function(", "window.", "document."];
   return codeHits.filter(k => t.includes(k)).length >= 2;
 }
 
@@ -77,7 +80,7 @@ async function getWebsiteContext(url) {
   return null;
 }
 
-// --- FACT EXTRACTION ---
+// ✅ TWEAK 3: Smart Partial-Match Service Extraction
 function buildWebsiteFacts(text, businessTypeHint = "") {
   if (!text) return "";
   const raw = String(text);
@@ -94,15 +97,20 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
   const hint = String(businessTypeHint || "").toLowerCase();
   for (const key of Object.keys(tradeBoosters)) { if (hint.includes(key)) booster = tradeBoosters[key]; }
 
-  // Auto-detect trade if hint is weak
   if (!booster.length) {
     if (lower.includes("asphalt") || lower.includes("paving") || lower.includes("sealcoating")) booster = tradeBoosters.paving;
     else if (lower.includes("plumbing") || lower.includes("drain") || lower.includes("pipe")) booster = tradeBoosters.plumbing;
     else if (lower.includes("furnace") || lower.includes("hvac") || lower.includes("heating")) booster = tradeBoosters.hvac;
   }
 
-  const generic = ["repair", "installation", "maintenance", "service", "emergency service", "free estimate"];
-  const services = Array.from(new Set([...booster, ...generic])).filter(k => lower.includes(k)).slice(0, 10);
+  const allServices = Array.from(new Set([...booster, "repair", "installation", "maintenance", "service", "emergency service"]));
+  const services = allServices.filter(k => {
+    const kk = k.toLowerCase();
+    if (lower.includes(kk)) return true;
+    const token = kk.split(" ").sort((a,b) => b.length - a.length)[0];
+    return token && token.length >= 5 && lower.includes(token);
+  }).slice(0, 10);
+
   const lines = [];
   if (services.length) lines.push(`- Services: ${services.join(", ")}.`);
   if (lower.includes("residential") || lower.includes("commercial")) {
@@ -112,7 +120,7 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
   return lines.length ? `WEBSITE FACTS (FAST REFERENCE):\n${lines.join("\n")}` : "";
 }
 
-// --- HANDLER ---
+// --- MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -120,8 +128,7 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJsonBody(req);
-    const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
+    const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
@@ -134,14 +141,16 @@ module.exports = async function handler(req, res) {
       scheduling = "Calendar Link: Not provided. Scheduling is NOT enabled. Take a message for a callback.";
     }
 
+    // ✅ TWEAK 4: Final Identity Disclosure Rules
     const FINAL_PROMPT = `
 IDENTITY:
 - You are Ava with ${biz_name}.
 - If asked "who are you?" or "who am I speaking to?", say: "This is Ava with ${biz_name}."
 - Do NOT volunteer that you are an AI. Only acknowledge being an AI if explicitly asked.
+- If explicitly asked "Are you an AI?" or "Is this a robot?", say: "Yes — I’m an AI assistant helping the office handle calls. I can help now or take a detailed message for the team."
 - If pressed for more detail, say: "I’m part of the office team here and help handle incoming calls."
 
-STYLE: Warm, human, concise. Never guess.
+STYLE: Warm, human, concise. Never guess. Confidently admit if you don't know something.
 
 ${structured_facts}
 
@@ -167,14 +176,10 @@ RULE: If a caller asks to book, collect preferred windows and callback number. D
         agent_name: `${biz_name} Agent`,
         voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
         response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-        metadata: { 
-          notify_phone: pick(body, ["notify_phone", "cell_phone"]),
-          business_name: biz_name,
-          website_url_used: website_url
-        }
+        metadata: { notify_phone: pick(body, ["notify_phone", "cell_phone"]), business_name: biz_name }
     }, { headers });
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id, facts_extracted: Boolean(structured_facts) });
+    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
