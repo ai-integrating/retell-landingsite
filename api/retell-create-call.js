@@ -19,7 +19,7 @@ async function readJsonBody(req) {
   });
 }
 
-// ✅ Cleans data and removes risky empty brackets
+// Cleans data and removes risky empty brackets
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "" || text === "/") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
