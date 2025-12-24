@@ -19,67 +19,68 @@ async function readJsonBody(req) {
   });
 }
 
-function extractFirstUrl(text) {
-  if (!text || text === "Not provided") return null;
-  const m = String(text).match(/https?:\/\/[^\s)]+/i);
-  if (m) return m[0];
-  if (text.includes(".") && !text.startsWith("http")) return `https://${text.trim()}`;
-  return null;
+// ✅ STEP 1: JUNK DETECTION HELPERS
+function normalize(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function cleanValue(text) {
-  if (!text || text === "[]" || text === "No data" || text === "" || text === "/" || text === "null") return "Not provided";
-  return String(text).replace(/\[\]/g, "Not provided");
+function isJunk(val) {
+  const v = normalize(val);
+  if (!v) return true;
+  return ["not provided", "no data", "n a", "na", "none", "idk", "test", "asdf", "/"].includes(v) || v.length < 3;
 }
 
-function pick(obj, keys, fallback = "Not provided") {
-  for (const k of keys) {
-    let val = obj[k];
-    if (val !== undefined && val !== null && val !== "") {
-      if (typeof val === 'object' && val.output) return val.output;
-      return val;
-    }
-  }
-  return fallback;
+function looksLikeBizName(val, bizName) {
+  const v = normalize(val);
+  const b = normalize(bizName);
+  if (!v || !b) return false;
+  return v === b || v.includes(b) || b.includes(v);
 }
 
-// ✅ NEW: Decode HTML entities for a cleaner prompt
+function isGood(val, bizName) {
+  return !isJunk(val) && !looksLikeBizName(val, bizName);
+}
+
+// ✅ STEP 2: WEBSITE INFERENCE LOGIC
+function inferFromWebsite(text) {
+  if (!text) return {};
+  const t = text.toLowerCase();
+  
+  const serviceKeywords = [
+    "paving", "sealcoating", "patch", "crack", "line painting", "excavation",
+    "curbing", "sidewalk", "snow removal", "hauling", "driveway", "parking lot"
+  ];
+  const foundServices = serviceKeywords.filter(k => t.includes(k));
+
+  let area = null;
+  const m = text.match(/including\s+([A-Za-z,\s]+?)\s+(and\s+surrounding|surrounding|area)/i);
+  if (m && m[1]) area = m[1].replace(/\s+/g, " ").trim();
+
+  let hours = null;
+  const hm = text.match(/(mon|monday)\s*[-–to]+\s*(fri|friday)[^\.]{0,40}(\d{1,2}(:\d{2})?\s*(am|pm)?)[^\.]{0,40}(\d{1,2}(:\d{2})?\s*(am|pm)?)/i);
+  if (hm) hours = hm[0].replace(/\s+/g, " ").trim();
+
+  return {
+    inferred_services: foundServices.length ? foundServices.join(", ") : null,
+    inferred_service_area: area || null,
+    inferred_hours: hours || null
+  };
+}
+
 const decodeHtml = (s) =>
-  s.replace(/&amp;/g, "&")
-   .replace(/&quot;/g, '"')
-   .replace(/&#39;/g, "'")
-   .replace(/&nbsp;/g, " ")
-   .replace(/&lt;/g, "<")
-   .replace(/&gt;/g, ">");
+  s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
 
 async function getWebsiteContext(urlInput) {
-  let url = extractFirstUrl(urlInput);
-  if (!url) return null;
-
+  if (!urlInput || urlInput === "/" || urlInput.length < 5) return null;
+  const url = urlInput.startsWith("http") ? urlInput : `https://${urlInput}`;
   try {
-    const response = await axios.get(url, {
-      timeout: 8000,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Integrating-Bot/1.0" }
-    });
-    let textOnly = response.data
-      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-      .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "")
-      .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "")
-      .replace(/<form[^>]*>([\s\S]*?)<\/form>/gim, "") // ✅ Strip messy forms
-      .replace(/<[^>]*>?/gm, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // ✅ Clean and tighten length to ~1800 chars
+    const response = await axios.get(url, { timeout: 8000 });
+    let textOnly = response.data.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "").replace(/<form[^>]*>([\s\S]*?)<\/form>/gim, "").replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim();
     return decodeHtml(textOnly).substring(0, 1800);
   } catch (e) {
-    // Fallback Proxy logic (Jina AI Reader)
     try {
-      const proxyUrl = `https://r.jina.ai/${url}`;
-      const r = await axios.get(proxyUrl, { timeout: 8000 });
-      let txt = String(r.data || "").replace(/\s+/g, " ").trim();
-      return decodeHtml(txt).substring(0, 1800);
+      const r = await axios.get(`https://r.jina.ai/${url}`, { timeout: 8000 });
+      return decodeHtml(String(r.data || "")).substring(0, 1800);
     } catch (err) { return null; }
   }
 }
@@ -91,79 +92,58 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
-    const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
+    const biz_name = body.business_name || "the business";
+    const website_content = await getWebsiteContext(body.website);
+    const inferred = inferFromWebsite(website_content);
 
-    const biz_name = pick(body, ["business_name", "businessName"], "the business");
-    const website_input = pick(body, ["website"]);
-    const website_content = await getWebsiteContext(website_input);
-    const website_url = cleanValue(website_input);
+    // ✅ STEP 3: APPLY HIERARCHY (Form > Website > Not provided)
+    let services = body.services || "";
+    if (!isGood(services, biz_name)) services = inferred.inferred_services || "Not provided";
 
-    const scheduling_details = cleanValue(pick(body, ["scheduling_details"])).replace("Calandar", "Calendar");
+    let business_hours = body.business_hours || "";
+    if (!isGood(business_hours, biz_name)) business_hours = inferred.inferred_hours || "Not provided";
 
-    // ✅ Logic fix: If no Calendar Link, force scheduling to "Not enabled"
-    let finalized_scheduling = scheduling_details;
-    if (scheduling_details.toLowerCase().includes("calendar:not provided")) {
-        finalized_scheduling = "Calendar Link: Not provided. Scheduling is NOT enabled. Collect preferred windows and notify the main contact for a callback.";
-    }
+    let service_area = body.service_area || "";
+    if (!isGood(service_area, biz_name)) service_area = inferred.inferred_service_area || "Not provided";
 
-    const biz_email = cleanValue(pick(body, ["business_email"]));
-    const services = cleanValue(pick(body, ["services"])).replace("aspahlt", "asphalt");
-    const emergency_details = cleanValue(pick(body, ["emergency_dispatch_questions"])).replace("floor", "flood");
-    const intake_details = cleanValue(pick(body, ["job_intake_details"])).replace("[Location]", "[Service address or city/town]");
-    
-    const raw_pkg = pick(body, ["package_type"], "Receptionist");
-    const package_type = String(raw_pkg).toLowerCase();
-    const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    // ✅ STEP 4: CREATE INFERENCE DISCLAIMER
+    const inferredNote = [];
+    if (services === inferred.inferred_services) inferredNote.push("Services");
+    if (service_area === inferred.inferred_service_area) inferredNote.push("Service Area");
+    if (business_hours === inferred.inferred_hours) inferredNote.push("Business Hours");
+    const INFERENCE_DISCLAIMER = inferredNote.length 
+      ? `\nNOTE: The following fields were inferred from the website due to missing/low-quality form inputs: ${inferredNote.join(", ")}. Confirm with the caller if they state otherwise.` 
+      : "";
 
-    const MASTER_PROMPT = `
+    const FINAL_PROMPT = `
 IDENTITY & ROLE
-You are a professional AI receptionist for ${biz_name}. Follow business rules exactly and never guess.
-If website info conflicts with caller, defer to the caller and offer to take a message.
+You are Ava for ${biz_name}. Follow rules exactly.
 
-STYLE
-- Warm, calm, concise, human. Do not mention you are an AI.
-- Do not invent facts. Confidently admit if you don't know something.
-`.trim();
-
-    const BUSINESS_PROFILE = `
 BUSINESS PROFILE
-- Business Name: ${biz_name}
-- Package: ${package_suffix}
-- Email: ${biz_email}
-- Website: ${website_url}
+- Name: ${biz_name}
+- Hours: ${business_hours}
+- Area: ${service_area}
 - Services: ${services}
+${INFERENCE_DISCLAIMER}
 
-${website_content ? `WEBSITE-DERIVED CONTEXT (REFERENCE ONLY):
----
-${website_content}
----` : ""}
+${website_content ? `WEBSITE CONTEXT:\n---\n${website_content}\n---` : ""}
 
-RECEPTIONIST PACKAGE SCHEDULING POLICY:
-If package_type is "custom" OR "receptionist", you do NOT book appointments without a valid Calendar Link.
-If "Not provided", you must take a message for a callback instead.
-
-ACTIVE PROTOCOLS:
-${emergency_details !== "Not provided" ? `- EMERGENCY: ${emergency_details}` : ""}
-- SCHEDULING: ${finalized_scheduling}
-${intake_details !== "Not provided" ? `- JOB INTAKE: ${intake_details}` : ""}
-
-IF ANY FIELD IS "Not provided": ask the caller or offer to take a message.
-`.trim();
+SCHEDULING: ${body.scheduling_details || "Not enabled"}`.trim();
 
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
-        general_prompt: `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`,
-        begin_message: pick(body, ["greeting"], `Hi! Thanks for calling ${biz_name}. How can I help you today?`),
+        general_prompt: FINAL_PROMPT,
+        begin_message: body.greeting || `Hi, thanks for calling ${biz_name}.`,
         model: "gpt-4o-mini",
-    }, { headers });
+    }, { headers: { Authorization: `Bearer ${RETELL_API_KEY}` } });
 
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-        agent_name: `${biz_name} - ${package_suffix}`,
-        voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
+        agent_name: `${biz_name} Agent`,
+        voice_id: body.voice_id || process.env.DEFAULT_VOICE_ID,
         response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-    }, { headers });
+    }, { headers: { Authorization: `Bearer ${RETELL_API_KEY}` } });
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
   } catch (error) {
-    return res.status(500).json({ error: "Provisioning Failed", details: error.message });
+    return res.status(500).json({ error: error.message });
   }
 };
