@@ -19,6 +19,13 @@ async function readJsonBody(req) {
   });
 }
 
+// Function to replace empty brackets or blank strings with "Not provided"
+function cleanValue(text) {
+  if (!text || text === "[]" || text === "No data" || text === "") return "Not provided";
+  // Cleans internal empty brackets within mapped strings
+  return String(text).replace(/\[\]/g, "Not provided");
+}
+
 function pick(obj, keys, fallback = "Not provided") {
   for (const k of keys) {
     let val = obj[k];
@@ -40,32 +47,30 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // ---- Data Extraction ----
+    // ---- Data Extraction & Cleaning ----
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
-    const contact_name = pick(body, ["name", "main_contact_name"]);
-    const biz_email = pick(body, ["business_email"]);
-    const biz_phone = pick(body, ["business_phone"]);
-    const service_area = pick(body, ["service_area"]);
-    const summary_req = pick(body, ["post_call_summary_request"]);
-    const website = pick(body, ["website"]);
-    const business_hours = pick(body, ["business_hours"]);
-    const services = pick(body, ["services", "primary_type_of_business"]).replace("aspahlt", "asphalt"); // Fix typo
-    const extra_info = pick(body, ["extra_info"], "None provided");
-    const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"]);
-    const time_zone = pick(body, ["time_zone"]);
+    const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
+    const biz_email = cleanValue(pick(body, ["business_email"]));
+    const biz_phone = cleanValue(pick(body, ["business_phone"]));
+    const service_area = cleanValue(pick(body, ["service_area"]));
+    const summary_req = cleanValue(pick(body, ["post_call_summary_request"]));
+    const website = cleanValue(pick(body, ["website"]));
+    const business_hours = cleanValue(pick(body, ["business_hours"]));
+    const services = cleanValue(pick(body, ["services", "primary_type_of_business"])).replace("aspahlt", "asphalt");
+    const extra_info = cleanValue(pick(body, ["extra_info"], "None provided"));
+    const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
+    const time_zone = cleanValue(pick(body, ["time_zone"]));
 
-    // Protocol Details (Replacing [] with "Not provided")
-    const emergency_details = pick(body, ["emergency_dispatch_questions"]).replace("floor", "flood"); // Fix typo
-    const scheduling_details = pick(body, ["scheduling_details"]);
-    const intake_details = pick(body, ["job_intake_details"]);
-    const lead_revival_details = pick(body, ["lead_revival_questions"]);
+    // Protocol Details Cleaning
+    const emergency_details = cleanValue(pick(body, ["emergency_dispatch_questions"])).replace("floor", "flood");
+    const scheduling_details = cleanValue(pick(body, ["scheduling_details"])).replace("Calandar", "Calendar");
+    const intake_details = cleanValue(pick(body, ["job_intake_details"]));
+    const lead_revival_details = cleanValue(pick(body, ["lead_revival_questions"]));
     
-    // Dynamic Package Naming
     const raw_pkg = pick(body, ["package_type"], "Receptionist");
     const package_type = String(raw_pkg).toLowerCase();
     const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
-    // Identity Logic
     let identityName = "a professional AI receptionist";
     if (scheduling_details !== "Not provided" && package_type !== "receptionist") {
         identityName = "Ava, a professional AI receptionist";
@@ -109,7 +114,7 @@ If package_type is "custom" OR "receptionist", you do NOT directly book appointm
   1) Collect the caller’s name, callback number, address/location, service needed, and preferred day/time windows.
   2) Confirm you will pass the message to the main contact for scheduling.
   3) End politely and confidently without guessing availability.
-Empty brackets or missing values indicate scheduling is NOT enabled.
+Empty values indicate scheduling is NOT enabled.
 
 ACTIVE PROTOCOLS:
 ${emergency_details !== "Not provided" ? `- EMERGENCY DISPATCH: ${emergency_details}. If the caller reports an emergency matching the listed emergency types, escalate immediately and do not continue intake or scheduling.` : ""}
