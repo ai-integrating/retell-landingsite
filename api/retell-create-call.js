@@ -19,7 +19,7 @@ async function readJsonBody(req) {
   });
 }
 
-// Cleans data and removes risky empty brackets
+// Cleanly replaces all empty indicators with a single "Not provided" string
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "" || text === "/" || text === "null") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
@@ -36,36 +36,27 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ ENHANCED SCRAPER: With Browser Simulation & Better Cleaning
+// ✅ CLEAN SCRAPER: Dedicated logic for website enrichment
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
-  
-  console.log(`[SCRAPER] Starting fetch for: ${url}`);
   try {
     const response = await axios.get(url, { 
-        timeout: 8000, 
+        timeout: 9000, 
         headers: { 
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
         } 
     });
-    
     const html = response.data;
-    
-    // Strip scripts, styles, and junk tags while preserving text spacing
-    const textOnly = html
-        .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-        .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-        .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "") // Remove nav menus
-        .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "") // Remove footers
-        .replace(/<[^>]*>?/gm, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-                         
-    console.log(`[SCRAPER] Success. Extracted ${textOnly.length} characters.`);
-    return textOnly.substring(0, 3000); // Increased limit slightly
+    const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
+                         .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
+                         .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "") 
+                         .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "") 
+                         .replace(/<[^>]*>?/gm, ' ')
+                         .replace(/\s+/g, ' ')
+                         .trim();
+    return textOnly.substring(0, 3000); 
   } catch (e) {
-    console.error(`[SCRAPER] FAILED for ${url}: ${e.message}`);
     return null;
   }
 }
@@ -80,10 +71,9 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
+    // 1. DYNAMIC DATA EXTRACTION
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
-    
-    // ✅ SCRAPE BEFORE BUILDING PROMPT
     const website_content = await getWebsiteContext(website_url);
 
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
@@ -106,11 +96,13 @@ module.exports = async function handler(req, res) {
     const package_type = String(raw_pkg).toLowerCase();
     const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
+    // 2. IDENTITY LOGIC
     let identityName = "a professional AI receptionist";
     if (scheduling_details !== "Not provided" && package_type !== "receptionist") {
         identityName = "Ava, a professional AI receptionist";
     }
 
+    // 3. MASTER PROMPT CONSTRUCTION (NO REDUNDANCY)
     const MASTER_PROMPT = `
 IDENTITY & ROLE
 You are ${identityName} for ${biz_name}.
@@ -169,6 +161,7 @@ IF ANY FIELD IS "Not provided":
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
+    // 4. RETELL CREATION
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
         begin_message: greeting || `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
