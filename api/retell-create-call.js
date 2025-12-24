@@ -19,7 +19,7 @@ async function readJsonBody(req) {
   });
 }
 
-// Cleanly replaces all empty indicators with a single "Not provided" string
+// ✅ Normalized cleaning for all inputs
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "" || text === "/" || text === "null") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
@@ -36,7 +36,7 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ CLEAN SCRAPER: Dedicated logic for website enrichment
+// ✅ CONSOLIDATED SCRAPER: Mimics browser to bypass blocks
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
   try {
@@ -71,7 +71,7 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // 1. DYNAMIC DATA EXTRACTION
+    // 1. DATA EXTRACTION
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
     const website_content = await getWebsiteContext(website_url);
@@ -102,7 +102,7 @@ module.exports = async function handler(req, res) {
         identityName = "Ava, a professional AI receptionist";
     }
 
-    // 3. MASTER PROMPT CONSTRUCTION (NO REDUNDANCY)
+    // 3. MASTER PROMPT CONSTRUCTION (CONSOLIDATED)
     const MASTER_PROMPT = `
 IDENTITY & ROLE
 You are ${identityName} for ${biz_name}.
@@ -161,7 +161,7 @@ IF ANY FIELD IS "Not provided":
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
-    // 4. RETELL CREATION
+    // 4. AGENT PROVISIONING
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
         begin_message: greeting || `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
