@@ -19,7 +19,7 @@ async function readJsonBody(req) {
   });
 }
 
-// Cleans data and removes risky empty brackets
+// ✅ Cleans data and removes risky empty brackets
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "" || text === "/") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
@@ -36,7 +36,7 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ ENHANCED SCRAPER: Fetches and cleans website text
+// ✅ ENHANCED SCRAPER: Fetches and strips HTML
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
   try {
@@ -45,15 +45,15 @@ async function getWebsiteContext(url) {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Integrating-Bot/1.0' } 
     });
     const html = response.data;
-    // Strip HTML tags and excess whitespace
+    // Strip scripts, styles, and tags for a clean prompt
     const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
                          .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
                          .replace(/<[^>]*>?/gm, ' ')
                          .replace(/\s\s+/g, ' ')
                          .trim();
-    return textOnly.substring(0, 2500); // Send first 2500 chars
+    return textOnly.substring(0, 2500); 
   } catch (e) {
-    console.log("Scrape Failed for:", url, e.message);
+    console.log("Scrape Failed:", e.message);
     return null;
   }
 }
@@ -71,7 +71,7 @@ module.exports = async function handler(req, res) {
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
     
-    // ✅ SCRAPE BEFORE PROMPT CREATION
+    // ✅ PERFORM SCRAPE
     const website_content = await getWebsiteContext(website_url);
 
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
@@ -132,7 +132,6 @@ BUSINESS PROFILE
 - Additional Notes: ${extra_info}
 
 ${website_content ? `WEBSITE-DERIVED CONTEXT (REFERENCE ONLY):
-The following information was extracted from the business website. Use it only if it aligns with caller questions and do not invent beyond it.
 ---
 ${website_content}
 ---` : ""}
@@ -147,7 +146,7 @@ If package_type is "custom" OR "receptionist", you do NOT directly book appointm
 Empty or "Not provided" values indicate scheduling is NOT enabled.
 
 ACTIVE PROTOCOLS:
-${emergency_details !== "Not provided" ? `- EMERGENCY DISPATCH: ${emergency_details}. If the caller reports an emergency matching the listed emergency types, escalate immediately and do not continue intake or scheduling.` : ""}
+${emergency_details !== "Not provided" ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
 ${scheduling_details !== "Not provided" ? `- SCHEDULING: ${scheduling_details}` : ""}
 ${intake_details !== "Not provided" ? `- JOB INTAKE: ${intake_details}` : ""}
 ${lead_revival_details !== "Not provided" ? `- LEAD REVIVAL: ${lead_revival_details}` : ""}
