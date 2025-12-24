@@ -19,7 +19,13 @@ async function readJsonBody(req) {
   });
 }
 
-// ✅ Normalized cleaning for all inputs
+// ✅ Fix 1: Extract URL even if it has extra text around it
+function extractFirstUrl(text) {
+  if (!text) return null;
+  const m = String(text).match(/https?:\/\/[^\s)]+/i);
+  return m ? m[0] : null;
+}
+
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "" || text === "/" || text === "null") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
@@ -36,29 +42,64 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ CONSOLIDATED SCRAPER: Mimics browser to bypass blocks
+// ✅ Fix 2: Enhanced Scraper with Logging & Proxy Fallback
 async function getWebsiteContext(url) {
-  if (!url || url === "Not provided" || !url.startsWith("http")) return null;
-  try {
-    const response = await axios.get(url, { 
-        timeout: 9000, 
-        headers: { 
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
-        } 
-    });
-    const html = response.data;
-    const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-                         .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-                         .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "") 
-                         .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "") 
-                         .replace(/<[^>]*>?/gm, ' ')
-                         .replace(/\s+/g, ' ')
-                         .trim();
-    return textOnly.substring(0, 3000); 
-  } catch (e) {
-    return null;
+  if (!url || url === "Not provided") return null;
+
+  // Extract clean URL from potentially messy input
+  if (!url.startsWith("http")) {
+    const extracted = extractFirstUrl(url);
+    if (extracted) url = extracted;
+    else return null;
   }
+
+  // Normalize trailing slash
+  if (!url.endsWith("/")) url = url + "/";
+
+  // 1) Try direct fetch with logging
+  try {
+    const response = await axios.get(url, {
+      timeout: 9000,
+      maxRedirects: 5,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      },
+      validateStatus: (s) => s >= 200 && s < 400,
+    });
+
+    const html = response.data || "";
+    const textOnly = html
+      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
+      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
+      .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "")
+      .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "")
+      .replace(/<[^>]*>?/gm, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (textOnly.length >= 200) {
+      console.log("Direct scrape success:", { url, length: textOnly.length });
+      return textOnly.substring(0, 2000);
+    }
+  } catch (e) {
+    console.log("Direct fetch failed, trying proxy:", { url, status: e?.response?.status, message: e?.message });
+  }
+
+  // 2) Fallback: Reliable Proxy (Jina AI Reader)
+  try {
+    const proxyUrl = `https://r.jina.ai/${url}`;
+    const r = await axios.get(proxyUrl, { timeout: 9000 });
+    const txt = String(r.data || "").replace(/\s+/g, " ").trim();
+    if (txt.length >= 200) {
+      console.log("Proxy scrape success:", { url, length: txt.length });
+      return txt.substring(0, 2000);
+    }
+  } catch (e) {
+    console.log("Proxy fetch failed:", { url, message: e?.message });
+  }
+
+  return null;
 }
 
 module.exports = async function handler(req, res) {
@@ -71,69 +112,46 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // 1. DATA EXTRACTION
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
-    const website_url = cleanValue(pick(body, ["website"]));
-    const website_content = await getWebsiteContext(website_url);
+    const website_input = pick(body, ["website"]);
+    const website_content = await getWebsiteContext(website_input);
 
+    const website_url = cleanValue(website_input);
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
     const biz_email = cleanValue(pick(body, ["business_email"]));
     const biz_phone = cleanValue(pick(body, ["business_phone"]));
     const service_area = cleanValue(pick(body, ["service_area"]));
-    const summary_req = cleanValue(pick(body, ["post_call_summary_request"]));
     const business_hours = cleanValue(pick(body, ["business_hours"]));
-    const services = cleanValue(pick(body, ["services", "primary_type_of_business"])).replace("aspahlt", "asphalt");
+    const services = cleanValue(pick(body, ["services"])).replace("aspahlt", "asphalt");
     const extra_info = cleanValue(pick(body, ["extra_info"]));
-    const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = cleanValue(pick(body, ["time_zone"]));
 
     const emergency_details = cleanValue(pick(body, ["emergency_dispatch_questions"])).replace("floor", "flood");
     const scheduling_details = cleanValue(pick(body, ["scheduling_details"])).replace("Calandar", "Calendar");
     const intake_details = cleanValue(pick(body, ["job_intake_details"])).replace("[Location]", "[Service address or city/town]");
-    const lead_revival_details = cleanValue(pick(body, ["lead_revival_questions"]));
     
     const raw_pkg = pick(body, ["package_type"], "Receptionist");
     const package_type = String(raw_pkg).toLowerCase();
     const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
-    // 2. IDENTITY LOGIC
-    let identityName = "a professional AI receptionist";
-    if (scheduling_details !== "Not provided" && package_type !== "receptionist") {
-        identityName = "Ava, a professional AI receptionist";
-    }
-
-    // 3. MASTER PROMPT CONSTRUCTION (CONSOLIDATED)
     const MASTER_PROMPT = `
 IDENTITY & ROLE
-You are ${identityName} for ${biz_name}.
-Answer calls clearly and confidently, follow business rules exactly, and never guess.
-If information is missing, politely ask the caller or offer to take a message.
-If website-derived information conflicts with caller statements or is unclear, defer to the caller and offer to take a message.
+You are Ava for ${biz_name}. Follow business rules exactly and never guess.
+If website info conflicts with caller, defer to the caller and take a message.
 
 STYLE
-- Warm, calm, concise, human.
-- Do not mention you are an AI unless asked.
-- Do not invent facts.
+- Warm, concise, human. Do not invent facts.
 
 GOAL
-- Help inbound callers quickly: answer basic questions OR take a detailed message.
-- Confirm spelling for names, phone numbers, emails.
+- Help inbound callers quickly or take a message.
 `.trim();
 
     const BUSINESS_PROFILE = `
 BUSINESS PROFILE
 - Business Name: ${biz_name}
-- Package Type: ${package_type}
-- Main Contact: ${contact_name}
-- Business Email: ${biz_email}
-- Business Phone: ${biz_phone}
 - Website: ${website_url}
 - Business Hours: ${business_hours}
-- Service Area: ${service_area}
 - Services: ${services}
-- Time Zone: ${time_zone}
-- Summary Requirements: ${summary_req}
-- Additional Notes: ${extra_info}
 
 ${website_content ? `WEBSITE-DERIVED CONTEXT (REFERENCE ONLY):
 ---
@@ -141,44 +159,32 @@ ${website_content}
 ---` : ""}
 
 RECEPTIONIST PACKAGE SCHEDULING POLICY (DO NOT OVERRIDE):
-If package_type is "custom" OR "receptionist", you do NOT directly book appointments or confirm exact time slots unless a valid Calendar Link is provided in Scheduling Details.
-- If Scheduling Details include a usable Calendar Link and clear booking rules, you may offer to schedule within those rules.
-- If the Calendar Link is missing, blank, or "Not provided", do NOT schedule. Instead:
-  1) Collect the caller’s name, callback number, address/location, service needed, and preferred day/time windows.
-  2) Confirm you will pass the message to the main contact for scheduling.
-  3) End politely and confidently without guessing availability.
+If package_type is "custom" OR "receptionist", you do NOT book appointments without a Calendar Link.
 Empty or "Not provided" values indicate scheduling is NOT enabled.
 
 ACTIVE PROTOCOLS:
 ${emergency_details !== "Not provided" ? `- EMERGENCY DISPATCH: ${emergency_details}` : ""}
 ${scheduling_details !== "Not provided" ? `- SCHEDULING: ${scheduling_details}` : ""}
 ${intake_details !== "Not provided" ? `- JOB INTAKE: ${intake_details}` : ""}
-${lead_revival_details !== "Not provided" ? `- LEAD REVIVAL: ${lead_revival_details}` : ""}
 
-IF ANY FIELD IS "Not provided":
-- politely ask the caller for what you need, or offer to take a message.
+IF ANY FIELD IS "Not provided": ask or take a message.
 `.trim();
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
-    // 4. AGENT PROVISIONING
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
-        begin_message: greeting || `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
+        begin_message: pick(body, ["greeting"], `Hi! Thanks for calling ${biz_name}. How can I help you?`),
         model: "gpt-4o-mini",
     }, { headers, timeout: 15000 });
 
-    const llm_id = llmResp.data?.llm_id;
-    if (!llm_id) return res.status(500).json({ error: "No llm_id returned" });
-
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
         agent_name: `${biz_name} - ${package_suffix}`,
-        voice_id: pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID),
-        response_engine: { type: "retell-llm", llm_id },
-        metadata: { business_name: biz_name, package_type },
+        voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
+        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
     }, { headers, timeout: 15000 });
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data?.agent_id, llm_id });
+    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
   } catch (error) {
     return res.status(500).json({ error: "Provisioning Failed", details: error?.response?.data || error?.message });
   }
