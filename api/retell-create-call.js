@@ -54,16 +54,24 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = pick(body, ["time_zone"], "");
 
-    // Protocol Details
+    // Protocol Details from Zapier
     const emergency_details = pick(body, ["emergency_dispatch_questions"], "");
     const scheduling_details = pick(body, ["scheduling_details"], "");
     const intake_details = pick(body, ["job_intake_details"], "");
     const lead_revival_details = pick(body, ["lead_revival_questions"], "");
     
+    // ✅ Dynamic Package Naming Logic
+    const raw_pkg = pick(body, ["package_type"], "Receptionist");
+    const package_type = String(raw_pkg).toLowerCase();
+    
+    // Formats "full_staff" -> "Full Staff" for the Retell dashboard name
+    const package_suffix = String(raw_pkg)
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, l => l.toUpperCase());
+
     // Identity Logic
-    const package_type = String(pick(body, ["package_type"], "Receptionist"));
     let identityName = "a professional AI receptionist";
-    if (scheduling_details && package_type !== "Receptionist") identityName = "Ava, a professional AI receptionist";
+    if (scheduling_details && package_type !== "receptionist") identityName = "Ava, a professional AI receptionist";
 
     // ---- MASTER PROMPT ----
     const MASTER_PROMPT = `
@@ -99,7 +107,7 @@ BUSINESS PROFILE
 - Additional Notes: ${extra_info || "None provided"}
 
 RECEPTIONIST PACKAGE SCHEDULING POLICY (DO NOT OVERRIDE):
-If package_type is "Receptionist", you do NOT directly book appointments or confirm exact time slots unless a valid Calendar Link is provided in Scheduling Details.
+If package_type is "receptionist", you do NOT directly book appointments or confirm exact time slots unless a valid Calendar Link is provided in Scheduling Details.
 - If Scheduling Details include a usable Calendar Link and clear booking rules, you may offer to schedule within those rules.
 - If the Calendar Link is missing, blank, or "Not provided/No data", do NOT schedule. Instead:
   1) Collect the caller’s name, callback number, address/location, service needed, and preferred day/time windows.
@@ -118,6 +126,7 @@ IF ANY FIELD IS "Not provided":
 
     const FINAL_PROMPT = `${MASTER_PROMPT}\n\n${BUSINESS_PROFILE}`;
 
+    // 1) Create LLM
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
         begin_message: greeting || `Hi! Thanks for calling ${biz_name}. How can I help you today?`,
@@ -127,8 +136,9 @@ IF ANY FIELD IS "Not provided":
     const llm_id = llmResp.data?.llm_id;
     if (!llm_id) return res.status(500).json({ error: "No llm_id returned" });
 
+    // 2) Create Agent with Dynamic Name
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-        agent_name: `${biz_name} - Receptionist`,
+        agent_name: `${biz_name} - ${package_suffix}`,
         voice_id: pick(body, ["voice_id", "voiceId"], process.env.DEFAULT_VOICE_ID),
         response_engine: { type: "retell-llm", llm_id },
         metadata: { business_name: biz_name, package_type },
