@@ -21,7 +21,7 @@ async function readJsonBody(req) {
 
 // Cleans data and removes risky empty brackets
 function cleanValue(text) {
-  if (!text || text === "[]" || text === "No data" || text === "" || text === "/") return "Not provided";
+  if (!text || text === "[]" || text === "No data" || text === "" || text === "/" || text === "null") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
 }
 
@@ -36,28 +36,36 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ ENHANCED SCRAPER: With error logging for Vercel
+// ✅ ENHANCED SCRAPER: With Browser Simulation & Better Cleaning
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
-  console.log(`Attempting to scrape: ${url}`);
+  
+  console.log(`[SCRAPER] Starting fetch for: ${url}`);
   try {
     const response = await axios.get(url, { 
-        timeout: 7000, 
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Integrating-Bot/1.0' } 
+        timeout: 8000, 
+        headers: { 
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+        } 
     });
+    
     const html = response.data;
     
-    // Strip scripts, styles, and tags while preserving spacing
-    const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-                         .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-                         .replace(/<[^>]*>?/gm, ' ')
-                         .replace(/\s+/g, ' ')
-                         .trim();
+    // Strip scripts, styles, and junk tags while preserving text spacing
+    const textOnly = html
+        .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
+        .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
+        .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "") // Remove nav menus
+        .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "") // Remove footers
+        .replace(/<[^>]*>?/gm, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
                          
-    console.log(`Scrape successful. Characters found: ${textOnly.length}`);
-    return textOnly.substring(0, 2500); 
+    console.log(`[SCRAPER] Success. Extracted ${textOnly.length} characters.`);
+    return textOnly.substring(0, 3000); // Increased limit slightly
   } catch (e) {
-    console.error(`SCRAPE ERROR for ${url}: ${e.message}`);
+    console.error(`[SCRAPER] FAILED for ${url}: ${e.message}`);
     return null;
   }
 }
@@ -75,7 +83,7 @@ module.exports = async function handler(req, res) {
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
     
-    // ✅ SCRAPE BEFORE BUILDING THE PROMPT
+    // ✅ SCRAPE BEFORE BUILDING PROMPT
     const website_content = await getWebsiteContext(website_url);
 
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
