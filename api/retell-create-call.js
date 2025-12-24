@@ -36,24 +36,28 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ ENHANCED SCRAPER: Fetches and strips HTML
+// ✅ ENHANCED SCRAPER: With error logging for Vercel
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
+  console.log(`Attempting to scrape: ${url}`);
   try {
     const response = await axios.get(url, { 
-        timeout: 6000, 
+        timeout: 7000, 
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Integrating-Bot/1.0' } 
     });
     const html = response.data;
-    // Strip scripts, styles, and tags for a clean prompt
+    
+    // Strip scripts, styles, and tags while preserving spacing
     const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
                          .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
                          .replace(/<[^>]*>?/gm, ' ')
-                         .replace(/\s\s+/g, ' ')
+                         .replace(/\s+/g, ' ')
                          .trim();
+                         
+    console.log(`Scrape successful. Characters found: ${textOnly.length}`);
     return textOnly.substring(0, 2500); 
   } catch (e) {
-    console.log("Scrape Failed:", e.message);
+    console.error(`SCRAPE ERROR for ${url}: ${e.message}`);
     return null;
   }
 }
@@ -71,7 +75,7 @@ module.exports = async function handler(req, res) {
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
     
-    // ✅ PERFORM SCRAPE
+    // ✅ SCRAPE BEFORE BUILDING THE PROMPT
     const website_content = await getWebsiteContext(website_url);
 
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
