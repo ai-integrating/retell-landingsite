@@ -19,9 +19,9 @@ async function readJsonBody(req) {
   });
 }
 
-// Function to replace empty brackets or blank strings with "Not provided"
+// Cleans data and removes risky empty brackets
 function cleanValue(text) {
-  if (!text || text === "[]" || text === "No data" || text === "") return "Not provided";
+  if (!text || text === "[]" || text === "No data" || text === "" || text === "/") return "Not provided";
   return String(text).replace(/\[\]/g, "Not provided");
 }
 
@@ -36,21 +36,24 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// ✅ NEW: Server-side Website Scraper Logic
+// ✅ ENHANCED SCRAPER: Fetches and cleans website text
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided" || !url.startsWith("http")) return null;
   try {
-    // Fetches homepage content (timeout after 5s to prevent latency)
-    const response = await axios.get(url, { timeout: 5000 });
+    const response = await axios.get(url, { 
+        timeout: 6000, 
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Integrating-Bot/1.0' } 
+    });
     const html = response.data;
-    
-    // Simplistic extraction: removes tags to find key text snippets
-    const textOnly = html.replace(/<[^>]*>?/gm, ' ').replace(/\s\s+/g, ' ');
-    
-    // Limit to first 2000 characters to keep prompt window clean
-    return textOnly.substring(0, 2000); 
+    // Strip HTML tags and excess whitespace
+    const textOnly = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
+                         .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
+                         .replace(/<[^>]*>?/gm, ' ')
+                         .replace(/\s\s+/g, ' ')
+                         .trim();
+    return textOnly.substring(0, 2500); // Send first 2500 chars
   } catch (e) {
-    console.error("Website fetch failed:", e.message);
+    console.log("Scrape Failed for:", url, e.message);
     return null;
   }
 }
@@ -65,11 +68,10 @@ module.exports = async function handler(req, res) {
     const RETELL_API_KEY = process.env.RETELL_API_KEY;
     const headers = { Authorization: `Bearer ${RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // ---- Data Extraction & Cleaning ----
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
     const website_url = cleanValue(pick(body, ["website"]));
     
-    // ✅ TRIGGER WEBSITE ENRICHMENT
+    // ✅ SCRAPE BEFORE PROMPT CREATION
     const website_content = await getWebsiteContext(website_url);
 
     const contact_name = cleanValue(pick(body, ["name", "main_contact_name"]));
@@ -79,7 +81,7 @@ module.exports = async function handler(req, res) {
     const summary_req = cleanValue(pick(body, ["post_call_summary_request"]));
     const business_hours = cleanValue(pick(body, ["business_hours"]));
     const services = cleanValue(pick(body, ["services", "primary_type_of_business"])).replace("aspahlt", "asphalt");
-    const extra_info = cleanValue(pick(body, ["extra_info"], "None provided"));
+    const extra_info = cleanValue(pick(body, ["extra_info"]));
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = cleanValue(pick(body, ["time_zone"]));
 
