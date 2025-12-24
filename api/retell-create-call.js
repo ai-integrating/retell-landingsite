@@ -99,23 +99,10 @@ async function getWebsiteContext(url) {
 }
 
 // --- 3. SMART FACT EXTRACTION ---
-function extractIncludingAreas(text) {
-  const m = text.match(/including\s+([A-Za-z,\s]+?)(?:and\s+surrounding|surrounding|area|towns|cities|\.)/i);
-  if (!m || !m[1]) return [];
-  return uniq(m[1].split(",").map(s => s.trim()).filter(s => s.length >= 3)).slice(0, 10);
-}
-
-function extractCommaPlaceLists(text) {
-  const m = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?:,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)+\b/g);
-  return m ? m.slice(0, 2) : [];
-}
-
 function buildWebsiteFacts(text, businessTypeHint = "") {
   if (!text) return "";
   const raw = String(text);
   const lower = raw.toLowerCase();
-
-  const areas = uniq([...extractIncludingAreas(raw), ...extractCommaPlaceLists(raw).join(", ").split(",").map(s => s.trim())]).filter(a => a.length >= 3).slice(0, 10);
 
   const tradeBoosters = {
     hvac: ["air conditioning", "ac", "heating", "furnace", "boiler", "heat pump", "duct repair"],
@@ -142,14 +129,7 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
     return token && token.length >= 5 && lower.includes(token);
   }).slice(0, 12);
 
-  const lines = [];
-  if (areas.length) lines.push(`- Service area: ${areas.join(", ")}.`);
-  if (services.length) lines.push(`- Services: ${services.join(", ")}.`);
-  if (lower.includes("residential") || lower.includes("commercial")) {
-    const rc = [lower.includes("residential") ? "Residential" : null, lower.includes("commercial") ? "Commercial" : null].filter(Boolean).join(" + ");
-    lines.push(`- Serving: ${rc}.`);
-  }
-  return lines.length ? `WEBSITE FACTS (FAST REFERENCE):\n${lines.join("\n")}` : "";
+  return services.length ? `WEBSITE FACTS:\n- Services: ${services.join(", ")}.` : "";
 }
 
 // --- 4. MAIN HANDLER ---
@@ -162,7 +142,7 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const headers = { "Authorization": `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name", "businessName"], "the business");
+    const biz_name = pick(body, ["business_name"], "the business");
     const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
     const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
     const website_content = await getWebsiteContext(website_url);
@@ -176,16 +156,14 @@ module.exports = async function handler(req, res) {
     const FINAL_PROMPT = `
 IDENTITY:
 - You are Allie with ${biz_name}.
-- If asked "who are you?" or "who am I speaking to?", say: "This is Allie with ${biz_name}."
-- Do NOT volunteer that you are an AI. Only acknowledge being an AI if explicitly asked.
-- If explicitly asked "Are you an AI?" or "Is this a robot?", say: "Yes — I’m an AI assistant helping the team handle calls. I can help now or take a detailed message."
-- If pressed for more detail, say: "I’m part of the team here and help handle incoming calls."
+- If asked "who are you?", say: "This is Allie with ${biz_name}."
+- Do NOT volunteer that you are an AI. Only acknowledge if explicitly asked.
 
-STYLE: Warm, human, concise. Never guess.
+STYLE: Warm, human, concise.
 
 ${structured_facts}
 
-RAW WEBSITE EXCERPT (REFERENCE ONLY):
+RAW WEBSITE EXCERPT:
 ---
 ${website_content ? website_content.substring(0, 800) : "No website data found."}
 ---
@@ -197,21 +175,36 @@ INTAKE: ${cleanValue(pick(body, ["job_intake_details"]))}
 RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time.
 `.trim();
 
+    // ✅ UPDATE: LLM Creation with Suffix for visibility
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
         general_prompt: FINAL_PROMPT,
-        begin_message: pick(body, ["greeting"], `Hi, thanks for calling ${biz_name}.`),
+        begin_message: cleanValue(pick(body, ["greeting"], `Hi, thanks for calling ${biz_name}.`)),
         model: "gpt-4o-mini",
     }, { headers });
 
+    // ✅ UPDATE: llm_id Sanity Check
+    const llm_id = llmResp?.data?.llm_id;
+    if (!llm_id) throw new Error("Retell failed to provide an llm_id.");
+
+    const timestamp = new Date().toISOString().slice(0,16).replace(/[:T]/g,"");
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-        agent_name: `${biz_name} Agent`,
+        agent_name: `${biz_name} Agent - ${timestamp}`,
         voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
-        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-        metadata: { notify_phone: pick(body, ["notify_phone", "cell_phone"]), business_name: biz_name }
+        response_engine: { type: "retell-llm", llm_id: llm_id },
+        metadata: { 
+          notify_phone: pick(body, ["notify_phone", "cell_phone"]), 
+          client_email: pick(body, ["email_for_call_summaries", "email"]),
+          business_name: biz_name 
+        }
     }, { headers });
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id, facts: Boolean(structured_facts) });
+    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
+
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    // ✅ UPDATE: Real Error Details
+    return res.status(500).json({ 
+      error: "Provisioning Failed", 
+      details: error?.response?.data || error?.message || String(error) 
+    });
   }
 };
