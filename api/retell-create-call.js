@@ -22,7 +22,6 @@ async function readJsonBody(req) {
 // Function to replace empty brackets or blank strings with "Not provided"
 function cleanValue(text) {
   if (!text || text === "[]" || text === "No data" || text === "") return "Not provided";
-  // Cleans internal empty brackets within mapped strings
   return String(text).replace(/\[\]/g, "Not provided");
 }
 
@@ -61,16 +60,19 @@ module.exports = async function handler(req, res) {
     const greeting = pick(body, ["greeting", "how_callers_should_be_greeted"], "");
     const time_zone = cleanValue(pick(body, ["time_zone"]));
 
-    // Protocol Details Cleaning
+    // Protocol Details Cleaning & Polishing
     const emergency_details = cleanValue(pick(body, ["emergency_dispatch_questions"])).replace("floor", "flood");
     const scheduling_details = cleanValue(pick(body, ["scheduling_details"])).replace("Calandar", "Calendar");
-    const intake_details = cleanValue(pick(body, ["job_intake_details"]));
+    // Micro-fix: Clarify Location intake
+    const intake_details = cleanValue(pick(body, ["job_intake_details"])).replace("[Location]", "[Service address or city/town]");
     const lead_revival_details = cleanValue(pick(body, ["lead_revival_questions"]));
     
+    // Dynamic Package Naming
     const raw_pkg = pick(body, ["package_type"], "Receptionist");
     const package_type = String(raw_pkg).toLowerCase();
     const package_suffix = String(raw_pkg).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
+    // Identity Logic
     let identityName = "a professional AI receptionist";
     if (scheduling_details !== "Not provided" && package_type !== "receptionist") {
         identityName = "Ava, a professional AI receptionist";
@@ -114,7 +116,7 @@ If package_type is "custom" OR "receptionist", you do NOT directly book appointm
   1) Collect the caller’s name, callback number, address/location, service needed, and preferred day/time windows.
   2) Confirm you will pass the message to the main contact for scheduling.
   3) End politely and confidently without guessing availability.
-Empty values indicate scheduling is NOT enabled.
+Empty or "Not provided" values indicate scheduling is NOT enabled.
 
 ACTIVE PROTOCOLS:
 ${emergency_details !== "Not provided" ? `- EMERGENCY DISPATCH: ${emergency_details}. If the caller reports an emergency matching the listed emergency types, escalate immediately and do not continue intake or scheduling.` : ""}
