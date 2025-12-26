@@ -278,7 +278,7 @@ RULE: If a caller asks to book, collect preferred windows and callback number. D
       "https://api.retellai.com/create-retell-llm",
       {
         general_prompt: FINAL_PROMPT,
-        begin_message: pick(body, ["greeting"], `Hi, thanks for calling ${biz_name}.`),
+        begin_message: pick(body, ["greeting"], `Hi, thanks for calling ${biz_name}, how can i help you today?`),
         model: "gpt-4o-mini",
       },
       { headers }
