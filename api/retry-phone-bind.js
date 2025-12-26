@@ -10,14 +10,22 @@ function setCors(res) {
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -66,6 +74,7 @@ async function bindPhoneNumberToAgent({ phoneData, agentId }) {
   const phoneNumber = phoneData.phone_number || phoneData.e164 || phoneData.number || null;
   const phoneId = phoneData.phone_number_id || phoneData.id || null;
 
+  // Try binding using the phone number string first (best case)
   if (phoneNumber) {
     try {
       await axios.patch(
@@ -74,9 +83,16 @@ async function bindPhoneNumberToAgent({ phoneData, agentId }) {
         { headers: retellHeaders(), timeout: 7000 }
       );
       return { phone_number: phoneNumber };
-    } catch (_) {}
+    } catch (e) {
+      // Log once, then fall back to phoneId
+      console.warn(
+        "Bind via phoneNumber failed; trying phoneId...",
+        e?.response?.data || e?.message || e
+      );
+    }
   }
 
+  // Fallback binding using ID if Retell expects that variant
   if (phoneId) {
     await axios.patch(
       `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneId)}`,
@@ -97,7 +113,8 @@ module.exports = async (req, res) => {
   try {
     const body = await readJsonBody(req);
 
-    const agentId = pick(body, ["agent_id"], "");
+    // ✅ Accept multiple possible key names from Zapier to prevent "Missing agent_id"
+    const agentId = pick(body, ["agent_id", "agentId", "id", "Agent ID"], "");
     if (!agentId) return res.status(400).json({ ok: false, error: "Missing agent_id" });
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
@@ -105,7 +122,7 @@ module.exports = async (req, res) => {
 
     const phoneData = await createPhoneNumber({
       areaCode,
-      nickname: `${bizName} - Retry Line`,
+      nickname: `${bizName} - Retry Line (${String(agentId).slice(-6)})`,
     });
 
     const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
@@ -113,6 +130,8 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, agent_id: agentId, phone_number: bound.phone_number });
   } catch (error) {
     console.error("retry-phone-bind failed:", error?.response?.data || error?.message || error);
-    return res.status(500).json({ ok: false, error: "Retry Failed", details: error?.response?.data || error?.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Retry Failed", details: error?.response?.data || error?.message });
   }
 };
