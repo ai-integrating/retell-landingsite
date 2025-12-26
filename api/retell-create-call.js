@@ -1,6 +1,9 @@
+// /api/provision.js
 const axios = require("axios");
 
-// --- 1. CORE UTILITIES ---
+// --------------------
+// Helpers
+// --------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -9,202 +12,333 @@ function setCors(res) {
 
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
+  if (req.body && typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
+  }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
   });
 }
 
-const decodeHtml = (s) => String(s || "").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
-
-function pick(obj, keys, fallback = "Not provided") {
+function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
-    let val = obj?.[k];
-    if (val !== undefined && val !== null && val !== "") {
-      if (typeof val === "object" && val.output) return val.output;
-      return val;
-    }
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
   }
   return fallback;
 }
 
-function cleanValue(text) {
-  const t = String(text || "").trim();
-  if (!t || t === "[]" || t === "No data" || t === "/" || t === "null" || t.toLowerCase() === "not provided")
-    return "Not provided";
-  return t.replace(/\[\]/g, "Not provided");
+function digitsOnly(s) {
+  return String(s || "").replace(/\D/g, "");
 }
 
-function uniq(arr) {
-  return Array.from(new Set((arr || []).map(x => String(x).trim()).filter(Boolean)));
+function inferAreaCode(body) {
+  // Priority: preferred_area_code -> business_phone -> fallback
+  const preferred = digitsOnly(pick(body, ["preferred_area_code", "area_code"], "")).slice(0, 3);
+  if (preferred.length === 3) return preferred;
+
+  const bizPhone = pick(body, ["business_phone", "phone", "company_phone"], "");
+  const d = digitsOnly(bizPhone);
+
+  // US 10-digit: AAAxxxxxxx or 11-digit starting with 1
+  if (d.length === 10) return d.slice(0, 3);
+  if (d.length === 11 && d.startsWith("1")) return d.slice(1, 4);
+
+  return "508"; // safe default
 }
 
-// --- 2. URL & SCRAPER LOGIC ---
-function extractFirstUrl(text) {
-  if (!text) return null;
-  const m = String(text).match(/https?:\/\/[^\s)]+/i);
-  return m ? m[0] : null;
+function nowStamp() {
+  return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "");
 }
 
-function normalizeWebsite(raw) {
-  if (!raw || raw === "Not provided") return "Not provided";
-  if (typeof raw === "object" && raw.output) raw = raw.output;
-  raw = String(raw).trim();
-  const extracted = extractFirstUrl(raw);
-  if (extracted) return extracted;
-  if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
-  return raw.startsWith("http") ? raw : "Not provided";
-}
+// --------------------
+// Canonical lineup + missions
+// --------------------
+const GLOBAL_PROTOCOL = `
+GLOBAL STAFF PROTOCOL (MANDATORY):
+- Identity: You are a member of the office team at {{business_name}}.
+- AI Disclosure: Do NOT volunteer that you are an AI. If explicitly asked "Are you a robot/AI?", say:
+  "Yes, I am an AI assistant helping the team handle calls. I can help you now or take a detailed message for the office."
+- Pricing: Never provide exact quotes or binding prices. Say:
+  "Pricing depends on the job requirements; our team will provide a formal estimate after reviewing your details."
+- Safety: Do not provide medical, legal, or technical safety advice. In life-threatening emergencies, instruct the caller to hang up and dial 911.
+- Consistency: Stay in character. Use a warm, professional, and efficient tone at all times.
+`;
 
-function looksLikeCode(text) {
-  const t = (text || "").slice(0, 1200).toLowerCase();
-  const codeHits = ["@keyframes", "view-transition", "webkit", "transform:", "opacity:", "{", "}", "::", "function(", "window.", "document."];
-  return codeHits.filter(k => t.includes(k)).length >= 2;
-}
+const STAFF_ROLES = [
+  {
+    name: "Allie",
+    role_display: "AI Receptionist",
+    role_id: "receptionist",
+    mission: `You are Allie, the AI Receptionist for {{business_name}}. Your job is to answer calls professionally, capture caller details, provide basic business info from WEBSITE FACTS, and route the caller to the correct next step. You do not overpromise; you set clear expectations and take excellent messages.`,
+  },
+  {
+    name: "Mia",
+    role_display: "Intake Specialist",
+    role_id: "intake",
+    mission: `You are Mia, the Intake Specialist for {{business_name}}. Your job is to qualify leads and capture complete job details using structured questions (service type, location, urgency, timeline, key details). You organize the request so the team can respond quickly.`,
+  },
+  {
+    name: "Lexi",
+    role_display: "Scheduler",
+    role_id: "scheduler",
+    mission: `You are Lexi, the Scheduler for {{business_name}}. Your job is to gather preferred appointment windows and scheduling details without overpromising. You collect what’s needed for approval and explain the confirmation process clearly.`,
+  },
+  {
+    name: "Sam",
+    role_display: "Dispatcher",
+    role_id: "dispatcher",
+    mission: `You are Sam, the Dispatcher for {{business_name}}. Your job is to identify urgent situations, gather critical details fast, and follow the escalation protocol. If not urgent, you capture details and route to normal workflow.`,
+  },
+];
 
-async function getWebsiteContext(url) {
-  if (!url || url === "Not provided") return null;
-  try {
-    const response = await axios.get(url, {
-      timeout: 8000,
-      maxRedirects: 5,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      }
-    });
-    let text = String(response.data || "")
-      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-      .replace(/<header[^>]*>([\s\S]*?)<\/header>/gim, "")
-      .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "")
-      .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "")
-      .replace(/<form[^>]*>([\s\S]*?)<\/form>/gim, "")
-      .replace(/<[^>]*>?/gm, " ").replace(/\s+/g, " ").trim();
+// --------------------
+// Retell client
+// --------------------
+const RETELL_BASE = "https://api.retellai.com";
 
-    text = decodeHtml(text);
-    if (text.length >= 200 && !looksLikeCode(text)) return text.substring(0, 2000);
-  } catch (e) { /* fall through */ }
-
-  try {
-    const proxyUrl = `https://r.jina.ai/${url.replace(/^https?:\/\//, "https://")}`;
-    const r = await axios.get(proxyUrl, { timeout: 9000 });
-    const txt = decodeHtml(String(r.data || "")).replace(/\s+/g, " ").trim();
-    if (txt.length >= 200 && !looksLikeCode(txt)) return txt.substring(0, 2000);
-  } catch (e) { return null; }
-  return null;
-}
-
-// --- 3. SMART FACT EXTRACTION ---
-function buildWebsiteFacts(text, businessTypeHint = "") {
-  if (!text) return "";
-  const raw = String(text);
-  const lower = raw.toLowerCase();
-
-  const tradeBoosters = {
-    hvac: ["air conditioning", "ac", "heating", "furnace", "boiler", "heat pump", "duct repair"],
-    plumbing: ["drain cleaning", "pipe repair", "leak detection", "water heater", "sewer", "sump pump"],
-    paving: ["asphalt paving", "sealcoating", "patchwork", "crack filling", "line painting", "excavation", "curbing", "sidewalks", "snow removal"],
-    roofing: ["roof repair", "shingle replacement", "flat roof", "leak repair", "siding", "gutters"]
+function retellHeaders() {
+  const apiKey = process.env.RETELL_API_KEY;
+  if (!apiKey) throw new Error("Missing RETELL_API_KEY in environment variables.");
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
   };
+}
 
-  let booster = [];
-  const hint = String(businessTypeHint || "").toLowerCase();
-  for (const key of Object.keys(tradeBoosters)) { if (hint.includes(key)) booster = tradeBoosters[key]; }
+// Create LLM (Retell)
+async function createRetellLLM({ prompt, model }) {
+  const headers = retellHeaders();
+  const resp = await axios.post(
+    `${RETELL_BASE}/create-retell-llm`,
+    {
+      general_prompt: prompt,
+      model: model || "gpt-4o-mini",
+    },
+    { headers }
+  );
+  return resp.data; // expects llm_id
+}
 
-  if (!booster.length) {
-    if (lower.includes("asphalt") || lower.includes("paving") || lower.includes("sealcoating")) booster = tradeBoosters.paving;
-    else if (lower.includes("plumbing") || lower.includes("drain")) booster = tradeBoosters.plumbing;
-    else if (lower.includes("hvac") || lower.includes("furnace")) booster = tradeBoosters.hvac;
+// Create Agent (Retell)
+async function createRetellAgent({ bizName, staffName, roleDisplay, llmId, voiceId, metadata }) {
+  const headers = retellHeaders();
+  const stamp = nowStamp();
+  const resp = await axios.post(
+    `${RETELL_BASE}/create-agent`,
+    {
+      agent_name: `${bizName} - ${staffName} (${roleDisplay}) - ${stamp}`,
+      voice_id: voiceId || process.env.DEFAULT_VOICE_ID,
+      response_engine: { type: "retell-llm", llm_id: llmId },
+      metadata: metadata || {},
+    },
+    { headers }
+  );
+  return resp.data; // expects agent_id
+}
+
+// --------------------
+// Phone buy & bind (Retell) — supports either "id" or "phone_number" style APIs.
+// You may only need to adjust ONE endpoint depending on your Retell account.
+// --------------------
+async function createPhoneNumber({ areaCode, nickname }) {
+  const headers = retellHeaders();
+
+  // Common pattern (Gemini-style): POST /create-phone-number
+  const resp = await axios.post(
+    `${RETELL_BASE}/create-phone-number`,
+    {
+      area_code: Number(areaCode),
+      nickname,
+    },
+    { headers, timeout: 7000 }
+  );
+
+  // Possible return keys:
+  // - phone_number (E.164)
+  // - e164
+  // - phone_number_id / id
+  return resp.data;
+}
+
+async function bindPhoneNumberToAgent({ phoneData, agentId }) {
+  const headers = retellHeaders();
+
+  const phoneNumber =
+    phoneData.phone_number ||
+    phoneData.e164 ||
+    phoneData.number ||
+    null;
+
+  const phoneId =
+    phoneData.phone_number_id ||
+    phoneData.id ||
+    null;
+
+  // Binding API patterns differ. We try two common patterns.
+
+  // Pattern A: PATCH /update-phone-number/{E164}
+  if (phoneNumber) {
+    try {
+      await axios.patch(
+        `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneNumber)}`,
+        { inbound_agent_id: agentId, outbound_agent_id: agentId },
+        { headers, timeout: 7000 }
+      );
+      return { phone_number: phoneNumber };
+    } catch (e) {
+      // fall through to Pattern B
+    }
   }
 
-  const allPossible = Array.from(new Set([...booster, "repair", "installation", "maintenance", "service", "emergency service", "free estimate"]));
-  const services = allPossible.filter(k => {
-    const kk = k.toLowerCase();
-    if (lower.includes(kk)) return true;
-    const token = kk.split(" ").sort((a,b) => b.length - a.length)[0];
-    return token && token.length >= 5 && lower.includes(token);
-  }).slice(0, 12);
+  // Pattern B: PATCH /update-phone-number/{phoneId}
+  if (phoneId) {
+    await axios.patch(
+      `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneId)}`,
+      { inbound_agent_id: agentId, outbound_agent_id: agentId },
+      { headers, timeout: 7000 }
+    );
+    return { phone_number: phoneNumber || "(number assigned)" };
+  }
 
-  return services.length ? `WEBSITE FACTS:\n- Services: ${services.join(", ")}.` : "";
+  throw new Error("Could not bind phone number: missing phone_number and phone_number_id in response.");
 }
 
-// --- 4. MAIN HANDLER ---
-module.exports = async function handler(req, res) {
+// --------------------
+// Prompt builder
+// --------------------
+function buildPrompt({ bizName, staffMission, structuredFacts }) {
+  const facts = structuredFacts ? String(structuredFacts) : "";
+  return `
+${staffMission}
+
+${GLOBAL_PROTOCOL}
+
+WEBSITE FACTS:
+${facts}
+
+REMINDER:
+- Use the WEBSITE FACTS as your source of truth for hours/services/service areas.
+- If info is missing, ask the caller for details and take a message.
+`
+    .replaceAll("{{business_name}}", bizName);
+}
+
+// --------------------
+// Handler
+// --------------------
+module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
     const body = await readJsonBody(req);
-    const headers = { "Authorization": `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name"], "the business");
-    const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
-    const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
-    const website_content = await getWebsiteContext(website_url);
-    const structured_facts = buildWebsiteFacts(website_content, biz_type);
+    const bizName = pick(body, ["business_name", "biz_name", "company", "company_name"], "Client Business");
+    const packageType = pick(body, ["package_type", "product_name", "plan"], "solo_allie");
+    const structuredFacts = pick(body, ["structured_facts", "website_facts", "facts"], "");
+    const voiceId = pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID);
 
-    let scheduling = String(cleanValue(pick(body, ["scheduling_details"], ""))).replace("Calandar", "Calendar");
-    if (!/https?:\/\/\S+/i.test(scheduling)) {
-      scheduling = "Calendar Link: Not provided. Scheduling is NOT enabled. Take a message for a callback.";
+    // metadata you may want later
+    const metadataBase = {
+      business_name: bizName,
+      client_email: pick(body, ["email_for_call_summaries", "email"], ""),
+      notify_phone: pick(body, ["notify_phone", "cell_phone", "owner_phone"], ""),
+    };
+
+    const areaCode = inferAreaCode(body);
+
+    // Decide which roles to provision
+    const isFullStaff =
+      String(packageType).toLowerCase().includes("full") ||
+      String(packageType).toLowerCase().includes("bundle") ||
+      String(packageType).toLowerCase().includes("digital_staff");
+
+    const rolesToProvision = isFullStaff
+      ? STAFF_ROLES
+      : [STAFF_ROLES[0]]; // Allie only
+
+    const provisioned = [];
+
+    for (const staff of rolesToProvision) {
+      // 1) Build prompt (mission + global protocol + facts)
+      const prompt = buildPrompt({
+        bizName,
+        staffMission: staff.mission,
+        structuredFacts,
+      });
+
+      // 2) Create LLM
+      const llm = await createRetellLLM({ prompt, model: pick(body, ["llm_model"], "gpt-4o-mini") });
+      const llmId = llm.llm_id || llm.id;
+      if (!llmId) throw new Error("Retell LLM creation did not return llm_id.");
+
+      // 3) Create Agent
+      const agent = await createRetellAgent({
+        bizName,
+        staffName: staff.name,
+        roleDisplay: staff.role_display,
+        llmId,
+        voiceId,
+        metadata: { ...metadataBase, role_id: staff.role_id, role_display: staff.role_display },
+      });
+
+      const agentId = agent.agent_id || agent.id;
+      if (!agentId) throw new Error("Retell agent creation did not return agent_id.");
+
+      // 4) Buy & bind phone (Zap-proof fallback)
+      let livePhoneNumber = "Provisioning...";
+      try {
+        const phoneData = await createPhoneNumber({
+          areaCode,
+          nickname: `${bizName} - ${staff.name} (${staff.role_display})`,
+        });
+
+        const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
+        if (bound.phone_number) livePhoneNumber = bound.phone_number;
+      } catch (phoneErr) {
+        console.error("Phone step failed:", phoneErr?.response?.data || phoneErr?.message || phoneErr);
+      }
+
+      provisioned.push({
+        name: staff.name,
+        role_id: staff.role_id,
+        role_display: staff.role_display,
+        agent_id: agentId,
+        phone_number: livePhoneNumber,
+      });
     }
 
-    const FINAL_PROMPT = `
-IDENTITY:
-- You are Allie with ${biz_name}.
-- If asked "who are you?", say: "This is Allie with ${biz_name}."
-- Do NOT volunteer that you are an AI. Only acknowledge if explicitly asked.
+    // For Zapier convenience:
+    // - Always return a top-level phone_number for the "primary" line (Allie if present).
+    const primary = provisioned.find((p) => p.role_id === "receptionist") || provisioned[0];
 
-STYLE: Warm, human, concise.
-
-${structured_facts}
-
-RAW WEBSITE EXCERPT:
----
-${website_content ? website_content.substring(0, 800) : "No website data found."}
----
-
-SCHEDULING: ${scheduling}
-EMERGENCY: ${cleanValue(pick(body, ["emergency_dispatch_questions"]))}
-INTAKE: ${cleanValue(pick(body, ["job_intake_details"]))}
-
-RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time.
-`.trim();
-
-    // ✅ UPDATE: LLM Creation with Suffix for visibility
-    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
-        general_prompt: FINAL_PROMPT,
-        begin_message: cleanValue(pick(body, ["greeting"], `Hi, thanks for calling ${biz_name}.`)),
-        model: "gpt-4o-mini",
-    }, { headers });
-
-    // ✅ UPDATE: llm_id Sanity Check
-    const llm_id = llmResp?.data?.llm_id;
-    if (!llm_id) throw new Error("Retell failed to provide an llm_id.");
-
-    const timestamp = new Date().toISOString().slice(0,16).replace(/[:T]/g,"");
-    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-        agent_name: `${biz_name} Agent - ${timestamp}`,
-        voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
-        response_engine: { type: "retell-llm", llm_id: llm_id },
-        metadata: { 
-          notify_phone: pick(body, ["notify_phone", "cell_phone"]), 
-          client_email: pick(body, ["email_for_call_summaries", "email"]),
-          business_name: biz_name 
-        }
-    }, { headers });
-
-    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
-
+    return res.status(200).json({
+      ok: true,
+      package: isFullStaff ? "full_staff" : "solo_allie",
+      agent_id: primary?.agent_id,         // keeps your existing Zap mapping simple
+      phone_number: primary?.phone_number, // this is what you map into the email
+      agents: provisioned,                 // future-proof for full-staff emails
+    });
   } catch (error) {
-    // ✅ UPDATE: Real Error Details
-    return res.status(500).json({ 
-      error: "Provisioning Failed", 
-      details: error?.response?.data || error?.message || String(error) 
+    console.error("Provisioning failed:", error?.response?.data || error?.message || error);
+    return res.status(500).json({
+      ok: false,
+      error: "Provisioning Failed",
+      details: error?.response?.data || error?.message,
     });
   }
 };
