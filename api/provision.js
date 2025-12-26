@@ -97,25 +97,26 @@ module.exports = async (req, res) => {
   try {
     const body = await readJsonBody(req);
 
-    // --- Inputs from Zapier/Jotform ---
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const voiceId = pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID);
     const areaCode = inferAreaCode(body);
 
-    // IMPORTANT: this should be the fully-built prompt text you're already sending from Zapier
-    // (the “structured facts / work instructions” block)
-    const prompt = pick(body, ["general_prompt", "final_prompt", "prompt", "structured_facts"], "");
+    // ✅ IMPORTANT: Zapier should send THIS as the full finished prompt
+    const prompt = pick(body, ["general_prompt", "final_prompt", "prompt"], "");
 
-    // Optional greeting (if your Retell setup uses it on the agent rather than LLM)
+    // Optional greeting (✅ belongs on the LLM call)
     const beginMessage = pick(body, ["begin_message", "greeting"], "");
 
     // --- 1) Create LLM ---
+    const llmPayload = {
+      general_prompt: prompt || `You are Allie, the AI receptionist for ${bizName}.`,
+      model: pick(body, ["llm_model"], "gpt-4o-mini"),
+    };
+    if (beginMessage) llmPayload.begin_message = beginMessage;
+
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
-      {
-        general_prompt: prompt || `You are Allie, the AI receptionist for ${bizName}.`,
-        model: pick(body, ["llm_model"], "gpt-4o-mini"),
-      },
+      llmPayload,
       { headers: retellHeaders(), timeout: 12000 }
     );
 
@@ -123,22 +124,17 @@ module.exports = async (req, res) => {
     if (!llmId) throw new Error("LLM creation failed (no llm_id returned).");
 
     // --- 2) Create Agent ---
-    const agentPayload = {
-      agent_name: `${bizName} - Allie`,
-      voice_id: voiceId,
-      response_engine: { type: "retell-llm", llm_id: llmId },
-      metadata: {
-        business_name: bizName,
-        client_email: pick(body, ["email", "client_email"], ""),
-      },
-    };
-
-    // Only include begin_message if you passed one
-    if (beginMessage) agentPayload.begin_message = beginMessage;
-
     const agentResp = await axios.post(
       `${RETELL_BASE}/create-agent`,
-      agentPayload,
+      {
+        agent_name: `${bizName} - Allie`,
+        voice_id: voiceId,
+        response_engine: { type: "retell-llm", llm_id: llmId },
+        metadata: {
+          business_name: bizName,
+          client_email: pick(body, ["email", "client_email"], ""),
+        },
+      },
       { headers: retellHeaders(), timeout: 12000 }
     );
 
@@ -156,7 +152,6 @@ module.exports = async (req, res) => {
       const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
       phoneNumber = bound.phone_number || phoneNumber;
     } catch (e) {
-      // Graceful degradation: don't fail the whole zap
       console.warn("Phone buy/bind failed:", e?.response?.data || e?.message || e);
     }
 
@@ -165,6 +160,7 @@ module.exports = async (req, res) => {
       agent_id: agentId,
       phone_number: phoneNumber,
     });
+
   } catch (error) {
     console.error("provision failed:", error?.response?.data || error?.message || error);
     return res.status(500).json({
@@ -174,4 +170,3 @@ module.exports = async (req, res) => {
     });
   }
 };
-
