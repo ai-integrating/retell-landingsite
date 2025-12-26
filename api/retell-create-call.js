@@ -239,6 +239,7 @@ module.exports = async function handler(req, res) {
     };
 
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
+    const GREETING = `Thanks for calling ${biz_name}, this is Allie. How can I help you today?`;
     const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
     const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
 
@@ -274,15 +275,16 @@ INTAKE: ${cleanValue(pick(body, ["job_intake_details"]))}
 RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time.
 `.trim();
 
-    const llmResp = await axios.post(
-      "https://api.retellai.com/create-retell-llm",
-      {
-        general_prompt: FINAL_PROMPT,
-        begin_message: pick(body, ["greeting"], `Hi, thanks for calling ${biz_name},.`),
-        model: "gpt-4o-mini",
-      },
-      { headers }
-    );
+  const llmResp = await axios.post(
+  "https://api.retellai.com/create-retell-llm",
+  {
+    general_prompt: FINAL_PROMPT,
+    begin_message: GREETING,
+    model: "gpt-4o-mini",
+  },
+  { headers }
+);
+
 
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
