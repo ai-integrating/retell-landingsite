@@ -1,5 +1,3 @@
-i cant get code from you. but will this be good:
-
 // /api/retry-phone-bind.js
 const axios = require("axios");
 
