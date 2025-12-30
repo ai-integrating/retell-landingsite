@@ -61,17 +61,18 @@ function uniq(arr) {
   );
 }
 
-// --- ✅ VOICE RESOLUTION (MINIMAL & SAFE) ---
+// --- ✅ VOICE RESOLUTION (UPDATED & SAFE) ---
 function resolveVoiceId(body) {
   // If Zap explicitly sends voice_id, use it
-  const direct = pick(body, ["voice_id"], "");
+  const direct = pick(body, ["voice_id", "voiceId", "VOICE_ID"], "");
   if (direct && direct !== "Not provided") return direct;
 
-  const tone = String(pick(body, ["voice_tone"], "")).toLowerCase();
-  const gender = String(pick(body, ["agent_gender"], "")).toLowerCase();
+  const tone = String(pick(body, ["voice_tone", "voiceTone", "tone"], "")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "agentGender", "gender"], "")).toLowerCase().trim();
 
+  // ✅ IMPORTANT: Env var names must match EXACTLY what you set in Vercel
   const VOICE_MAP = {
-    female_authoritative: process.env.Voice_Female_AUTHORITATIVE,
+    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE, // ✅ FIXED
     female_warm: process.env.VOICE_FEMALE_WARM,
     female_calm: process.env.VOICE_FEMALE_CALM,
     female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
@@ -180,12 +181,24 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json",
     };
 
-    const biz_name = pick(body, ["business_name", "businessName"], "the business");
-    const agent_name = pick(body, ["agent_name"], "Allie");
+    const biz_name = pick(
+      body,
+      ["business_name", "businessName", "Business Name", "company", "company_name"],
+      "the business"
+    );
+
+    // ✅ Make agent name robust (this fixes Eleanor turning into Allie)
+    const agent_name = pick(
+      body,
+      ["agent_name", "agentName", "Agent Name", "name", "assistant_name"],
+      "Allie"
+    );
 
     const GREETING = `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you today?`;
 
-    const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
+    const website_url = normalizeWebsite(
+      pick(body, ["website", "website_url", "Website", "url"], "Not provided")
+    );
     const website_content = await getWebsiteContext(website_url);
 
     const FINAL_PROMPT = `
@@ -223,18 +236,26 @@ ${website_content || "No website data available."}
         },
         metadata: {
           business_name: biz_name,
-          notify_phone: pick(body, ["notify_phone", "cell_phone"]),
+          notify_phone: pick(body, ["notify_phone", "cell_phone", "phone", "notifyPhone"]),
         },
       },
       { headers }
     );
 
+    // ✅ TEMP DEBUG: remove after 1-2 successful tests
     return res.status(200).json({
       ok: true,
       agent_id: agentResp.data.agent_id,
+      debug: {
+        received_agent_name: agent_name,
+        received_gender: pick(body, ["agent_gender", "agentGender", "gender"], ""),
+        received_tone: pick(body, ["voice_tone", "voiceTone", "tone"], ""),
+        resolved_voice_id: voiceId,
+        env_voice_female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE || null,
+      },
     });
   } catch (error) {
-    console.error("retell-create-call failed:", error);
+    console.error("retell-create-call failed:", error?.response?.data || error);
     return res.status(500).json({ error: "Server error" });
   }
 };
