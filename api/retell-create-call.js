@@ -59,6 +59,29 @@ function uniq(arr) {
   return Array.from(new Set((arr || []).map((x) => String(x).trim()).filter(Boolean)));
 }
 
+// --- ✅ 1b. VOICE RESOLUTION (MINIMAL ADD) ---
+function resolveVoiceId(body) {
+  // If Zap already sends voice_id, use it.
+  const direct = pick(body, ["voice_id"], "");
+  if (direct && direct !== "Not provided") return direct;
+
+  const tone = String(pick(body, ["voice_tone"], "")).toLowerCase();
+  const gender = String(pick(body, ["agent_gender"], "")).toLowerCase();
+
+  // Map tone+gender to voice IDs stored in env vars.
+  // Add only what you need. Anything missing falls back to DEFAULT_VOICE_ID.
+  const VOICE_MAP = {
+    female_warm: process.env.VOICE_FEMALE_WARM,
+    female_calm: process.env.VOICE_FEMALE_CALM,
+    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
+    male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
+    male_warm: process.env.VOICE_MALE_WARM,
+    male_calm: process.env.VOICE_MALE_CALM,
+  };
+
+  return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
+}
+
 // --- 2. URL & SCRAPER LOGIC ---
 function extractFirstUrl(text) {
   if (!text) return null;
@@ -239,7 +262,11 @@ module.exports = async function handler(req, res) {
     };
 
     const biz_name = pick(body, ["business_name", "businessName"], "the business");
-    const GREETING = `Thanks for calling ${biz_name}, this is Allie. How can I help you today?`;
+
+    // ✅ minimal: use agent_name instead of hardcoding "Allie"
+    const agent_name = pick(body, ["agent_name"], "Allie");
+    const GREETING = `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you today?`;
+
     const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
     const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
 
@@ -253,8 +280,8 @@ module.exports = async function handler(req, res) {
 
     const FINAL_PROMPT = `
 IDENTITY:
-- You are Allie with ${biz_name}.
-- If asked "who are you?" or "who am I speaking to?", say: "This is Allie with ${biz_name}."
+- You are ${agent_name} with ${biz_name}.
+- If asked "who are you?" or "who am I speaking to?", say: "This is ${agent_name} with ${biz_name}."
 - Do NOT volunteer that you are an AI. Only acknowledge being an AI if explicitly asked.
 - If explicitly asked "Are you an AI?" or "Is this a robot?", say: "Yes — I’m an AI assistant helping the team handle calls. I can help now or take a detailed message."
 - If pressed for more detail, say: "I’m part of the team here and help handle incoming calls."
@@ -275,22 +302,24 @@ INTAKE: ${cleanValue(pick(body, ["job_intake_details"]))}
 RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time.
 `.trim();
 
-  const llmResp = await axios.post(
-  "https://api.retellai.com/create-retell-llm",
-  {
-    general_prompt: FINAL_PROMPT,
-    begin_message: GREETING,
-    model: "gpt-4o-mini",
-  },
-  { headers }
-);
+    const llmResp = await axios.post(
+      "https://api.retellai.com/create-retell-llm",
+      {
+        general_prompt: FINAL_PROMPT,
+        begin_message: GREETING,
+        model: "gpt-4o-mini",
+      },
+      { headers }
+    );
 
+    // ✅ minimal: resolve voice_id from prefills (voice_tone + agent_gender) or fallback
+    const voiceId = resolveVoiceId(body);
 
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         agent_name: `${biz_name} Agent`,
-        voice_id: pick(body, ["voice_id"], process.env.DEFAULT_VOICE_ID),
+        voice_id: voiceId,
         response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
         metadata: {
           notify_phone: pick(body, ["notify_phone", "cell_phone"]),
