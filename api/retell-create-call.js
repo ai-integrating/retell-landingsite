@@ -71,6 +71,7 @@ function resolveVoiceId(body) {
   const gender = String(pick(body, ["agent_gender"], "")).toLowerCase();
 
   const VOICE_MAP = {
+    female_authoritative: process.env.Voice_Female_AUTHORITATIVE,
     female_warm: process.env.VOICE_FEMALE_WARM,
     female_calm: process.env.VOICE_FEMALE_CALM,
     female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
