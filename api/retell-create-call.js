@@ -315,10 +315,13 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
    single-field support intact.
 -------------------------------------------------------------------*/
 
+// ✅ UPDATED: safer "hasAnyValue" that reads raw values + `.output`
+// (does NOT rely on pick() fallbacks, prevents false positives)
 function hasAnyValue(obj, keys) {
   return keys.some((k) => {
-    const v = pick(obj, [k], "");
-    const c = cleanValue(v);
+    const raw = obj?.[k];
+    const val = typeof raw === "object" && raw?.output ? raw.output : raw;
+    const c = cleanValue(val);
     return c && c !== "Not provided";
   });
 }
