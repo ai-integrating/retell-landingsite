@@ -94,7 +94,7 @@ async function getWebsiteContext(url) {
   if (!url || url === "Not provided") return null;
   try {
     const response = await axios.get(url, {
-      timeout: 4000, // Short timeout for direct scrape
+      timeout: 4000,
       headers: { "User-Agent": "Mozilla/5.0" },
     });
     let text = String(response.data || "")
@@ -126,12 +126,6 @@ function buildIntakeFromMapped(body) {
   return `Required Details: ${details} | Request Photos via Text: ${photos}`;
 }
 
-function buildEmergencyFromMapped(body) {
-  const phone = cleanValue(pick(body, ["emergency_phone"]));
-  if (phone === "Not provided") return "No emergency protocol provided.";
-  return `Emergency Contact: ${phone} | Instructions: ${cleanValue(pick(body, ["urgent_instructions"]))}`;
-}
-
 function buildLeadRevivalFromMapped(body) {
   const offer = cleanValue(pick(body, ["lead_revival_offer"]));
   const timing = cleanValue(pick(body, ["follow_up_timing"]));
@@ -150,23 +144,27 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name", "company"], "our business");
+    // Set McDuffy Specific Defaults
+    const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
     const agent_name = pick(body, ["agent_name", "name"], "Lexi");
     const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
-    const services = cleanValue(pick(body, ["services"]), "General services");
-    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Standard business hours");
+    const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
+    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
+
+    // Emergency Formatting: 5082910787 -> 5-0-8-2-9-1-0-7-8-7
+    const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "5082910787");
+    const speech_emergency = raw_emergency.split('').join('-');
 
     const website_url = normalizeWebsite(pick(body, ["website", "url"]));
     let website_content = null;
     
-    // Website protection logic
     if (website_url && website_url !== "Not provided") {
         try {
             website_content = await Promise.race([
                 getWebsiteContext(website_url),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
             ]);
-        } catch (e) { console.log("Website scrape timed out."); }
+        } catch (e) { console.log("Website timeout."); }
     }
 
     const FINAL_PROMPT = `
@@ -182,19 +180,20 @@ module.exports = async function handler(req, res) {
 
 ## URGENCY & SEVERITY PROTOCOL
 1. ROUTINE: For quotes or general info, tell them an estimator will call back.
-2. URGENT: For equipment failure or urgent repairs, mark as a priority.
-3. CRITICAL: For safety hazards or active emergencies, say: "I am flagging this as a critical emergency. Please secure the area. Our lead will reach out immediately."
+2. URGENT: For equipment failure or urgent repairs, mark as a priority for the supervisor.
+3. CRITICAL: For safety hazards, sinkholes, or active emergencies, say: "I am flagging this as a critical emergency. Please secure the area for safety. Our lead will reach out immediately."
 
 ## OPERATIONAL GUIDELINES
 - SCHEDULING: ${buildSchedulingFromMapped(body)}
-- INTAKE: ${buildIntakeFromMapped(body)}
-- EMERGENCY: ${buildEmergencyFromMapped(body)}
+- INTAKE: Always ask for the service address and a brief description of the issue.
+- EMERGENCY: Emergency Contact: ${speech_emergency} | Instructions: we will reach out asap
 - LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
 
 ## CALL RULES
-1. If booking: Ask for preferred day and phone number.
+1. If booking: Ask for preferred day and phone number for a callback.
 2. Be brief: 1-2 sentences max. 
 3. No symbols: Say "dollars" instead of "$".
+4. Clarification: If you don't know an answer, say "I'll have a supervisor clarify that when they call you back."
 `.trim();
 
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
