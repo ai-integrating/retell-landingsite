@@ -41,7 +41,7 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-function cleanValue(text) {
+function cleanValue(text, fallback = "Not provided") {
   const t = String(text || "").trim();
   if (
     !t ||
@@ -51,27 +51,17 @@ function cleanValue(text) {
     t === "null" ||
     t.toLowerCase() === "not provided"
   )
-    return "Not provided";
-  return t.replace(/\[\]/g, "Not provided");
+    return fallback;
+  return t.replace(/\[\]/g, fallback);
 }
 
-function uniq(arr) {
-  return Array.from(
-    new Set((arr || []).map((x) => String(x).trim()).filter(Boolean))
-  );
-}
-
-// --- ✅ VOICE RESOLUTION (PRESERVING YOUR WORKING LOGIC) ---
+// --- ✅ VOICE RESOLUTION ---
 function resolveVoiceId(body) {
   const direct = pick(body, ["voice_id", "voiceId", "VOICE_ID"], "");
   if (direct && direct !== "Not provided") return String(direct).trim();
 
-  const tone = String(pick(body, ["voice_tone", "voiceTone", "tone"], ""))
-    .toLowerCase()
-    .trim();
-  const gender = String(pick(body, ["agent_gender", "agentGender", "gender"], ""))
-    .toLowerCase()
-    .trim();
+  const tone = String(pick(body, ["voice_tone", "voiceTone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "agentGender", "gender"], "female")).toLowerCase().trim();
 
   const VOICE_MAP = {
     female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
@@ -95,12 +85,10 @@ function extractFirstUrl(text) {
 
 function normalizeWebsite(raw) {
   if (!raw || raw === "Not provided") return "Not provided";
-  if (typeof raw === "object" && raw.output) raw = raw.output;
-  raw = String(raw).trim();
-  const extracted = extractFirstUrl(raw);
+  const extracted = extractFirstUrl(String(raw));
   if (extracted) return extracted;
   if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
-  return raw.startsWith("http") ? raw : "Not provided";
+  return String(raw).startsWith("http") ? raw : "Not provided";
 }
 
 async function getWebsiteContext(url) {
@@ -108,118 +96,41 @@ async function getWebsiteContext(url) {
   try {
     const response = await axios.get(url, {
       timeout: 8000,
-      maxRedirects: 5,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
+      headers: { "User-Agent": "Mozilla/5.0" },
     });
     let text = String(response.data || "")
       .replace(/<(script|style|header|nav|footer|form)[^>]*>([\s\S]*?)<\/\1>/gim, "")
       .replace(/<[^>]*>?/gm, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    text = decodeHtml(text);
-    if (text.length >= 200) return text.substring(0, 2000);
-  } catch (e) { /* ignore and move to jina */ }
+      .replace(/\s+/g, " ").trim();
+    if (text.length >= 200) return decodeHtml(text).substring(0, 3000);
+  } catch (e) {}
 
   try {
-    const proxyUrl = `https://r.jina.ai/${url.replace(/^https?:\/\//, "https://")}`;
-    const r = await axios.get(proxyUrl, { timeout: 9000 });
+    const r = await axios.get(`https://r.jina.ai/${url}`, { timeout: 9000 });
     const txt = decodeHtml(String(r.data || "")).replace(/\s+/g, " ").trim();
-    if (txt.length >= 200) return txt.substring(0, 2000);
-  } catch (e) { return null; }
+    if (txt.length >= 200) return txt.substring(0, 3000);
+  } catch (e) {}
   return null;
 }
 
-function buildWebsiteFacts(text, businessTypeHint = "") {
-  if (!text) return "";
-  // Simplified for brevity, same logic as your original buildWebsiteFacts
-  return `WEBSITE SUMMARY: ${text.substring(0, 500)}...`;
-}
-
-// --- 3. MAPPED FIELD BUILDERS (UPDATED WITH YOUR SCREENSHOT KEYS) ---
-
-function hasAnyValue(obj, keys) {
-  return keys.some((k) => {
-    const raw = obj?.[k];
-    const val = typeof raw === "object" && raw?.output ? raw.output : raw;
-    const c = cleanValue(val);
-    return c && c !== "Not provided";
-  });
-}
-
+// --- 3. MAPPED FIELD BUILDERS ---
 function buildSchedulingFromMapped(body) {
-  const calendar_link = cleanValue(pick(body, ["calendar_link", "calendarLink"], ""));
-  const calendar_system = cleanValue(pick(body, ["calendar_system", "calendarSystem"], ""));
-  const buffer_time = cleanValue(pick(body, ["buffer_time", "bufferTime"], ""));
-  const weekend = cleanValue(pick(body, ["weekend_appointments", "weekendAppointments"], ""));
-  const service_durations = cleanValue(pick(body, ["service_durations", "serviceDurations"], ""));
-  const after_hours = cleanValue(pick(body, ["after_hours_rules", "afterHoursRules"], ""));
-
-  const enabled = /https?:\/\/\S+/i.test(calendar_link);
-  if (!enabled) return "Calendar Link: Not provided. Scheduling is NOT enabled. Take a message for a callback.";
-
-  const lines = [
-    `Calendar Link: ${calendar_link}`,
-    `System: ${calendar_system}`,
-    `Buffer: ${buffer_time}`,
-    `Weekends: ${weekend}`,
-    `Durations: ${service_durations}`,
-    `After Hours: ${after_hours}`,
-  ].filter(line => !line.includes("Not provided"));
-
-  return lines.join(" | ");
+  const link = cleanValue(pick(body, ["calendar_link", "calendarLink"]));
+  if (link === "Not provided") return "Scheduling is NOT enabled. Take a message and callback number.";
+  return `Calendar: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
 }
 
 function buildIntakeFromMapped(body) {
-  // Key names updated to match image_109745.png and image_1045c7.jpg
-  const intake_details = cleanValue(pick(body, ["job_intake_details", "intake_details"], ""));
-  const photo_request = cleanValue(pick(body, ["photos_request", "photo_request"], ""));
-  const additional_info = cleanValue(pick(body, ["additional_intake_info", "additional_info"], ""));
-
-  const any = hasAnyValue(body, ["job_intake_details", "photos_request", "additional_intake_info"]);
-  if (!any) return "Not provided";
-
-  const lines = [
-    intake_details !== "Not provided" ? `Required Details: ${intake_details}` : null,
-    photo_request !== "Not provided" ? `Request Photos via Text: ${photo_request}` : null,
-    additional_info !== "Not provided" ? `Additional Info: ${additional_info}` : null,
-  ].filter(Boolean);
-
-  return lines.join(" | ");
+  const details = cleanValue(pick(body, ["job_intake_details", "intake_details"]));
+  const photos = cleanValue(pick(body, ["photos_request", "photo_request"]));
+  if (details === "Not provided" && photos === "Not provided") return "No specific intake requirements.";
+  return `Details: ${details} | Photos: ${photos}`;
 }
 
 function buildEmergencyFromMapped(body) {
-  // Key names updated to match image_1045c7.jpg
-  const emergency_def = cleanValue(pick(body, ["emergency"], ""));
-  const e_phone = cleanValue(pick(body, ["emergency_phone"], ""));
-  const e_phone_2 = cleanValue(pick(body, ["emergency_secondary_phone"], ""));
-  const urgent_instr = cleanValue(pick(body, ["urgent_instructions"], ""));
-
-  const any = hasAnyValue(body, ["emergency", "emergency_phone", "urgent_instructions"]);
-  if (!any) return "Not provided";
-
-  const lines = [
-    emergency_def !== "Not provided" ? `Emergency Definition: ${emergency_def}` : null,
-    e_phone !== "Not provided" ? `Primary: ${e_phone}` : null,
-    e_phone_2 !== "Not provided" ? `Secondary: ${e_phone_2}` : null,
-    urgent_instr !== "Not provided" ? `Special Instructions: ${urgent_instr}` : null,
-  ].filter(Boolean);
-
-  return lines.join(" | ");
-}
-
-function buildLeadRevivalFromMapped(body) {
-  // Key names updated to match image_109745.png
-  const offer = cleanValue(pick(body, ["lead_revival_offer", "main_offer"], ""));
-  const timing = cleanValue(pick(body, ["follow_up_timing"], ""));
-  const attempts = cleanValue(pick(body, ["follow_up_attempts"], ""));
-
-  const any = hasAnyValue(body, ["lead_revival_offer", "follow_up_timing", "follow_up_attempts"]);
-  if (!any) return "Not provided";
-
-  return `Offer: ${offer} | Timing: ${timing} | Max Attempts: ${attempts}`;
+  const phone = cleanValue(pick(body, ["emergency_phone"]));
+  if (phone === "Not provided") return "No emergency protocol provided.";
+  return `Emergency Contact: ${phone} | Instructions: ${cleanValue(pick(body, ["urgent_instructions"]))}`;
 }
 
 // --- 4. MAIN HANDLER ---
@@ -232,63 +143,53 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name", "businessName", "company"], "the business");
-    const agent_name = pick(body, ["agent_name", "agentName", "name"], "Ava");
-    const biz_hours = cleanValue(pick(body, ["business_hours"], ""));
-    const services = cleanValue(pick(body, ["services"], ""));
+    const biz_name = pick(body, ["business_name", "company"], "the business");
+    const agent_name = pick(body, ["agent_name", "name"], "Samuel");
+    const services = cleanValue(pick(body, ["services"]), "General asphalt and paving services");
+    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Standard business hours");
 
-    const GREETING = `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you today?`;
-
-    const website_url = normalizeWebsite(pick(body, ["website", "url"], "Not provided"));
+    const website_url = normalizeWebsite(pick(body, ["website", "url"]));
     const website_content = await getWebsiteContext(website_url);
-    const structured_facts = buildWebsiteFacts(website_content, services);
-
-    const scheduling = buildSchedulingFromMapped(body);
-    const emergencyBlock = buildEmergencyFromMapped(body);
-    const intakeBlock = buildIntakeFromMapped(body);
-    const leadRevivalBlock = buildLeadRevivalFromMapped(body);
 
     const FINAL_PROMPT = `
-IDENTITY:
-- You are ${agent_name} with ${biz_name}.
-- Do NOT volunteer that you are an AI unless explicitly asked.
+## IDENTITY
+- You are ${agent_name}, a professional representative for ${biz_name}.
+- Current Date/Time: {{current_time_America/New_York}}
+- Role: Be helpful, concise, and focused on helping the customer.
+- Rule: Do NOT mention you are an AI.
 
-BUSINESS CONTEXT:
-- Services Offered: ${services}
-- Business Hours: ${biz_hours}
+## BUSINESS KNOWLEDGE
+- Services: ${services}
+- Hours: ${biz_hours}
+- Website Context: ${website_content ? website_content : "No specific website data. Rely on general industry knowledge for " + services + "."}
 
-${structured_facts}
+## OPERATIONAL GUIDELINES
+- SCHEDULING: ${buildSchedulingFromMapped(body)}
+- INTAKE: ${buildIntakeFromMapped(body)}
+- EMERGENCY: ${buildEmergencyFromMapped(body)}
+- LEAD REVIVAL: Offer: ${cleanValue(pick(body, ["lead_revival_offer"]))}
 
-RAW WEBSITE EXCERPT:
----
-${website_content ? website_content.substring(0, 800) : "No website data found."}
----
-
-SCHEDULING: ${scheduling}
-EMERGENCY: ${emergencyBlock}
-INTAKE: ${intakeBlock}
-LEAD REVIVAL: ${leadRevivalBlock}
-
-RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time unless a specific calendar link is provided.
+## CALL RULES
+1. If a caller wants to book: Ask for their preferred day and a phone number for a callback.
+2. Be brief: Keep responses to 1-2 sentences. 
+3. No symbols: Say "dollars" instead of "$".
 `.trim();
 
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
       general_prompt: FINAL_PROMPT,
-      begin_message: GREETING,
+      begin_message: `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you?`,
       model: "gpt-4o-mini",
     }, { headers });
 
-    const voiceId = resolveVoiceId(body);
-
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
       agent_name: `${biz_name} Agent`,
-      voice_id: voiceId,
+      voice_id: resolveVoiceId(body),
       response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
     }, { headers });
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
   } catch (error) {
-    console.error("retell-create-call failed:", error?.response?.data || error.message);
+    console.error("Failed:", error?.response?.data || error.message);
     return res.status(500).json({ error: "Server error" });
   }
 };
