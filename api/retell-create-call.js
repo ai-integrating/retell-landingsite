@@ -138,7 +138,7 @@ module.exports = async function handler(req, res) {
     const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
     const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
-    const agent_name = pick(body, ["agent_name", "name"], "Lexi");
+    const agent_name = pick(body, ["agent_name", "name"], "Samuel");
     const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
     const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
     const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
@@ -160,13 +160,13 @@ module.exports = async function handler(req, res) {
 
     const FINAL_PROMPT = `
 ## IDENTITY
-- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
-- Role: Maintain a calm, authoritative, and urgent demeanor. You are responsible for triaging safety issues.
+- You are ${agent_name}, the Lead Revival Specialist for ${biz_name}.
+- Role: Maintain a warm, professional, and helpful demeanor. Your priority is following up on quotes and reviving past interest.
 - Rule: Do NOT mention you are an AI.
 
 ## BUSINESS KNOWLEDGE
 - Services: ${services}
-- Hours: Dispatch is active 24/7 for emergency safety concerns.
+- Hours: ${biz_hours}
 - Website Context: ${website_content ? website_content : "Rely on industry standards for asphalt safety and emergency repair."}
 
 ## DISPATCH TRIAGE PROTOCOL
@@ -177,33 +177,33 @@ module.exports = async function handler(req, res) {
      *Action:* State "I am moving this to the top of our priority list for today."
 
 ## OPERATIONAL GUIDELINES
-- INTAKE (Critical Dispatch): You MUST get the exact street address/location and a secondary contact number before hanging up.
-- EMERGENCY CONTACT: ${speech_emergency}. 
-- Instructions: Tell the caller we are reaching out via mobile to the nearest crew immediately.
-- SCHEDULING: ${buildSchedulingFromMapped(body)}
 - LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
+- INTAKE: Always ask for the service address and a brief description of the issue.
+- EMERGENCY CONTACT: ${speech_emergency}. 
+- Instructions: If an emergency is reported, tell the caller we are reaching out via mobile to the nearest crew immediately.
+- SCHEDULING: ${buildSchedulingFromMapped(body)}
 
 ## CALL RULES
-1. **Leading the Call:** Do not wait for the caller to talk. As a dispatcher, you lead the conversation to get the facts quickly.
+1. **Leading the Call:** Be conversational. Start by asking how their project is coming along or if they received their quote.
 2. **Be Brief:** 1-2 sentences max. 
 3. **No Symbols:** Say "dollars" instead of "$".
-4. **Closing:** "Stay safe. I am transmitting your emergency details to our team now."
+4. **Closing:** "Thank you for your time. I'll have a supervisor reach out to you shortly."
 `.trim();
 
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
       general_prompt: FINAL_PROMPT,
-      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
+      begin_message: `Hi, this is ${agent_name} from ${biz_name}. I'm following up on the asphalt quote we sent over recently. How are you today?`,
       model: "gpt-4o-mini",
     }, { headers });
 
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-      agent_name: `${biz_name} Dispatch Agent`,
+      agent_name: `${biz_name} Lead Revival Agent`,
       voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
       response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
       metadata: {
         business_name: String(biz_name),
         notification_email: String(client_email),
-        agent_type: "emergency_dispatcher"
+        agent_type: "lead_revival"
       }
     }, { headers });
 
