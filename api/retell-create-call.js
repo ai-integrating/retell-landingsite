@@ -117,20 +117,30 @@ async function getWebsiteContext(url) {
 function buildSchedulingFromMapped(body) {
   const link = cleanValue(pick(body, ["calendar_link", "calendarLink"]));
   if (link === "Not provided") return "Scheduling is NOT enabled. Take a message and callback number.";
-  return `Calendar: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
+  return `Calendar Link: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
 }
 
 function buildIntakeFromMapped(body) {
   const details = cleanValue(pick(body, ["job_intake_details", "intake_details"]));
   const photos = cleanValue(pick(body, ["photos_request", "photo_request"]));
   if (details === "Not provided" && photos === "Not provided") return "No specific intake requirements.";
-  return `Details: ${details} | Photos: ${photos}`;
+  return `Required Details: ${details} | Request Photos via Text: ${photos}`;
 }
 
 function buildEmergencyFromMapped(body) {
   const phone = cleanValue(pick(body, ["emergency_phone"]));
   if (phone === "Not provided") return "No emergency protocol provided.";
   return `Emergency Contact: ${phone} | Instructions: ${cleanValue(pick(body, ["urgent_instructions"]))}`;
+}
+
+function buildLeadRevivalFromMapped(body) {
+  // Matching the keys exactly as seen in your screenshot
+  const offer = cleanValue(pick(body, ["lead_revival_offer"]));
+  const timing = cleanValue(pick(body, ["follow_up_timing"]));
+  const attempts = cleanValue(pick(body, ["follow_up_attempts"]));
+
+  if (offer === "Not provided") return "No active lead revival offer.";
+  return `Offer: ${offer} | Timing: ${timing} | Max Attempts: ${attempts}`;
 }
 
 // --- 4. MAIN HANDLER ---
@@ -161,13 +171,13 @@ module.exports = async function handler(req, res) {
 ## BUSINESS KNOWLEDGE
 - Services: ${services}
 - Hours: ${biz_hours}
-- Website Context: ${website_content ? website_content : "No specific website data. Rely on general industry knowledge for " + services + "."}
+- Website Context: ${website_content ? website_content : "No specific website data found. Rely on general industry knowledge for " + services + "."}
 
 ## OPERATIONAL GUIDELINES
 - SCHEDULING: ${buildSchedulingFromMapped(body)}
 - INTAKE: ${buildIntakeFromMapped(body)}
 - EMERGENCY: ${buildEmergencyFromMapped(body)}
-- LEAD REVIVAL: Offer: ${cleanValue(pick(body, ["lead_revival_offer"]))}
+- LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
 
 ## CALL RULES
 1. If a caller wants to book: Ask for their preferred day and a phone number for a callback.
