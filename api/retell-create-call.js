@@ -94,7 +94,7 @@ async function getWebsiteContext(url) {
   if (!url || url === "Not provided") return null;
   try {
     const response = await axios.get(url, {
-      timeout: 4000,
+      timeout: 4000, 
       headers: { "User-Agent": "Mozilla/5.0" },
     });
     let text = String(response.data || "")
@@ -119,13 +119,6 @@ function buildSchedulingFromMapped(body) {
   return `Calendar Link: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
 }
 
-function buildIntakeFromMapped(body) {
-  const details = cleanValue(pick(body, ["job_intake_details", "intake_details"]));
-  const photos = cleanValue(pick(body, ["photos_request", "photo_request"]));
-  if (details === "Not provided" && photos === "Not provided") return "No specific intake requirements.";
-  return `Required Details: ${details} | Request Photos via Text: ${photos}`;
-}
-
 function buildLeadRevivalFromMapped(body) {
   const offer = cleanValue(pick(body, ["lead_revival_offer"]));
   const timing = cleanValue(pick(body, ["follow_up_timing"]));
@@ -144,14 +137,12 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    // Set McDuffy Specific Defaults
     const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
     const agent_name = pick(body, ["agent_name", "name"], "Lexi");
     const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
     const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
     const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
 
-    // Emergency Formatting: 5082910787 -> 5-0-8-2-9-1-0-7-8-7
     const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "5082910787");
     const speech_emergency = raw_emergency.split('').join('-');
 
@@ -169,47 +160,50 @@ module.exports = async function handler(req, res) {
 
     const FINAL_PROMPT = `
 ## IDENTITY
-- You are ${agent_name}, a professional representative for ${biz_name}.
-- Role: Be helpful, concise, and focused.
+- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
+- Role: Maintain a calm, authoritative, and urgent demeanor. You are responsible for triaging safety issues.
 - Rule: Do NOT mention you are an AI.
 
 ## BUSINESS KNOWLEDGE
 - Services: ${services}
-- Hours: ${biz_hours}
-- Website Context: ${website_content ? website_content : "Rely on general industry knowledge for " + services + "."}
+- Hours: Dispatch is active 24/7 for emergency safety concerns.
+- Website Context: ${website_content ? website_content : "Rely on industry standards for asphalt safety and emergency repair."}
 
-## URGENCY & SEVERITY PROTOCOL
-1. ROUTINE: For quotes or general info, tell them an estimator will call back.
-2. URGENT: For equipment failure or urgent repairs, mark as a priority for the supervisor.
-3. CRITICAL: For safety hazards, sinkholes, or active emergencies, say: "I am flagging this as a critical emergency. Please secure the area for safety. Our lead will reach out immediately."
+## DISPATCH TRIAGE PROTOCOL
+1. **Identify the Hazard:** Immediately ask: "What is the nature of the emergency, and is the area currently safe for traffic?"
+2. **Assign Severity:** - **CRITICAL:** Active sinkholes, hazards in traffic lanes, or immediate pedestrian danger. 
+     *Action:* Instruct them to "mark off the area" and state "I am alerting our on-call supervisor and nearest crew right now."
+   - **URGENT:** Equipment damage or major failures that aren't life-threatening.
+     *Action:* State "I am moving this to the top of our priority list for today."
 
 ## OPERATIONAL GUIDELINES
+- INTAKE (Critical Dispatch): You MUST get the exact street address/location and a secondary contact number before hanging up.
+- EMERGENCY CONTACT: ${speech_emergency}. 
+- Instructions: Tell the caller we are reaching out via mobile to the nearest crew immediately.
 - SCHEDULING: ${buildSchedulingFromMapped(body)}
-- INTAKE: Always ask for the service address and a brief description of the issue.
-- EMERGENCY: Emergency Contact: ${speech_emergency} | Instructions: we will reach out asap
 - LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
 
 ## CALL RULES
-1. If booking: Ask for preferred day and phone number for a callback.
-2. Be brief: 1-2 sentences max. 
-3. No symbols: Say "dollars" instead of "$".
-4. Clarification: If you don't know an answer, say "I'll have a supervisor clarify that when they call you back."
+1. **Leading the Call:** Do not wait for the caller to talk. As a dispatcher, you lead the conversation to get the facts quickly.
+2. **Be Brief:** 1-2 sentences max. 
+3. **No Symbols:** Say "dollars" instead of "$".
+4. **Closing:** "Stay safe. I am transmitting your emergency details to our team now."
 `.trim();
 
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
       general_prompt: FINAL_PROMPT,
-      begin_message: `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you?`,
+      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
       model: "gpt-4o-mini",
     }, { headers });
 
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-      agent_name: `${biz_name} Agent`,
+      agent_name: `${biz_name} Dispatch Agent`,
       voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
       response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
       metadata: {
         business_name: String(biz_name),
         notification_email: String(client_email),
-        deployment: "automated_vending_machine"
+        agent_type: "emergency_dispatcher"
       }
     }, { headers });
 
