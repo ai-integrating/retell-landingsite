@@ -137,18 +137,48 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
+    // --- CORE DATA ---
     const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
     const agent_name = pick(body, ["agent_name", "name"], "Lexi");
     const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
-    const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
+    const services = cleanValue(pick(body, ["services"]), "Asphalt paving and repairs");
     const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
 
+    // --- MODULAR SKILL FLAGS (Toggled via Jotform/Zapier) ---
+    const hasEmergency = pick(body, ["upgrade_emergency", "enable_emergency"], "false").toLowerCase() === "true";
+    const hasLeadRevival = pick(body, ["upgrade_lead_revival", "enable_lead_revival"], "false").toLowerCase() === "true";
+    const hasScheduling = pick(body, ["upgrade_scheduling", "enable_scheduling"], "false").toLowerCase() === "true";
+
+    // --- SKILL MODULE 1: EMERGENCY DISPATCH ---
     const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "5082910787");
     const speech_emergency = raw_emergency.split('').join('-');
+    
+    const emergencyModule = hasEmergency ? `
+## DISPATCH TRIAGE PROTOCOL
+1. **Identify the Hazard:** Immediately ask: "What is the nature of the emergency, and is the area currently safe for traffic?"
+2. **Assign Severity:**
+   - **CRITICAL:** Active sinkholes, hazards in traffic lanes, or pedestrian danger. 
+     *Action:* Instruct to "mark off the area" and state "I am alerting our on-call supervisor and nearest crew right now."
+   - **URGENT:** Major failures that aren't life-threatening.
+     *Action:* State "I am moving this to the top of our priority list for today."
+## EMERGENCY CONTACT
+- Contact: ${speech_emergency}
+- Instructions: Tell them we are reaching out via mobile to the nearest crew immediately.` 
+    : `## EMERGENCY: You are NOT a trained dispatcher. If a caller has a safety emergency, tell them to call 911 or call the office during business hours.`;
 
+    // --- SKILL MODULE 2: LEAD REVIVAL ---
+    const leadRevivalModule = hasLeadRevival 
+      ? `## LEAD REVIVAL SKILL: ${buildLeadRevivalFromMapped(body)}` 
+      : `## LEAD REVIVAL: This skill is disabled. Do not mention discounts or follow-up offers.`;
+
+    // --- SKILL MODULE 3: SCHEDULING ---
+    const schedulingModule = hasScheduling
+      ? `## SCHEDULING SKILL: ${buildSchedulingFromMapped(body)}`
+      : `## SCHEDULING: This skill is disabled. Take a message for a callback.`;
+
+    // --- WEBSITE SCRAPING ---
     const website_url = normalizeWebsite(pick(body, ["website", "url"]));
     let website_content = null;
-    
     if (website_url && website_url !== "Not provided") {
         try {
             website_content = await Promise.race([
@@ -158,52 +188,51 @@ module.exports = async function handler(req, res) {
         } catch (e) { console.log("Website timeout."); }
     }
 
+    // --- FINAL PROMPT CONSTRUCTION ---
     const FINAL_PROMPT = `
 ## IDENTITY
-- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
-- Role: Maintain a calm, authoritative, and urgent demeanor. You are responsible for triaging safety issues.
+- You are ${agent_name}, a professional representative for ${biz_name}.
+- Role: Be helpful, concise, and focused. ${hasEmergency ? "Priority: Triage safety/emergencies first." : "Priority: General customer service and intake."}
 - Rule: Do NOT mention you are an AI.
 
 ## BUSINESS KNOWLEDGE
 - Services: ${services}
-- Hours: Dispatch is active 24/7 for emergency safety concerns.
-- Website Context: ${website_content ? website_content : "Rely on industry standards for asphalt safety and emergency repair."}
+- Hours: ${hasEmergency ? "Dispatch is active 24/7 for emergencies." : biz_hours}
+- Website Context: ${website_content ? website_content : "Rely on industry standards for " + services}
 
-## DISPATCH TRIAGE PROTOCOL
-1. **Identify the Hazard:** Immediately ask: "What is the nature of the emergency, and is the area currently safe for traffic?"
-2. **Assign Severity:** - **CRITICAL:** Active sinkholes, hazards in traffic lanes, or immediate pedestrian danger. 
-     *Action:* Instruct them to "mark off the area" and state "I am alerting our on-call supervisor and nearest crew right now."
-   - **URGENT:** Equipment damage or major failures that aren't life-threatening.
-     *Action:* State "I am moving this to the top of our priority list for today."
+${emergencyModule}
+
+${leadRevivalModule}
+
+${schedulingModule}
 
 ## OPERATIONAL GUIDELINES
-- INTAKE (Critical Dispatch): You MUST get the exact street address/location and a secondary contact number before hanging up.
-- EMERGENCY CONTACT: ${speech_emergency}. 
-- Instructions: Tell the caller we are reaching out via mobile to the nearest crew immediately.
-- SCHEDULING: ${buildSchedulingFromMapped(body)}
-- LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
+- INTAKE: ${hasEmergency ? "For emergencies, you MUST get exact location and a secondary number." : "Capture name, number, and inquiry details."}
 
 ## CALL RULES
-1. **Leading the Call:** Do not wait for the caller to talk. As a dispatcher, you lead the conversation to get the facts quickly.
+1. **Leading the Call:** ${hasEmergency ? "Lead the conversation to get facts quickly." : "Be warm and conversational."}
 2. **Be Brief:** 1-2 sentences max. 
 3. **No Symbols:** Say "dollars" instead of "$".
-4. **Closing:** "Stay safe. I am transmitting your emergency details to our team now."
+4. **Closing:** ${hasEmergency ? '"Stay safe. I am transmitting your details to our team now."' : '"Thank you for calling. Someone will be in touch soon."'}
 `.trim();
 
+    // --- RETELL API CALLS ---
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
       general_prompt: FINAL_PROMPT,
-      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
+      begin_message: hasEmergency 
+        ? `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?` 
+        : `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you?`,
       model: "gpt-4o-mini",
     }, { headers });
 
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-      agent_name: `${biz_name} Dispatch Agent`,
+      agent_name: `${biz_name} Modular Agent`,
       voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
       response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
       metadata: {
         business_name: String(biz_name),
         notification_email: String(client_email),
-        agent_type: "emergency_dispatcher"
+        skills_unlocked: `Emergency:${hasEmergency}, Sales:${hasLeadRevival}, Schedule:${hasScheduling}`
       }
     }, { headers });
 
