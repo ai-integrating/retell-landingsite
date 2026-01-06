@@ -1,4 +1,3 @@
-// /api/retell-create-call.js
 const axios = require("axios");
 
 // --- 1. CORE UTILITIES ---
@@ -41,7 +40,7 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-function cleanValue(text) {
+function cleanValue(text, fallback = "Not provided") {
   const t = String(text || "").trim();
   if (
     !t ||
@@ -51,26 +50,20 @@ function cleanValue(text) {
     t === "null" ||
     t.toLowerCase() === "not provided"
   )
-    return "Not provided";
-  return t.replace(/\[\]/g, "Not provided");
+    return fallback;
+  return t.replace(/\[\]/g, fallback);
 }
 
-function uniq(arr) {
-  return Array.from(new Set((arr || []).map((x) => String(x).trim()).filter(Boolean)));
-}
-
-// --- ✅ 1b. VOICE RESOLUTION (MINIMAL ADD) ---
+// --- 2. VOICE RESOLUTION ---
 function resolveVoiceId(body) {
-  // If Zap already sends voice_id, use it.
-  const direct = pick(body, ["voice_id"], "");
-  if (direct && direct !== "Not provided") return direct;
+  const direct = pick(body, ["voice_id", "voiceId", "VOICE_ID"], "");
+  if (direct && direct !== "Not provided") return String(direct).trim();
 
-  const tone = String(pick(body, ["voice_tone"], "")).toLowerCase();
-  const gender = String(pick(body, ["agent_gender"], "")).toLowerCase();
+  const tone = String(pick(body, ["voice_tone", "voiceTone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "agentGender", "gender"], "female")).toLowerCase().trim();
 
-  // Map tone+gender to voice IDs stored in env vars.
-  // Add only what you need. Anything missing falls back to DEFAULT_VOICE_ID.
   const VOICE_MAP = {
+    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
     female_warm: process.env.VOICE_FEMALE_WARM,
     female_calm: process.env.VOICE_FEMALE_CALM,
     female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
@@ -82,7 +75,7 @@ function resolveVoiceId(body) {
   return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
 }
 
-// --- 2. URL & SCRAPER LOGIC ---
+// --- 3. URL & SCRAPER LOGIC ---
 function extractFirstUrl(text) {
   if (!text) return null;
   const m = String(text).match(/https?:\/\/[^\s)]+/i);
@@ -91,164 +84,50 @@ function extractFirstUrl(text) {
 
 function normalizeWebsite(raw) {
   if (!raw || raw === "Not provided") return "Not provided";
-  if (typeof raw === "object" && raw.output) raw = raw.output;
-  raw = String(raw).trim();
-  const extracted = extractFirstUrl(raw);
+  const extracted = extractFirstUrl(String(raw));
   if (extracted) return extracted;
   if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
-  return raw.startsWith("http") ? raw : "Not provided";
-}
-
-function looksLikeCode(text) {
-  const t = (text || "").slice(0, 1200).toLowerCase();
-  const codeHits = [
-    "@keyframes",
-    "view-transition",
-    "webkit",
-    "transform:",
-    "opacity:",
-    "{",
-    "}",
-    "::",
-    "function(",
-    "window.",
-    "document.",
-  ];
-  return codeHits.filter((k) => t.includes(k)).length >= 2;
+  return String(raw).startsWith("http") ? raw : "Not provided";
 }
 
 async function getWebsiteContext(url) {
   if (!url || url === "Not provided") return null;
-
-  // Direct fetch
   try {
     const response = await axios.get(url, {
-      timeout: 8000,
-      maxRedirects: 5,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
+      timeout: 4000, 
+      headers: { "User-Agent": "Mozilla/5.0" },
     });
-
     let text = String(response.data || "")
-      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gim, "")
-      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gim, "")
-      .replace(/<header[^>]*>([\s\S]*?)<\/header>/gim, "")
-      .replace(/<nav[^>]*>([\s\S]*?)<\/nav>/gim, "")
-      .replace(/<footer[^>]*>([\s\S]*?)<\/footer>/gim, "")
-      .replace(/<form[^>]*>([\s\S]*?)<\/form>/gim, "")
+      .replace(/<(script|style|header|nav|footer|form)[^>]*>([\s\S]*?)<\/\1>/gim, "")
       .replace(/<[^>]*>?/gm, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+      .replace(/\s+/g, " ").trim();
+    if (text.length >= 200) return decodeHtml(text).substring(0, 3000);
+  } catch (e) {}
 
-    text = decodeHtml(text);
-    if (text.length >= 200 && !looksLikeCode(text)) return text.substring(0, 2000);
-  } catch (e) {
-    // fall through
-  }
-
-  // Fallback proxy (jina)
   try {
-    const proxyUrl = `https://r.jina.ai/${url.replace(/^https?:\/\//, "https://")}`;
-    const r = await axios.get(proxyUrl, { timeout: 9000 });
+    const r = await axios.get(`https://r.jina.ai/${url}`, { timeout: 5000 });
     const txt = decodeHtml(String(r.data || "")).replace(/\s+/g, " ").trim();
-    if (txt.length >= 200 && !looksLikeCode(txt)) return txt.substring(0, 2000);
-  } catch (e) {
-    return null;
-  }
-
+    if (txt.length >= 200) return txt.substring(0, 3000);
+  } catch (e) {}
   return null;
 }
 
-// --- 3. SMART FACT EXTRACTION ---
-function extractIncludingAreas(text) {
-  const m = String(text || "").match(
-    /including\s+([A-Za-z,\s]+?)(?:and\s+surrounding|surrounding|area|towns|cities|\.)/i
-  );
-  if (!m || !m[1]) return [];
-  return uniq(m[1].split(",").map((s) => s.trim()).filter((s) => s.length >= 3)).slice(
-    0,
-    10
-  );
+// --- 4. MAPPED FIELD BUILDERS ---
+function buildSchedulingFromMapped(body) {
+  const link = cleanValue(pick(body, ["calendar_link", "calendarLink"]));
+  if (link === "Not provided") return "Scheduling is NOT enabled. Take a message and callback number.";
+  return `Calendar Link: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
 }
 
-/**
- * ✅ FIXED: this was the broken regex causing:
- * SyntaxError: Invalid regular expression: missing /
- * We use new RegExp() so it cannot break from paste/linewrap.
- */
-function extractCommaPlaceLists(text) {
-  const re = new RegExp(
-    "\\b([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)?)(?:,\\s*[A-Z][a-z]+(?:\\s+[A-Z][a-z]+)?)+\\b",
-    "g"
-  );
-  const m = String(text || "").match(re);
-  return m ? m.slice(0, 2) : [];
+function buildLeadRevivalFromMapped(body) {
+  const offer = cleanValue(pick(body, ["lead_revival_offer"]));
+  const timing = cleanValue(pick(body, ["follow_up_timing"]));
+  const attempts = cleanValue(pick(body, ["follow_up_attempts"]));
+  if (offer === "Not provided") return "No active lead revival offer.";
+  return `Offer: ${offer} | Timing: ${timing} | Max Attempts: ${attempts}`;
 }
 
-function buildWebsiteFacts(text, businessTypeHint = "") {
-  if (!text) return "";
-  const raw = String(text);
-  const lower = raw.toLowerCase();
-
-  const areas = uniq([
-    ...extractIncludingAreas(raw),
-    ...extractCommaPlaceLists(raw)
-      .join(", ")
-      .split(",")
-      .map((s) => s.trim()),
-  ])
-    .filter((a) => a.length >= 3)
-    .slice(0, 10);
-
-  const tradeBoosters = {
-    hvac: ["air conditioning", "ac", "heating", "furnace", "boiler", "heat pump", "duct repair"],
-    plumbing: ["drain cleaning", "pipe repair", "leak detection", "water heater", "sewer", "sump pump"],
-    paving: ["asphalt paving", "sealcoating", "patchwork", "crack filling", "line painting", "excavation", "curbing", "sidewalks", "snow removal"],
-    roofing: ["roof repair", "shingle replacement", "flat roof", "leak repair", "siding", "gutters"],
-  };
-
-  let booster = [];
-  const hint = String(businessTypeHint || "").toLowerCase();
-  for (const key of Object.keys(tradeBoosters)) {
-    if (hint.includes(key)) booster = tradeBoosters[key];
-  }
-
-  if (!booster.length) {
-    if (lower.includes("asphalt") || lower.includes("paving") || lower.includes("sealcoating")) booster = tradeBoosters.paving;
-    else if (lower.includes("plumbing") || lower.includes("drain")) booster = tradeBoosters.plumbing;
-    else if (lower.includes("hvac") || lower.includes("furnace")) booster = tradeBoosters.hvac;
-  }
-
-  const allPossible = Array.from(
-    new Set([...booster, "repair", "installation", "maintenance", "service", "emergency service", "free estimate"])
-  );
-
-  const services = allPossible
-    .filter((k) => {
-      const kk = k.toLowerCase();
-      if (lower.includes(kk)) return true;
-      const token = kk.split(" ").sort((a, b) => b.length - a.length)[0];
-      return token && token.length >= 5 && lower.includes(token);
-    })
-    .slice(0, 12);
-
-  const lines = [];
-  if (areas.length) lines.push(`- Service area: ${areas.join(", ")}.`);
-  if (services.length) lines.push(`- Services: ${services.join(", ")}.`);
-  if (lower.includes("residential") || lower.includes("commercial")) {
-    const rc = [lower.includes("residential") ? "Residential" : null, lower.includes("commercial") ? "Commercial" : null]
-      .filter(Boolean)
-      .join(" + ");
-    lines.push(`- Serving: ${rc}.`);
-  }
-
-  return lines.length ? `WEBSITE FACTS (FAST REFERENCE):\n${lines.join("\n")}` : "";
-}
-
-// --- 4. MAIN HANDLER ---
+// --- 5. MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -256,86 +135,82 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJsonBody(req);
-    const headers = {
-      Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
-      "Content-Type": "application/json",
-    };
+    const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name", "businessName"], "the business");
+    const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
+    const agent_name = pick(body, ["agent_name", "name"], "Lexi");
+    const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
+    const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
+    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
 
-    // ✅ minimal: use agent_name instead of hardcoding "Allie"
-    const agent_name = pick(body, ["agent_name"], "Allie");
-    const GREETING = `Thanks for calling ${biz_name}, this is ${agent_name}. How can I help you today?`;
+    const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "5082910787");
+    const speech_emergency = raw_emergency.split('').join('-');
 
-    const biz_type = cleanValue(pick(body, ["primary_type_of_business", "industry"], ""));
-    const website_url = normalizeWebsite(pick(body, ["website"], "Not provided"));
-
-    const website_content = await getWebsiteContext(website_url);
-    const structured_facts = buildWebsiteFacts(website_content, biz_type);
-
-    let scheduling = String(cleanValue(pick(body, ["scheduling_details"], ""))).replace("Calandar", "Calendar");
-    if (!/https?:\/\/\S+/i.test(scheduling)) {
-      scheduling = "Calendar Link: Not provided. Scheduling is NOT enabled. Take a message for a callback.";
+    const website_url = normalizeWebsite(pick(body, ["website", "url"]));
+    let website_content = null;
+    
+    if (website_url && website_url !== "Not provided") {
+        try {
+            website_content = await Promise.race([
+                getWebsiteContext(website_url),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
+            ]);
+        } catch (e) { console.log("Website timeout."); }
     }
 
     const FINAL_PROMPT = `
-IDENTITY:
-- You are ${agent_name} with ${biz_name}.
-- If asked "who are you?" or "who am I speaking to?", say: "This is ${agent_name} with ${biz_name}."
-- Do NOT volunteer that you are an AI. Only acknowledge being an AI if explicitly asked.
-- If explicitly asked "Are you an AI?" or "Is this a robot?", say: "Yes — I’m an AI assistant helping the team handle calls. I can help now or take a detailed message."
-- If pressed for more detail, say: "I’m part of the team here and help handle incoming calls."
+## IDENTITY
+- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
+- Role: Maintain a calm, authoritative, and urgent demeanor. You are responsible for triaging safety issues.
+- Rule: Do NOT mention you are an AI.
 
-STYLE: Warm, human, concise. Never guess.
+## BUSINESS KNOWLEDGE
+- Services: ${services}
+- Hours: Dispatch is active 24/7 for emergency safety concerns.
+- Website Context: ${website_content ? website_content : "Rely on industry standards for asphalt safety and emergency repair."}
 
-${structured_facts}
+## DISPATCH TRIAGE PROTOCOL
+1. **Identify the Hazard:** Immediately ask: "What is the nature of the emergency, and is the area currently safe for traffic?"
+2. **Assign Severity:** - **CRITICAL:** Active sinkholes, hazards in traffic lanes, or immediate pedestrian danger. 
+     *Action:* Instruct them to "mark off the area" and state "I am alerting our on-call supervisor and nearest crew right now."
+   - **URGENT:** Equipment damage or major failures that aren't life-threatening.
+     *Action:* State "I am moving this to the top of our priority list for today."
 
-RAW WEBSITE EXCERPT (REFERENCE ONLY):
----
-${website_content ? website_content.substring(0, 800) : "No website data found."}
----
+## OPERATIONAL GUIDELINES
+- INTAKE (Critical Dispatch): You MUST get the exact street address/location and a secondary contact number before hanging up.
+- EMERGENCY CONTACT: ${speech_emergency}. 
+- Instructions: Tell the caller we are reaching out via mobile to the nearest crew immediately.
+- SCHEDULING: ${buildSchedulingFromMapped(body)}
+- LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
 
-SCHEDULING: ${scheduling}
-EMERGENCY: ${cleanValue(pick(body, ["emergency_dispatch_questions"]))}
-INTAKE: ${cleanValue(pick(body, ["job_intake_details"]))}
-
-RULE: If a caller asks to book, collect preferred windows and callback number. Do NOT confirm a time.
+## CALL RULES
+1. **Leading the Call:** Do not wait for the caller to talk. As a dispatcher, you lead the conversation to get the facts quickly.
+2. **Be Brief:** 1-2 sentences max. 
+3. **No Symbols:** Say "dollars" instead of "$".
+4. **Closing:** "Stay safe. I am transmitting your emergency details to our team now."
 `.trim();
 
-    const llmResp = await axios.post(
-      "https://api.retellai.com/create-retell-llm",
-      {
-        general_prompt: FINAL_PROMPT,
-        begin_message: GREETING,
-        model: "gpt-4o-mini",
-      },
-      { headers }
-    );
+    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
+      general_prompt: FINAL_PROMPT,
+      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
+      model: "gpt-4o-mini",
+    }, { headers });
 
-    // ✅ minimal: resolve voice_id from prefills (voice_tone + agent_gender) or fallback
-    const voiceId = resolveVoiceId(body);
+    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
+      agent_name: `${biz_name} Dispatch Agent`,
+      voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
+      response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+      metadata: {
+        business_name: String(biz_name),
+        notification_email: String(client_email),
+        agent_type: "emergency_dispatcher"
+      }
+    }, { headers });
 
-    const agentResp = await axios.post(
-      "https://api.retellai.com/create-agent",
-      {
-        agent_name: `${biz_name} Agent`,
-        voice_id: voiceId,
-        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-        metadata: {
-          notify_phone: pick(body, ["notify_phone", "cell_phone"]),
-          business_name: biz_name,
-        },
-      },
-      { headers }
-    );
+    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
 
-    return res.status(200).json({
-      ok: true,
-      agent_id: agentResp.data.agent_id,
-      facts: Boolean(structured_facts),
-    });
   } catch (error) {
-    console.error("retell-create-call failed:", error?.response?.data || error?.message || error);
-    return res.status(500).json({ error: error?.response?.data || error.message || "Server error" });
+    console.error("CRITICAL ERROR:", error?.response?.data || error.message);
+    return res.status(500).json({ error: "Server error", details: error.message });
   }
 };
