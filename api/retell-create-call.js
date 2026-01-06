@@ -72,7 +72,6 @@ const TEMPLATE_ROLE_MAP = {
   operations_male_v1: "operations",
 };
 
-// allowed roles (fail-fast if something weird comes in)
 const ALLOWED_ROLES = new Set([
   "receptionist",
   "scheduler",
@@ -84,9 +83,7 @@ const ALLOWED_ROLES = new Set([
 
 function resolveRole(body) {
   const templateIdRaw = pick(body, ["agent_template_id", "template_id"], "");
-  const templateId = String(templateIdRaw || "")
-    .toLowerCase()
-    .trim();
+  const templateId = String(templateIdRaw || "").toLowerCase().trim();
 
   const fromTemplate = TEMPLATE_ROLE_MAP[templateId];
 
@@ -98,9 +95,7 @@ function resolveRole(body) {
 
   if (!ALLOWED_ROLES.has(resolved)) {
     const err = new Error(
-      `Invalid role "${resolved}". Allowed roles: ${Array.from(ALLOWED_ROLES).join(
-        ", "
-      )}`
+      `Invalid role "${resolved}". Allowed roles: ${Array.from(ALLOWED_ROLES).join(", ")}`
     );
     err.statusCode = 400;
     err.debug = { templateId, fromTemplate, fromRoleField };
@@ -110,7 +105,7 @@ function resolveRole(body) {
   return { role: resolved, templateId };
 }
 
-// --- 4. WEBSITE / FORM QUALITY GUARDRAILS ---
+// --- 4. HELPERS ---
 function normalizeWebsite(url) {
   const u = String(url || "").trim();
   if (!u || u === "Not provided") return "";
@@ -118,9 +113,7 @@ function normalizeWebsite(url) {
 }
 
 function safePhoneDigits(input) {
-  const digits = String(input || "")
-    .replace(/[^\d]/g, "")
-    .trim();
+  const digits = String(input || "").replace(/[^\d]/g, "").trim();
   return digits || "";
 }
 
@@ -131,6 +124,14 @@ function speakPhone(phoneDigits) {
 
 function sha256(text) {
   return crypto.createHash("sha256").update(String(text || ""), "utf8").digest("hex");
+}
+
+function toYesNo(val) {
+  const s = String(val || "").trim().toLowerCase();
+  if (!s || s === "not provided") return "";
+  if (["yes", "y", "true"].includes(s)) return "Yes";
+  if (["no", "n", "false"].includes(s)) return "No";
+  return String(val).trim();
 }
 
 // --- 5. MAIN HANDLER ---
@@ -158,20 +159,68 @@ module.exports = async function handler(req, res) {
     const services = String(pick(body, ["services", "primary_business_type", "service_type"], "")).trim();
     const extra_info = String(pick(body, ["extra_info", "notes", "additional_info"], "")).trim();
 
+    // Scheduler fields (from your screenshot)
+    const time_zone = String(pick(body, ["time_zone", "timezone"], "")).trim();
+    const calendar_system = String(pick(body, ["calendar_system"], "")).trim();
     const calendar_link = String(pick(body, ["calendar_link", "booking_link"], "")).trim();
 
+    const after_hours_rules = toYesNo(pick(body, ["after_hours_rules"], ""));
+    const buffer_time = String(pick(body, ["buffer_time"], "")).trim(); // e.g. "10 minutes"
+    const same_day_appointment_rules = toYesNo(pick(body, ["same_day_appointment_rules"], ""));
+    const weekend_appointments = toYesNo(pick(body, ["weekend_appointments"], ""));
+    const service_durations = String(pick(body, ["service_durations"], "")).trim();
+
+    // Emergency fields (CLIENT-SPECIFIC ONLY)
     const emergencyPrimary = safePhoneDigits(pick(body, ["emergency_phone", "primary_emergency_phone"], ""));
     const emergencySecondary = safePhoneDigits(pick(body, ["emergency_secondary_phone"], ""));
     const urgent_instructions = String(pick(body, ["urgent_instructions"], "")).trim();
 
-    // fallback only if missing
-    const fallbackEmergencyDigits =
-      emergencyPrimary || safePhoneDigits(pick(body, ["emergency_phone"], "5082910787")) || "5082910787";
+    const hasClientEmergencyNumber = Boolean(emergencyPrimary);
+    const speech_emergency = hasClientEmergencyNumber ? speakPhone(emergencyPrimary) : "";
 
-    const speech_emergency = speakPhone(fallbackEmergencyDigits);
+    // --- BUSINESS CONTEXT ---
+    const websiteContext = website
+      ? `Website provided: ${website}. If asked about services, prefer what is on the website. If you are unsure, ask clarifying questions instead of guessing.`
+      : `No website provided. Do not invent services. Ask clarifying questions and capture details for a callback when needed.`;
 
-    // --- ROLE CAPSULES (LOCKED PROMPTS PER ROLE) ---
+    const contextLines = [
+      biz_name ? `Business name: ${biz_name}` : "",
+      business_hours ? `Business hours: ${business_hours}` : "",
+      services ? `Primary services / business type: ${services}` : "",
+      extra_info ? `Extra notes: ${extra_info}` : "",
+      time_zone ? `Business time zone: ${time_zone}` : "",
+      calendar_system ? `Calendar system: ${calendar_system}` : "",
+      urgent_instructions ? `Urgent instructions: ${urgent_instructions}` : "",
+      emergencySecondary ? `Secondary emergency phone (digits): ${emergencySecondary}` : "",
+    ].filter(Boolean);
+
+    // --- CONDITIONAL EMERGENCY RULE ---
+    // Include ONLY if (a) role is emergency_dispatch OR (b) the client provided emergency_phone
+    const EMERGENCY_RULE = (role === "emergency_dispatch" || hasClientEmergencyNumber)
+      ? `
+## EMERGENCY RULE (ONLY WHEN NEEDED)
+If the caller reports immediate danger, injury, fire, active hazard, or a truly urgent situation:
+- Stay calm and ask for the location/address first.
+- Tell them to follow safety guidance and contact local emergency services if appropriate.
+- Collect name and callback number.
+${hasClientEmergencyNumber ? `- Provide the business emergency contact: ${speech_emergency}.` : `- No business emergency number is on file. Take details and escalate immediately.`}
+- Do not guess or reassure beyond what you know; escalate.
+`.trim()
+      : ""; // IMPORTANT: completely removed for normal clients
+
+    // --- ROLE CAPSULES (LOCKED) ---
     const offer = String(pick(body, ["lead_revival_offer", "revival_offer"], "")).trim();
+
+    const schedulerDetails = [
+      calendar_link ? `Booking link: ${calendar_link}` : `Booking link: (not provided — you must take details for manual scheduling)`,
+      buffer_time ? `Buffer time between appointments: ${buffer_time}` : "",
+      same_day_appointment_rules ? `Same-day appointments allowed: ${same_day_appointment_rules}` : "",
+      weekend_appointments ? `Weekend appointments allowed: ${weekend_appointments}` : "",
+      after_hours_rules ? `After-hours booking allowed: ${after_hours_rules}` : "",
+      service_durations ? `Service durations: ${service_durations}` : "",
+      time_zone ? `Time zone: ${time_zone}` : "",
+      calendar_system ? `Calendar system: ${calendar_system}` : "",
+    ].filter(Boolean).join("\n- ");
 
     const ROLE_PROMPTS = {
       receptionist: {
@@ -180,10 +229,9 @@ module.exports = async function handler(req, res) {
         body: `
 ## CORE ROLE: RECEPTIONIST
 - Greet callers and identify whether they are a new or returning customer.
-- Collect: caller name, best callback number, service address (or town/city), and a short description of what they need.
+- Collect: caller name, best callback number, address/town, and a short description of what they need.
 - Do not guess pricing, timelines, or guarantees.
-- If information is missing or unclear, ask 1–2 focused questions.
-- If the caller needs urgent help, follow the Emergency Rule below.
+- If unsure, ask 1–2 focused questions, then take a message for callback.
 `.trim(),
       },
 
@@ -192,37 +240,40 @@ module.exports = async function handler(req, res) {
         tone: "Warm, calm, and organized.",
         body: `
 ## CORE ROLE: INTAKE SPECIALIST
-- Your job is to gather complete details and route to the right next step.
-- Collect: name, callback, address/town, type of service needed, and any timing constraints.
-- If the caller is requesting an estimate, collect the project details and preferred time window.
+- Gather complete details and route to the right next step.
+- Collect: name, callback, address/town, service needed, and urgency.
+- If the caller requests an estimate, capture details and preferred day/time window.
 - If you cannot schedule directly, take a message and promise a callback.
-- Use the Emergency Rule when appropriate.
 `.trim(),
       },
 
       scheduler: {
-        begin: `Thanks for calling ${biz_name}, this is ${agent_name}. Are you looking to schedule an estimate or service?`,
+        begin: `Thanks for calling ${biz_name}, this is ${agent_name}. Are you looking to schedule an appointment?`,
         tone: "Friendly, efficient, and confident.",
         body: `
 ## CORE ROLE: SCHEDULER
-- Your job is to schedule appointments or collect details for scheduling.
-- If a booking link is provided, offer to schedule using it: ${calendar_link || "[no booking link provided]"}.
-- If no booking link is provided, collect: name, callback, address/town, requested service, and preferred days/times.
-- Confirm time zone if relevant.
-- Use the Emergency Rule when appropriate.
+- Your job is to schedule appointments OR collect details for manual scheduling.
+- Apply these scheduling rules exactly:
+
+- ${schedulerDetails}
+
+### Scheduling flow:
+1) Identify what service they want.
+2) Confirm preferred day/time window (and time zone if needed).
+3) If a booking link exists, guide them through booking OR confirm you will book it for them (depending on your workflow).
+4) If no booking link exists, collect details and say: "I’ll have the office reach out to confirm the next available time."
+5) Confirm constraints (same-day, weekend, after-hours, buffer time) BEFORE promising a slot.
 `.trim(),
       },
 
       emergency_dispatch: {
         begin: `Emergency dispatch for ${biz_name}. This is ${agent_name}. What is the situation?`,
-        tone: "Calm, authoritative, and urgent.",
+        tone: "Calm, authoritative, urgent.",
         body: `
 ## CORE ROLE: EMERGENCY DISPATCH
-- Quickly assess whether there is immediate danger (traffic hazard, safety hazard, blocked access, etc.).
-- If there is a hazard: instruct the caller to mark off the area and keep people away.
-- Gather: location/address, what happened, whether anyone is injured, and best callback number.
-- Provide the emergency contact if needed: ${speech_emergency}.
-- Keep the caller calm and move fast.
+- Quickly assess immediate danger.
+- Collect: location/address, what happened, whether anyone is injured, and best callback number.
+- Escalate immediately to the business emergency contact if provided.
 `.trim(),
       },
 
@@ -233,68 +284,42 @@ module.exports = async function handler(req, res) {
 ## CORE ROLE: LEAD REVIVAL
 - Confirm they received the quote and ask where they are in the decision process.
 - Ask if scope/timing changed.
-- Offer next step: schedule a follow-up or answer a quick question.
+- Offer next steps (schedule follow-up or answer a quick question).
 - If not interested, thank them and close politely.
 ${offer ? `- Current Offer: ${offer}` : `- If no offer is provided, do not invent one.`}
-- Use the Emergency Rule if the caller mentions a hazard.
 `.trim(),
       },
 
       operations: {
         begin: `Operations for ${biz_name}, this is ${agent_name}. How can I help you today?`,
-        tone: "Confident, organized, and leadership-level.",
+        tone: "Confident, organized, leadership-level.",
         body: `
 ## CORE ROLE: FULL STAFF OPERATIONS (MULTI-SKILL)
 You can perform Reception, Intake, Scheduling, Lead Revival, and Emergency Dispatch.
 
 ### How to operate:
-1) First, identify intent: scheduling, new intake, emergency, or follow-up.
-2) Then, switch to the matching skill and proceed.
-3) Never guess missing policies/pricing—ask clarifying questions or take a message for callback.
-4) Always apply the Emergency Rule when there is a hazard.
+1) Identify intent (scheduling, new intake, emergency, follow-up).
+2) Switch to the matching skill and proceed.
+3) Never guess missing pricing/policies; ask or take a message for callback.
 `.trim(),
       },
     };
 
     const roleConfig = ROLE_PROMPTS[role] || ROLE_PROMPTS.receptionist;
 
-    // --- BUSINESS CONTEXT (OPTIONAL ENRICHMENT) ---
-    const websiteContext = website
-      ? `Website provided: ${website}. If asked about services, prefer what is on the website. If you are unsure, ask clarifying questions instead of guessing.`
-      : `No website provided. Do not invent services. Ask clarifying questions and capture details for a callback when needed.`;
-
-    const contextLines = [
-      biz_name ? `Business name: ${biz_name}` : "",
-      business_hours ? `Business hours: ${business_hours}` : "",
-      services ? `Primary services / business type: ${services}` : "",
-      extra_info ? `Extra notes: ${extra_info}` : "",
-      urgent_instructions ? `Urgent instructions: ${urgent_instructions}` : "",
-      emergencySecondary ? `Secondary emergency phone (digits): ${emergencySecondary}` : "",
-    ].filter(Boolean);
-
-    // --- EMERGENCY RULE (GLOBAL) ---
-    const EMERGENCY_RULE = `
-## EMERGENCY RULE (ALWAYS ACTIVE)
-If the caller mentions a hazard, immediate danger, or a dangerous situation:
-- Tell them to mark off the area and keep people away.
-- Collect location/address and callback number.
-- Provide the emergency contact: ${speech_emergency}.
-- Do not provide legal/safety guarantees; prioritize calm instructions and escalation.
-`.trim();
-
-    // --- BASE RULES (STABLE SYSTEM BEHAVIOR) ---
+    // --- BASE RULES (STABLE) ---
     const BASE_RULES = `
 ## BASE RULES
 - Do NOT mention you are an AI.
 - Be concise: 1–2 sentences per turn when possible.
 - Ask up to 2 clarifying questions if needed.
 - Never invent pricing, guarantees, or policies.
-- If information is missing or the form data looks wrong, default to: gather details + promise a callback.
+- If info is missing or form data looks wrong: gather details + promise a callback.
 - No symbols: say "dollars" instead of "$".
 - Close with: "Thank you for calling. Someone will reach out soon."
 `.trim();
 
-    // --- FINAL PROMPT ASSEMBLY (ONE PLACE ONLY) ---
+    // --- FINAL PROMPT ---
     const FINAL_PROMPT = `
 ## IDENTITY
 You are ${agent_name}, a professional representative for ${biz_name}.
@@ -307,7 +332,7 @@ ${contextLines.length ? `\n${contextLines.join("\n")}` : ""}
 
 ${roleConfig.body}
 
-${EMERGENCY_RULE}
+${EMERGENCY_RULE ? `\n${EMERGENCY_RULE}\n` : ""}
 
 ${BASE_RULES}
 `.trim();
@@ -343,17 +368,16 @@ ${BASE_RULES}
       { headers }
     );
 
-    // --- DEBUG RETURN (keep for now; remove later) ---
     return res.status(200).json({
       ok: true,
       agent_id: agentResp.data.agent_id,
       debug: {
         resolved_role: role,
         templateId,
-        voice_id: resolveVoiceId(body),
         prompt_hash,
         has_website: Boolean(website),
         has_calendar_link: Boolean(calendar_link),
+        has_client_emergency_number: hasClientEmergencyNumber,
       },
     });
   } catch (error) {
