@@ -32,15 +32,73 @@ const decodeHtml = (s) =>
 
 const uniq = (arr) => [...new Set((arr || []).filter(Boolean))];
 
+// Treat "No data" as empty, and Zapier token objects {output:"..."} as values
 function pick(obj, keys, fallback = "Not provided") {
   for (const k of keys) {
     let val = obj?.[k];
     if (val !== undefined && val !== null && val !== "" && val !== "No data") {
-      if (typeof val === "object" && val.output) return val.output;
+      if (typeof val === "object" && val.output !== undefined) return val.output;
       return val;
     }
   }
   return fallback;
+}
+
+// --- 1.1 BODY NORMALIZER (fixes Zapier flattened keys) ---
+function setDeep(obj, path, value) {
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    const k = path[i];
+    if (!cur[k] || typeof cur[k] !== "object") cur[k] = {};
+    cur = cur[k];
+  }
+  cur[path[path.length - 1]] = value;
+}
+
+/**
+ * Some Zapier webhook payloads arrive flattened like:
+ * - "meta.agent_role": "intake"
+ * - "meta__agent_role": "intake"
+ * - "meta[agent_role]": "intake"
+ * This normalizer rebuilds nested blocks so pickCanonical works reliably.
+ */
+function normalizeIncomingBody(rawBody) {
+  if (!rawBody || typeof rawBody !== "object") return rawBody;
+
+  // If already nested, keep it
+  const looksNested =
+    rawBody.meta && typeof rawBody.meta === "object" &&
+    rawBody.core && typeof rawBody.core === "object";
+  if (looksNested) return rawBody;
+
+  const out = { ...rawBody };
+
+  for (const [k, v] of Object.entries(rawBody)) {
+    if (v === undefined) continue;
+
+    // meta.agent_role
+    if (k.includes(".")) {
+      const parts = k.split(".").filter(Boolean);
+      if (parts.length >= 2) setDeep(out, parts, v);
+      continue;
+    }
+
+    // meta__agent_role
+    if (k.includes("__")) {
+      const parts = k.split("__").filter(Boolean);
+      if (parts.length >= 2) setDeep(out, parts, v);
+      continue;
+    }
+
+    // meta[agent_role]
+    const bracket = k.match(/^([^\[]+)\[([^\]]+)\]$/);
+    if (bracket) {
+      setDeep(out, [bracket[1], bracket[2]], v);
+      continue;
+    }
+  }
+
+  return out;
 }
 
 function getBlock(body, blockName) {
@@ -187,7 +245,11 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
     /including\s+([A-Za-z,\s]+?)(?:and\s+surrounding|surrounding|area|towns|cities|\.)/i
   );
   const areas = areaMatch
-    ? areaMatch[1].split(",").map((s) => s.trim()).filter((s) => s.length >= 3).slice(0, 10)
+    ? areaMatch[1]
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 3)
+        .slice(0, 10)
     : [];
 
   const tradeBoosters = {
@@ -218,27 +280,33 @@ function buildWebsiteFacts(text, businessTypeHint = "") {
   return lines.length ? `WEBSITE FACTS (AUTO):\n${lines.join("\n")}` : "";
 }
 
-// --- 4. VOICE RESOLUTION (meta.* first, includes male_warm) ---
+// --- 4. VOICE RESOLUTION (meta first + legacy fallback, includes male_warm) ---
 function resolveVoiceProfile(body) {
+  // Direct override support (meta + legacy)
   const direct = pickCanonical(body, "meta", ["voice_id"], ["voice_id", "voiceId", "VOICE_ID"], "");
   if (direct && direct !== "Not provided") {
     return { voice_id: String(direct).trim(), gender: "", tone: "", source: "direct" };
   }
 
-  const tone = String(pickCanonical(body, "meta", ["voice_tone"], ["voice_tone", "tone"], "warm"))
+  const tone = String(
+    pickCanonical(body, "meta", ["voice_tone"], ["voice_tone", "voiceTone", "tone"], "warm")
+  )
     .toLowerCase()
     .trim();
 
-  const gender = String(pickCanonical(body, "meta", ["agent_gender"], ["agent_gender", "gender"], "female"))
+  const gender = String(
+    pickCanonical(body, "meta", ["agent_gender"], ["agent_gender", "agentGender", "gender"], "female")
+  )
     .toLowerCase()
     .trim();
 
   const VOICE_MAP = {
-    female_warm: process.env.VOICE_FEMALE_WARM,
     female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
+    female_warm: process.env.VOICE_FEMALE_WARM,
     female_calm: process.env.VOICE_FEMALE_CALM,
-    male_warm: process.env.VOICE_MALE_WARM,
+    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
     male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
+    male_warm: process.env.VOICE_MALE_WARM,
     male_calm: process.env.VOICE_MALE_CALM,
   };
 
@@ -279,7 +347,9 @@ function resolveRole(body) {
   const resolved = (fromTemplate || fromRoleField || "receptionist").trim();
 
   if (!ALLOWED_ROLES.has(resolved)) {
-    const err = new Error(`Invalid role "${resolved}". Allowed roles: ${Array.from(ALLOWED_ROLES).join(", ")}`);
+    const err = new Error(
+      `Invalid role "${resolved}". Allowed roles: ${Array.from(ALLOWED_ROLES).join(", ")}`
+    );
     err.statusCode = 400;
     err.debug = { templateId, fromTemplate, fromRoleField };
     throw err;
@@ -294,7 +364,8 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = await readJsonBody(req);
+    let body = await readJsonBody(req);
+    body = normalizeIncomingBody(body); // ✅ critical fix for Zapier flattening
 
     const headers = {
       Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
@@ -316,11 +387,19 @@ module.exports = async function handler(req, res) {
     const { role, templateId } = resolveRole(body);
 
     const agent_name = String(pickCanonical(body, "meta", ["agent_name"], ["agent_name"], "Samuel")).trim();
+
     const purchased_package = String(
       pickCanonical(body, "meta", ["purchased_package"], ["purchased_package"], role)
     ).trim();
 
-    const purchased_add_ons = pickCanonical(body, "meta", ["purchased_add_ons"], ["purchased_add_ons"], "");
+    const purchased_add_ons = pickCanonical(
+      body,
+      "meta",
+      ["purchased_add_ons"],
+      ["purchased_add_ons", "Purchased Add Ons", "purchased_addons"],
+      ""
+    );
+
     const hasSamuelAddon =
       Array.isArray(purchased_add_ons)
         ? purchased_add_ons.map(String).map((s) => s.toLowerCase()).includes("samuel")
@@ -331,57 +410,101 @@ module.exports = async function handler(req, res) {
             .filter(Boolean)
             .includes("samuel");
 
-    const biz_name = String(pickCanonical(body, "core", ["business_name"], ["business_name", "company"], "McDuffy and Son Asphalt")).trim();
+    const biz_name = String(
+      pickCanonical(body, "core", ["business_name"], ["business_name", "company"], "McDuffy and Son Asphalt")
+    ).trim();
 
     const client_email = String(
-      pickCanonical(body, "core", ["business_email"], ["business_email", "email", "user_email"], "not-provided@example.com")
+      pickCanonical(
+        body,
+        "core",
+        ["business_email"],
+        ["business_email", "email", "user_email"],
+        "not-provided@example.com"
+      )
     ).trim();
 
     // ✅ Time zone for ALL agents (core first, scheduler fallback)
-    const time_zone = String(
-      pickCanonical(body, "core", ["time_zone"], ["time_zone", "timezone"], "")
-    ).trim() || String(
-      pickCanonical(body, "scheduler", ["time_zone"], ["time_zone", "timezone"], "")
-    ).trim() || "America/New_York";
+    const time_zone =
+      String(pickCanonical(body, "core", ["time_zone"], ["time_zone", "timezone"], "")).trim() ||
+      String(pickCanonical(body, "scheduler", ["time_zone"], ["time_zone", "timezone"], "")).trim() ||
+      "America/New_York";
 
     const website = normalizeWebsite(
       pickCanonical(body, "core", ["website_url"], ["website", "site", "business_website", "website_url"], "")
     );
 
-    const business_hours = String(pickCanonical(body, "core", ["business_hours"], ["business_hours", "hours"], "")).trim();
-    const services = String(
-      pickCanonical(body, "core", ["home_service_type"], ["services", "service_type", "primary_business_type", "home_service_type"], "")
+    const business_hours = String(
+      pickCanonical(body, "core", ["business_hours"], ["business_hours", "hours"], "")
     ).trim();
 
-    const extra_info = String(pickCanonical(body, "core", ["extra_info"], ["extra_info", "notes", "additional_info"], "")).trim();
+    const services = String(
+      pickCanonical(
+        body,
+        "core",
+        ["home_service_type"],
+        ["services", "service_type", "primary_business_type", "home_service_type"],
+        ""
+      )
+    ).trim();
+
+    const extra_info = String(
+      pickCanonical(body, "core", ["extra_info"], ["extra_info", "notes", "additional_info"], "")
+    ).trim();
 
     // --- SCHEDULER BLOCK ---
-    const calendar_system = String(pickCanonical(body, "scheduler", ["calendar_system"], ["calendar_system"], "")).trim();
-    const calendar_link = String(pickCanonical(body, "scheduler", ["calendar_link"], ["calendar_link", "booking_link"], "")).trim();
-    const after_hours_rules = toYesNo(pickCanonical(body, "scheduler", ["after_hours_rules"], ["after_hours_rules"], ""));
-    const buffer_minutes = extractMinutes(pickCanonical(body, "scheduler", ["buffer_minutes"], ["buffer_time"], ""));
-    const same_day_allowed = toYesNo(pickCanonical(body, "scheduler", ["same_day_allowed"], ["same_day_appointment_rules"], ""));
-    const weekend_allowed = toYesNo(pickCanonical(body, "scheduler", ["weekend_allowed"], ["weekend_appointments"], ""));
-    const service_durations = String(pickCanonical(body, "scheduler", ["service_durations"], ["service_durations"], "")).trim();
+    const calendar_system = String(
+      pickCanonical(body, "scheduler", ["calendar_system"], ["calendar_system"], "")
+    ).trim();
+    const calendar_link = String(
+      pickCanonical(body, "scheduler", ["calendar_link"], ["calendar_link", "booking_link"], "")
+    ).trim();
+    const after_hours_rules = toYesNo(
+      pickCanonical(body, "scheduler", ["after_hours_rules"], ["after_hours_rules"], "")
+    );
+    const buffer_minutes = extractMinutes(
+      pickCanonical(body, "scheduler", ["buffer_minutes"], ["buffer_time"], "")
+    );
+    const same_day_allowed = toYesNo(
+      pickCanonical(body, "scheduler", ["same_day_allowed"], ["same_day_appointment_rules"], "")
+    );
+    const weekend_allowed = toYesNo(
+      pickCanonical(body, "scheduler", ["weekend_allowed"], ["weekend_appointments"], "")
+    );
+    const service_durations = String(
+      pickCanonical(body, "scheduler", ["service_durations"], ["service_durations"], "")
+    ).trim();
 
     // --- INTAKE BLOCK ---
     const intake_required_details = String(
       pickCanonical(body, "intake", ["required_details_selected"], ["intake_details", "required_job_details"], "")
     ).trim();
-    const intake_questions = String(pickCanonical(body, "intake", ["questions"], ["intake_questions"], "")).trim();
-    const intake_request_photos = toYesNo(pickCanonical(body, "intake", ["request_photos_via_text"], ["photo_request"], ""));
-    const intake_additional_info = String(pickCanonical(body, "intake", ["additional_info"], ["additional_intake_info"], "")).trim();
+    const intake_questions = String(
+      pickCanonical(body, "intake", ["questions"], ["intake_questions"], "")
+    ).trim();
+    const intake_request_photos = toYesNo(
+      pickCanonical(body, "intake", ["request_photos_via_text"], ["photo_request"], "")
+    );
+    const intake_additional_info = String(
+      pickCanonical(body, "intake", ["additional_info"], ["additional_intake_info"], "")
+    ).trim();
 
     // --- EMERGENCY BLOCK ---
-    const emergency_definition = String(pickCanonical(body, "emergency", ["definition"], ["emergency_definition"], "")).trim();
+    const emergency_definition = String(
+      pickCanonical(body, "emergency", ["definition"], ["emergency_definition"], "")
+    ).trim();
     const emergency_primary_phone_digits = safePhoneDigits(
       pickCanonical(body, "emergency", ["primary_phone"], ["emergency_phone", "primary_emergency_phone"], "")
     );
-    const emergency_alert_email = String(pickCanonical(body, "emergency", ["alert_email"], ["emergency_alert_email"], "")).trim();
+    const emergency_alert_email = String(
+      pickCanonical(body, "emergency", ["alert_email"], ["emergency_alert_email"], "")
+    ).trim();
     const emergency_sms_phone_digits = safePhoneDigits(
       pickCanonical(body, "emergency", ["sms_phone"], ["emergency_sms_phone"], "")
     );
-    const urgent_instructions = String(pickCanonical(body, "emergency", ["urgent_instructions"], ["urgent_instructions"], "")).trim();
+    const urgent_instructions = String(
+      pickCanonical(body, "emergency", ["urgent_instructions"], ["urgent_instructions"], "")
+    ).trim();
 
     const hasClientEmergencyNumber = Boolean(emergency_primary_phone_digits);
     const speech_emergency = hasClientEmergencyNumber ? speakPhone(emergency_primary_phone_digits) : "";
@@ -425,7 +548,9 @@ module.exports = async function handler(req, res) {
       after_hours_rules ? `After-hours rules: ${after_hours_rules}` : "",
       calendar_system ? `Calendar system: ${calendar_system}` : "",
       `Time zone: ${time_zone}`,
-    ].filter(Boolean).join("\n- ");
+    ]
+      .filter(Boolean)
+      .join("\n- ");
 
     const EMERGENCY_RULE =
       role === "emergency_dispatch" || role === "operations"
@@ -588,6 +713,8 @@ ${BASE_RULES}
           website: website || "",
           prompt_hash,
           debug_missing_fields: missing_fields,
+          // Helpful for debugging Zapier flattening without breaking anything:
+          debug_body_has_meta: Boolean(body.meta && typeof body.meta === "object"),
         },
       },
       { headers }
@@ -610,6 +737,8 @@ ${BASE_RULES}
         voice_tone: voiceProfile.tone,
         voice_source: voiceProfile.source,
         time_zone,
+        // Uncomment for quick Zapier diagnosis if needed:
+        // body_keys: Object.keys(body).slice(0, 50),
       },
     });
   } catch (error) {
