@@ -94,13 +94,14 @@ async function getWebsiteContext(url) {
   if (!url || url === "Not provided") return null;
   try {
     const response = await axios.get(url, {
-      timeout: 4000, 
+      timeout: 4000,
       headers: { "User-Agent": "Mozilla/5.0" },
     });
     let text = String(response.data || "")
       .replace(/<(script|style|header|nav|footer|form)[^>]*>([\s\S]*?)<\/\1>/gim, "")
       .replace(/<[^>]*>?/gm, " ")
-      .replace(/\s+/g, " ").trim();
+      .replace(/\s+/g, " ")
+      .trim();
     if (text.length >= 200) return decodeHtml(text).substring(0, 3000);
   } catch (e) {}
 
@@ -144,24 +145,42 @@ module.exports = async function handler(req, res) {
     const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
 
     const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "5082910787");
-    const speech_emergency = raw_emergency.split('').join('-');
+    const speech_emergency = raw_emergency.split("").join("-");
 
     const website_url = normalizeWebsite(pick(body, ["website", "url"]));
     let website_content = null;
-    
+
     if (website_url && website_url !== "Not provided") {
-        try {
-            website_content = await Promise.race([
-                getWebsiteContext(website_url),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
-            ]);
-        } catch (e) { console.log("Website timeout."); }
+      try {
+        website_content = await Promise.race([
+          getWebsiteContext(website_url),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 6000)),
+        ]);
+      } catch (e) {
+        console.log("Website timeout.");
+      }
     }
+
+    // ✅ ONLY CHANGE: IDENTITY uses resolved role from payload (no hardcoded "Emergency Dispatcher")
+    const resolved_role = String(pick(body, ["agent_role", "role"], "emergency_dispatch"))
+      .toLowerCase()
+      .trim();
+
+    const roleLabelMap = {
+      operations: "Operations",
+      receptionist: "Receptionist",
+      intake: "Intake",
+      scheduler: "Scheduler",
+      emergency_dispatch: "Emergency Dispatch",
+      lead_revival: "Lead Revival",
+    };
+
+    const roleLabel = roleLabelMap[resolved_role] || "Emergency Dispatch";
 
     const FINAL_PROMPT = `
 ## IDENTITY
-- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
-- Role: Maintain a calm, authoritative, and urgent demeanor. You are responsible for triaging safety issues.
+- You are ${agent_name}, the ${roleLabel} for ${biz_name}.
+- Role: ${resolved_role.toUpperCase()}.
 - Rule: Do NOT mention you are an AI.
 
 ## BUSINESS KNOWLEDGE
@@ -190,25 +209,32 @@ module.exports = async function handler(req, res) {
 4. **Closing:** "Stay safe. I am transmitting your emergency details to our team now."
 `.trim();
 
-    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
-      general_prompt: FINAL_PROMPT,
-      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
-      model: "gpt-4o-mini",
-    }, { headers });
+    const llmResp = await axios.post(
+      "https://api.retellai.com/create-retell-llm",
+      {
+        general_prompt: FINAL_PROMPT,
+        begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
+        model: "gpt-4o-mini",
+      },
+      { headers }
+    );
 
-    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-      agent_name: `${biz_name} Dispatch Agent`,
-      voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
-      response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-      metadata: {
-        business_name: String(biz_name),
-        notification_email: String(client_email),
-        agent_type: "emergency_dispatcher"
-      }
-    }, { headers });
+    const agentResp = await axios.post(
+      "https://api.retellai.com/create-agent",
+      {
+        agent_name: `${biz_name} Dispatch Agent`,
+        voice_id: resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID,
+        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+        metadata: {
+          business_name: String(biz_name),
+          notification_email: String(client_email),
+          agent_type: "emergency_dispatcher",
+        },
+      },
+      { headers }
+    );
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
-
   } catch (error) {
     console.error("CRITICAL ERROR:", error?.response?.data || error.message);
     return res.status(500).json({ error: "Server error", details: error.message });
