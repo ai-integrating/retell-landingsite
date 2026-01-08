@@ -33,6 +33,7 @@ function pick(obj, keys, fallback = "Not provided") {
   for (const k of keys) {
     let val = obj?.[k];
     if (val !== undefined && val !== null && val !== "") {
+      if (typeof val === "object" && val.output) return val.output; // ✅ ONLY CHANGE #1
       return val;
     }
   }
@@ -106,6 +107,11 @@ module.exports = async function handler(req, res) {
     // B. Build Prompt (Merge Python logic with Website data)
     const pythonInstructions = pick(body, ["instructions", "agent_instructions"], "");
     let FINAL_PROMPT = pythonInstructions;
+
+    if (!FINAL_PROMPT || FINAL_PROMPT === "Not provided") { // ✅ ONLY CHANGE #2
+      FINAL_PROMPT = `## IDENTITY\n- You are ${agent_name} for ${biz_name}.\n- Rule: Do NOT mention AI.`;
+    }
+
     if (website_content) {
       FINAL_PROMPT += `\n\n## WEBSITE KNOWLEDGE\n${website_content}`;
     }
