@@ -78,9 +78,13 @@ module.exports = async function handler(req, res) {
       { headers }
     );
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
-  } catch (error) {
-    console.error("CRITICAL ERROR:", error?.response?.data || error.message);
-    return res.status(500).json({ error: "Server error", details: error.message });
-  }
-};
+    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });} catch (error) {
+  const retellDetails = error?.response?.data || null;
+  console.error("CRITICAL ERROR:", retellDetails || error.message);
+
+  return res.status(500).json({
+    error: "Server error",
+    message: error.message,
+    retell: retellDetails,
+  });
+
