@@ -1,56 +1,4 @@
-const axios = require("axios");
-
-// --- 1. CORE UTILITIES ---
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-
-async function readJsonBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  return await new Promise((resolve) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch {
-        resolve({});
-      }
-    });
-  });
-}
-
-function pick(obj, keys, fallback = "Not provided") {
-  for (const k of keys) {
-    let val = obj?.[k];
-    if (val !== undefined && val !== null && val !== "") {
-      return val;
-    }
-  }
-  return fallback;
-}
-
-// --- 2. VOICE RESOLUTION ---
-function resolveVoiceId(body) {
-  const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
-  const gender = String(pick(body, ["agent_gender", "gender"], "female")).toLowerCase().trim();
-
-  const VOICE_MAP = {
-    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
-    female_warm: process.env.VOICE_FEMALE_WARM,
-    female_calm: process.env.VOICE_FEMALE_CALM,
-    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
-    male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
-    male_warm: process.env.VOICE_MALE_WARM,
-    male_calm: process.env.VOICE_MALE_CALM,
-  };
-
-  return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
-}
-
-// --- 3. MAIN HANDLER ---
+// --- 5. MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -58,57 +6,84 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJsonBody(req);
-    const headers = { 
-        Authorization: `Bearer ${process.env.RETELL_API_KEY}`, 
-        "Content-Type": "application/json" 
-    };
+    const headers = { Authorization: `Bearer ${process.env.RETELL_API_KEY}`, "Content-Type": "application/json" };
 
-    const biz_name = pick(body, ["business_name", "company"], "our client");
-    const agent_name = pick(body, ["agent_name", "name"], "Ava");
+    // --- 1. EXTRACT METADATA ---
+    const biz_name = pick(body, ["business_name", "company"], "our business");
+    const agent_name = pick(body, ["agent_name", "name"], "Lexi");
+    const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
+    const services = cleanValue(pick(body, ["services"]), "standard industry services");
+    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 9 AM to 5 PM");
+
+    const raw_emergency = cleanValue(pick(body, ["emergency_phone"]), "Not provided");
+    const speech_emergency = raw_emergency !== "Not provided" ? raw_emergency.split('').join('-') : "our main office number";
+
+    // --- 2. WEBSITE SCRAPER LOGIC ---
+    // This looks for a website URL in the payload and attempts to scrape context
+    const website_url = normalizeWebsite(pick(body, ["website", "url"]));
+    let website_content = null;
     
-    // RESOLVE ROLE FOR LABELING
-    const resolved_role = String(pick(body, ["agent_role", "role"], "operations")).toLowerCase().trim();
-    const roleLabelMap = {
-      operations: "Operations Manager",
-      receptionist: "Receptionist",
-      intake: "Intake Specialist",
-      scheduler: "Scheduler",
-      emergency_dispatch: "Emergency Dispatcher",
-      lead_revival: "Lead Revival Specialist",
-    };
-    const roleLabel = roleLabelMap[resolved_role] || "Operations Manager";
+    if (website_url && website_url !== "Not provided") {
+        try {
+            // Race the scraper against a 6-second timeout to keep the Zap fast
+            website_content = await Promise.race([
+                getWebsiteContext(website_url),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Scrape Timeout')), 6000))
+            ]);
+            console.log("Successfully scraped website context.");
+        } catch (e) { 
+            console.log("Website scraper failed or timed out. Using fallback."); 
+        }
+    }
 
-    // --- THE MASTER LOGIC GATE ---
-    // If 'instructions' exists in the Webhook, use it. Otherwise, use a simple fallback.
-    const customInstructions = pick(body, ["instructions", "agent_instructions"], null);
-    
-    const FINAL_PROMPT = (customInstructions && customInstructions !== "Not provided") 
-      ? customInstructions 
-      : `You are ${agent_name}, the ${roleLabel} for ${biz_name}. Handle calls professionally and take messages.`;
+    // --- 3. DYNAMIC PROMPT CONSTRUCTION ---
+    // Check if Zapier sent a fully built instruction block via Python
+    const pythonInstructions = pick(body, ["instructions", "agent_instructions"], null);
 
-    // 1. Create Retell LLM (The Brain)
-    const llmResp = await axios.post(
-      "https://api.retellai.com/create-retell-llm",
-      {
-        general_prompt: FINAL_PROMPT,
-        begin_message: `Thank you for calling ${biz_name}, this is ${agent_name}. How can I help you?`,
-        model: "gpt-4o-mini",
-      },
-      { headers }
-    );
+    // If Python instructions exist, we use them. Otherwise, we build the Emergency template.
+    const FINAL_PROMPT = (pythonInstructions && pythonInstructions !== "Not provided") 
+      ? pythonInstructions 
+      : `
+## IDENTITY
+- You are ${agent_name}, the Emergency Dispatcher for ${biz_name}.
+- Role: Maintain a calm, authoritative, and urgent demeanor.
+- Rule: Do NOT mention you are an AI.
 
-    // 2. Create Retell Agent (The Voice & Identity)
-    const agentResp = await axios.post(
-      "https://api.retellai.com/create-agent",
-      {
-        agent_name: `${biz_name} - ${roleLabel}`,
-        voice_id: resolveVoiceId(body),
-        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-      },
-      { headers }
-    );
+## BUSINESS KNOWLEDGE
+- Services: ${services}
+- Hours: Dispatch is active 24/7 for emergency safety concerns.
+- Website Context: ${website_content ? website_content : "Rely on industry standards for safety and emergency repair."}
+
+## DISPATCH TRIAGE PROTOCOL
+1. **Identify the Hazard:** Ask: "What is the nature of the emergency, and is the area currently safe?"
+2. **Assign Severity:** CRITICAL (immediate danger) vs. URGENT (damage/failure).
+
+## OPERATIONAL GUIDELINES
+- INTAKE: You MUST get the exact street address and a callback number.
+- EMERGENCY CONTACT: ${speech_emergency}. 
+- SCHEDULING: ${buildSchedulingFromMapped(body)}
+- LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
+`.trim();
+
+    // --- 4. RETELL API DEPLOYMENT ---
+    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
+      general_prompt: FINAL_PROMPT,
+      begin_message: `Emergency Dispatch for ${biz_name}, this is ${agent_name}. What is the nature of your emergency?`,
+      model: "gpt-4o-mini",
+    }, { headers });
+
+    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
+      agent_name: `${biz_name} Agent`,
+      voice_id: resolveVoiceId(body),
+      response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+      metadata: {
+        business_name: String(biz_name),
+        agent_type: "dynamic_vending_machine"
+      }
+    }, { headers });
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
+
   } catch (error) {
     console.error("CRITICAL ERROR:", error?.response?.data || error.message);
     return res.status(500).json({ error: "Server error", details: error.message });
