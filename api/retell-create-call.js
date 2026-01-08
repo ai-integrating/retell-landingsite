@@ -1,3 +1,133 @@
+const axios = require("axios");
+
+// --- 1. CORE UTILITIES ---
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+async function readJsonBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  return await new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+const decodeHtml = (s) =>
+  String(s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+
+function pick(obj, keys, fallback = "Not provided") {
+  for (const k of keys) {
+    let val = obj?.[k];
+    if (val !== undefined && val !== null && val !== "") {
+      if (typeof val === "object" && val.output) return val.output;
+      return val;
+    }
+  }
+  return fallback;
+}
+
+function cleanValue(text, fallback = "Not provided") {
+  const t = String(text || "").trim();
+  if (
+    !t ||
+    t === "[]" ||
+    t === "No data" ||
+    t === "/" ||
+    t === "null" ||
+    t.toLowerCase() === "not provided"
+  )
+    return fallback;
+  return t.replace(/\[\]/g, fallback);
+}
+
+// --- 2. VOICE RESOLUTION ---
+function resolveVoiceId(body) {
+  const direct = pick(body, ["voice_id", "voiceId", "VOICE_ID"], "");
+  if (direct && direct !== "Not provided") return String(direct).trim();
+
+  const tone = String(pick(body, ["voice_tone", "voiceTone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "agentGender", "gender"], "female")).toLowerCase().trim();
+
+  const VOICE_MAP = {
+    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
+    female_warm: process.env.VOICE_FEMALE_WARM,
+    female_calm: process.env.VOICE_FEMALE_CALM,
+    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
+    male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
+    male_warm: process.env.VOICE_MALE_WARM,
+    male_calm: process.env.VOICE_MALE_CALM,
+  };
+
+  return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
+}
+
+// --- 3. URL & SCRAPER LOGIC ---
+function extractFirstUrl(text) {
+  if (!text) return null;
+  const m = String(text).match(/https?:\/\/[^\s)]+/i);
+  return m ? m[0] : null;
+}
+
+function normalizeWebsite(raw) {
+  if (!raw || raw === "Not provided") return "Not provided";
+  const extracted = extractFirstUrl(String(raw));
+  if (extracted) return extracted;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
+  return String(raw).startsWith("http") ? raw : "Not provided";
+}
+
+async function getWebsiteContext(url) {
+  if (!url || url === "Not provided") return null;
+  try {
+    const response = await axios.get(url, {
+      timeout: 4000,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    let text = String(response.data || "")
+      .replace(/<(script|style|header|nav|footer|form)[^>]*>([\s\S]*?)<\/\1>/gim, "")
+      .replace(/<[^>]*>?/gm, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text.length >= 200) return decodeHtml(text).substring(0, 3000);
+  } catch (e) {}
+
+  try {
+    const r = await axios.get(`https://r.jina.ai/${url}`, { timeout: 5000 });
+    const txt = decodeHtml(String(r.data || "")).replace(/\s+/g, " ").trim();
+    if (txt.length >= 200) return txt.substring(0, 3000);
+  } catch (e) {}
+  return null;
+}
+
+// --- 4. MAPPED FIELD BUILDERS ---
+function buildSchedulingFromMapped(body) {
+  const link = cleanValue(pick(body, ["calendar_link", "calendarLink"]));
+  if (link === "Not provided") return "Scheduling is NOT enabled. Take a message and callback number.";
+  return `Calendar Link: ${link} | System: ${cleanValue(pick(body, ["calendar_system"]))}`;
+}
+
+function buildLeadRevivalFromMapped(body) {
+  const offer = cleanValue(pick(body, ["lead_revival_offer"]));
+  const timing = cleanValue(pick(body, ["follow_up_timing"]));
+  const attempts = cleanValue(pick(body, ["follow_up_attempts"]));
+  if (offer === "Not provided") return "No active lead revival offer.";
+  return `Offer: ${offer} | Timing: ${timing} | Max Attempts: ${attempts}`;
+}
+
 // --- 5. MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
@@ -7,40 +137,73 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
 
-    // Helpful debug (see in Vercel logs)
+    // Debug: view in Vercel logs
     console.log("Incoming keys:", Object.keys(body || {}));
-    console.log("Has instructions:", Boolean(body?.instructions || body?.agent_instructions));
 
     const headers = {
       Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
       "Content-Type": "application/json",
     };
 
-    // 1) Use Python outputs (your "Handshake")
-    const biz_name = pick(body, ["business_name", "biz_name", "company"], "our client");
-    const agent_name = pick(body, ["agent_name", "a_name", "name"], "Lexi");
-    const resolved_role = String(pick(body, ["agent_role", "a_role", "role"], "receptionist")).toLowerCase().trim();
+    // Basic fields (non-dispatch)
+    const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
+    const agent_name = pick(body, ["agent_name", "name"], "Lexi");
+    const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
+    const services = cleanValue(pick(body, ["services"]), "Asphalt paving, sealcoating, and driveway repairs");
+    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
 
+    const resolved_role = String(pick(body, ["agent_role", "role"], "receptionist")).toLowerCase().trim();
+
+    // Website context (optional)
+    const website_url = normalizeWebsite(pick(body, ["website", "url"]));
+    let website_content = null;
+    if (website_url && website_url !== "Not provided") {
+      try {
+        website_content = await Promise.race([
+          getWebsiteContext(website_url),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 6000)),
+        ]);
+      } catch (e) {
+        console.log("Website timeout.");
+      }
+    }
+
+    // Use Python-built instructions if present
     const pythonInstructions = pick(body, ["instructions", "agent_instructions"], null);
-    const FINAL_PROMPT = (pythonInstructions && pythonInstructions !== "Not provided")
-      ? String(pythonInstructions)
-      : `## IDENTITY\nYou are ${agent_name}, an assistant for ${biz_name}. Handle calls professionally.`;
 
-    // 2) GUARANTEE voice_id (this prevents the #1 crash)
-    const voice_id =
-      pick(body, ["voice_id"], null) ||
-      resolveVoiceId(body) ||
-      process.env.DEFAULT_VOICE_ID;
+    const FINAL_PROMPT =
+      pythonInstructions && pythonInstructions !== "Not provided"
+        ? String(pythonInstructions)
+        : `
+## IDENTITY
+- You are ${agent_name}, the ${resolved_role} for ${biz_name}.
+- Rule: Do NOT mention you are an AI.
 
+## BUSINESS KNOWLEDGE
+- Services: ${services}
+- Business Hours: ${biz_hours}
+- Website Context: ${website_content ? website_content : "Use standard industry knowledge and ask clarifying questions."}
+
+## WORKFLOWS
+- SCHEDULING: ${buildSchedulingFromMapped(body)}
+- LEAD REVIVAL: ${buildLeadRevivalFromMapped(body)}
+
+## CALL RULES
+- Ask one question at a time.
+- Confirm spelling and phone numbers.
+- Close with a clear next step.
+`.trim();
+
+    // Voice must exist
+    const voice_id = resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID;
     if (!voice_id) {
-      // Fail fast with a clear error (instead of mysterious 500)
       return res.status(400).json({
         error: "Missing voice_id",
-        details: "resolveVoiceId(body) returned empty and DEFAULT_VOICE_ID is not set.",
+        details: "No mapped voice_id and DEFAULT_VOICE_ID not set in Vercel env vars.",
       });
     }
 
-    // 3) Create LLM
+    // Retell LLM
     const llmResp = await axios.post(
       "https://api.retellai.com/create-retell-llm",
       {
@@ -51,15 +214,16 @@ module.exports = async function handler(req, res) {
       { headers }
     );
 
-    // 4) Create Agent
+    // Retell Agent
     const agentResp = await axios.post(
       "https://api.retellai.com/create-agent",
       {
         agent_name: `${biz_name} - ${resolved_role.toUpperCase()}`,
-        voice_id,
+        voice_id: voice_id,
         response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
         metadata: {
           business_name: String(biz_name),
+          notification_email: String(client_email),
           agent_type: resolved_role,
         },
       },
