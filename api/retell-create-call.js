@@ -22,7 +22,6 @@ async function readJsonBody(req) {
   });
 }
 
-// Ensure this utility is present to prevent scraper crashes
 const decodeHtml = (s) =>
   String(s || "")
     .replace(/&amp;/g, "&")
@@ -40,7 +39,25 @@ function pick(obj, keys, fallback = "Not provided") {
   return fallback;
 }
 
-// --- 2. SCRAPER UTILITIES ---
+// --- 2. VOICE RESOLUTION ---
+function resolveVoiceId(body) {
+  const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "gender"], "female")).toLowerCase().trim();
+
+  const VOICE_MAP = {
+    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
+    female_warm: process.env.VOICE_FEMALE_WARM,
+    female_calm: process.env.VOICE_FEMALE_CALM,
+    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
+    male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
+    male_warm: process.env.VOICE_MALE_WARM,
+    male_calm: process.env.VOICE_MALE_CALM,
+  };
+
+  return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
+}
+
+// --- 3. SCRAPER UTILITIES ---
 function normalizeWebsite(raw) {
   if (!raw || raw === "Not provided") return "Not provided";
   if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
@@ -61,7 +78,7 @@ async function getWebsiteContext(url) {
   }
 }
 
-// --- 3. MAIN HANDLER ---
+// --- 4. MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -73,11 +90,10 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json" 
     };
 
-    // Extract Metadata
     const biz_name = pick(body, ["business_name", "company"], "our client");
     const agent_name = pick(body, ["agent_name", "name"], "Lexi");
 
-    // 1. Run Scraper with Timeout
+    // A. Website Scraper Logic
     const website_url = normalizeWebsite(pick(body, ["website", "url", "web"]));
     let website_content = null;
     if (website_url !== "Not provided") {
@@ -87,25 +103,24 @@ module.exports = async function handler(req, res) {
       ]).catch(() => null);
     }
 
-    // 2. Build Final Prompt (The Handshake)
+    // B. Build Prompt (Merge Python logic with Website data)
     const pythonInstructions = pick(body, ["instructions", "agent_instructions"], "");
     let FINAL_PROMPT = pythonInstructions;
-    
     if (website_content) {
       FINAL_PROMPT += `\n\n## WEBSITE KNOWLEDGE\n${website_content}`;
     }
 
-    // 3. Create Retell LLM
+    // C. Create Retell LLM
     const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
       general_prompt: FINAL_PROMPT,
       begin_message: pick(body, ["begin_message", "welcome_message"], "Hello!"),
       model: "gpt-4o-mini",
     }, { headers });
 
-    // 4. Create Retell Agent
+    // D. Create Retell Agent (Restored Voice Mapping)
     const agentResp = await axios.post("https://api.retellai.com/create-agent", {
       agent_name: `${biz_name} Agent`,
-      voice_id: process.env.DEFAULT_VOICE_ID,
+      voice_id: resolveVoiceId(body), // restored voice handshake
       response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
     }, { headers });
 
