@@ -1,88 +1,117 @@
-// --- 5. MAIN HANDLER ---
+const axios = require("axios");
+
+// --- 1. CORE UTILITIES ---
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+async function readJsonBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  return await new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+// Ensure this utility is present to prevent scraper crashes
+const decodeHtml = (s) =>
+  String(s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+
+function pick(obj, keys, fallback = "Not provided") {
+  for (const k of keys) {
+    let val = obj?.[k];
+    if (val !== undefined && val !== null && val !== "") {
+      return val;
+    }
+  }
+  return fallback;
+}
+
+// --- 2. SCRAPER UTILITIES ---
+function normalizeWebsite(raw) {
+  if (!raw || raw === "Not provided") return "Not provided";
+  if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
+  return String(raw).startsWith("http") ? raw : "Not provided";
+}
+
+async function getWebsiteContext(url) {
+  if (!url || url === "Not provided") return null;
+  try {
+    const response = await axios.get(url, { timeout: 4000 });
+    let text = String(response.data || "")
+      .replace(/<(script|style|header|nav|footer|form)[^>]*>([\s\S]*?)<\/\1>/gim, "")
+      .replace(/<[^>]*>?/gm, " ")
+      .replace(/\s+/g, " ").trim();
+    return text.length >= 200 ? decodeHtml(text).substring(0, 2500) : null;
+  } catch (e) {
+    return null; 
+  }
+}
+
+// --- 3. MAIN HANDLER ---
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
-
+  
   try {
     const body = await readJsonBody(req);
-    const headers = {
-      Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
-      "Content-Type": "application/json",
+    const headers = { 
+      Authorization: `Bearer ${process.env.RETELL_API_KEY}`, 
+      "Content-Type": "application/json" 
     };
 
-    // 1. EXTRACT METADATA
-    const biz_name = pick(body, ["business_name", "company"], "McDuffy and Son Asphalt");
+    // Extract Metadata
+    const biz_name = pick(body, ["business_name", "company"], "our client");
     const agent_name = pick(body, ["agent_name", "name"], "Lexi");
-    const client_email = pick(body, ["email", "user_email"], "not-provided@example.com");
-    const services = cleanValue(pick(body, ["services"]), "standard industry services");
-    const biz_hours = cleanValue(pick(body, ["business_hours"]), "Monday through Friday, 8 AM to 5 PM");
-    const resolved_role = String(pick(body, ["agent_role", "role"], "receptionist")).toLowerCase().trim();
 
-    // 2. RUN WEBSITE SCRAPER (THE NEW INSERT)
-    const website_url = normalizeWebsite(pick(body, ["website", "url"]));
+    // 1. Run Scraper with Timeout
+    const website_url = normalizeWebsite(pick(body, ["website", "url", "web"]));
     let website_content = null;
-    
-    if (website_url && website_url !== "Not provided") {
-      try {
-        // Race the scraper against a 6-second timeout to prevent Zapier timeouts
-        website_content = await Promise.race([
-          getWebsiteContext(website_url),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 6000)),
-        ]);
-        console.log("Scrape successful for:", website_url);
-      } catch (e) {
-        console.log("Website scraper timed out or failed.");
-      }
+    if (website_url !== "Not provided") {
+      website_content = await Promise.race([
+        getWebsiteContext(website_url),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
+      ]).catch(() => null);
     }
 
-    // 3. PRIORITY LOGIC GATE (The Python Handshake)
-    const pythonInstructions = pick(body, ["instructions", "agent_instructions"], null);
+    // 2. Build Final Prompt (The Handshake)
+    const pythonInstructions = pick(body, ["instructions", "agent_instructions"], "");
+    let FINAL_PROMPT = pythonInstructions;
     
-    // Start with the Python-built brain
-    let FINAL_PROMPT = pythonInstructions && pythonInstructions !== "Not provided"
-        ? String(pythonInstructions)
-        : `## IDENTITY\n- You are ${agent_name}, the ${resolved_role} for ${biz_name}.`;
-
-    // ADD the scraped website context as supplemental knowledge
     if (website_content) {
-      FINAL_PROMPT += `\n\n## SUPPLEMENTAL WEBSITE CONTEXT\n${website_content}`;
+      FINAL_PROMPT += `\n\n## WEBSITE KNOWLEDGE\n${website_content}`;
     }
 
-    // 4. DEPLOY TO RETELL AI
-    const voice_id = resolveVoiceId(body) || process.env.DEFAULT_VOICE_ID;
-    
-    const llmResp = await axios.post(
-      "https://api.retellai.com/create-retell-llm",
-      {
-        general_prompt: FINAL_PROMPT,
-        // Prioritize custom greeting from Python
-        begin_message: pick(body, ["begin_message", "welcome_message"], `Hello, thank you for calling ${biz_name}.`),
-        model: "gpt-4o-mini",
-      },
-      { headers }
-    );
+    // 3. Create Retell LLM
+    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
+      general_prompt: FINAL_PROMPT,
+      begin_message: pick(body, ["begin_message", "welcome_message"], "Hello!"),
+      model: "gpt-4o-mini",
+    }, { headers });
 
-    const agentResp = await axios.post(
-      "https://api.retellai.com/create-agent",
-      {
-        agent_name: `${biz_name} - ${resolved_role.toUpperCase()}`,
-        voice_id: voice_id,
-        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-        metadata: {
-          business_name: String(biz_name),
-          notification_email: String(client_email),
-          agent_type: resolved_role,
-        },
-      },
-      { headers }
-    );
+    // 4. Create Retell Agent
+    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
+      agent_name: `${biz_name} Agent`,
+      voice_id: process.env.DEFAULT_VOICE_ID,
+      response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+    }, { headers });
 
     return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
 
   } catch (error) {
-    const details = error?.response?.data || error.message;
-    console.error("CRITICAL ERROR:", details);
-    return res.status(500).json({ error: "Server error", details });
+    return res.status(500).json({ error: "Server error", details: error.message });
   }
 };
