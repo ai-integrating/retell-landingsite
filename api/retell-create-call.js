@@ -75,7 +75,7 @@ async function getWebsiteContext(url) {
       .replace(/\s+/g, " ").trim();
     return text.length >= 200 ? decodeHtml(text).substring(0, 2500) : null;
   } catch (e) {
-    return null; 
+    return null;
   }
 }
 
@@ -83,12 +83,12 @@ async function getWebsiteContext(url) {
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  
+
   try {
     const body = await readJsonBody(req);
-    const headers = { 
-      Authorization: `Bearer ${process.env.RETELL_API_KEY}`, 
-      "Content-Type": "application/json" 
+    const headers = {
+      Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
+      "Content-Type": "application/json",
     };
 
     const biz_name = pick(body, ["business_name", "company"], "our client");
@@ -100,7 +100,7 @@ module.exports = async function handler(req, res) {
     if (website_url !== "Not provided") {
       website_content = await Promise.race([
         getWebsiteContext(website_url),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000)),
       ]).catch(() => null);
     }
 
@@ -108,7 +108,8 @@ module.exports = async function handler(req, res) {
     const pythonInstructions = pick(body, ["instructions", "agent_instructions"], "");
     let FINAL_PROMPT = pythonInstructions;
 
-    if (!FINAL_PROMPT || FINAL_PROMPT === "Not provided") { // ✅ ONLY CHANGE #2
+    if (!FINAL_PROMPT || FINAL_PROMPT === "Not provided") {
+      // ✅ ONLY CHANGE #2
       FINAL_PROMPT = `## IDENTITY\n- You are ${agent_name} for ${biz_name}.\n- Rule: Do NOT mention AI.`;
     }
 
@@ -117,21 +118,57 @@ module.exports = async function handler(req, res) {
     }
 
     // C. Create Retell LLM
-    const llmResp = await axios.post("https://api.retellai.com/create-retell-llm", {
-      general_prompt: FINAL_PROMPT,
-      begin_message: pick(body, ["begin_message", "welcome_message"], "Hello!"),
-      model: "gpt-4o-mini",
-    }, { headers });
+    const llmResp = await axios.post(
+      "https://api.retellai.com/create-retell-llm",
+      {
+        general_prompt: FINAL_PROMPT,
+        begin_message: pick(body, ["begin_message", "welcome_message"], "Hello!"),
+        model: "gpt-4o-mini",
+      },
+      { headers }
+    );
 
     // D. Create Retell Agent (Restored Voice Mapping)
-    const agentResp = await axios.post("https://api.retellai.com/create-agent", {
-      agent_name: `${biz_name} Agent`,
-      voice_id: resolveVoiceId(body), // restored voice handshake
-      response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
-    }, { headers });
+    const agentResp = await axios.post(
+      "https://api.retellai.com/create-agent",
+      {
+        agent_name: `${biz_name} Agent`,
+        voice_id: resolveVoiceId(body), // restored voice handshake
+        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+      },
+      { headers }
+    );
 
-    return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id });
+    // E. Purchase + Bind a Retell Phone Number (INBOUND)
+    // Optional: prevent accidental number purchases during tests
+    const mode = String(pick(body, ["mode"], "live")).toLowerCase().trim();
+    if (mode !== "live") {
+      return res.status(200).json({ ok: true, agent_id: agentResp.data.agent_id, mode });
+    }
 
+    const area_code_raw = pick(body, ["area_code"], "");
+    const area_code =
+      area_code_raw && area_code_raw !== "Not provided"
+        ? Number(String(area_code_raw).replace(/\D/g, "").slice(0, 3))
+        : Number(process.env.DEFAULT_AREA_CODE || 508);
+
+    const phoneResp = await axios.post(
+      "https://api.retellai.com/create-phone-number",
+      {
+        inbound_agent_id: agentResp.data.agent_id,
+        area_code,
+        nickname: `${biz_name} - ${agent_name}`,
+      },
+      { headers }
+    );
+
+    return res.status(200).json({
+      ok: true,
+      agent_id: agentResp.data.agent_id,
+      phone_number: phoneResp.data.phone_number,
+      phone_number_pretty: phoneResp.data.phone_number_pretty,
+      mode,
+    });
   } catch (error) {
     return res.status(500).json({ error: "Server error", details: error.message });
   }
