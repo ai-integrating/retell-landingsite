@@ -82,10 +82,20 @@ module.exports = async function handler(req, res) {
     if (!RETELL_API_KEY) return res.status(500).json({ ok: false, error: "Missing RETELL_API_KEY." });
     if (!REFINEMENT_SECRET) return res.status(500).json({ ok: false, error: "Missing REFINEMENT_SECRET." });
 
-    const secret = req.headers["x-refinement-secret"];
-    if (secret !== REFINEMENT_SECRET) {
-      return res.status(401).json({ ok: false, error: "Unauthorized (bad secret)." });
-    }
+const rawSecret = req.headers["x-refinement-secret"] ?? req.headers["X-Refinement-Secret"];
+const secret =
+  (Array.isArray(rawSecret) ? rawSecret[0] : rawSecret || "")
+    .toString()
+    .trim();
+
+if (secret !== (REFINEMENT_SECRET || "").trim()) {
+  return res.status(401).json({
+    ok: false,
+    error: "Unauthorized (bad secret).",
+    // TEMP DEBUG (remove after you confirm it works)
+    got: secret ? `${secret.slice(0, 4)}…(${secret.length})` : "(missing)",
+  });
+}
 
     const body = await readJsonBody(req);
 
