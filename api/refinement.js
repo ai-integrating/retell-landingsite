@@ -150,6 +150,18 @@ if (secret !== (REFINEMENT_SECRET || "").trim()) {
       headers: retellHeaders(),
     });
     const currentPrompt = String(llmResp.data?.general_prompt || "").trim();
+// Idempotency guard: prevent duplicate application of same request
+if (
+  refinement_request_id &&
+  currentPrompt.includes(`Request ID: ${refinement_request_id}`)
+) {
+  return res.status(200).json({
+    ok: true,
+    skipped: true,
+    message: "Refinement already applied.",
+    refinement_request_id,
+  });
+}
 
     // C) append refinement patch (safe, additive)
     const patch =
