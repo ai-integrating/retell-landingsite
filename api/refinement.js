@@ -39,13 +39,15 @@ function nowIso() {
 
 // --- 2. SAFE GUARDRAILS (prevent stealth upgrades) ---
 const ALLOWED_CATEGORIES = new Set([
-  "Pricing or service rates",
-  "Services offered",
-  "Business hours / holiday schedule",
-  "Promotions or discounts",
-  "Policies",
-  "Other",
+  "pricing",
+  "services",
+  "business_hours",
+  "promotions",
+  "policies",
+  "other",
+  "holiday_hours", // only if you use it
 ]);
+
 
 const UPGRADE_KEYWORDS = [
   "emergency", "dispatch", "triage", "transfer", "forward", "escalate", "on-call",
