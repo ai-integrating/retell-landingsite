@@ -5,7 +5,10 @@ const axios = require("axios");
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Refinement-Secret");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Refinement-Secret"
+  );
 }
 
 async function readJsonBody(req) {
@@ -14,8 +17,11 @@ async function readJsonBody(req) {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); }
-      catch { resolve({}); }
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -29,8 +35,12 @@ const decodeHtml = (s) =>
 
 function normalizeCategories(input) {
   if (!input) return [];
-  if (Array.isArray(input)) return input.map(String).map((x) => x.trim()).filter(Boolean);
-  return String(input).split(",").map((x) => x.trim()).filter(Boolean);
+  if (Array.isArray(input))
+    return input.map(String).map((x) => x.trim()).filter(Boolean);
+  return String(input)
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
 function nowIso() {
@@ -48,12 +58,25 @@ const ALLOWED_CATEGORIES = new Set([
   "holiday_hours", // only if you use it
 ]);
 
-
 const UPGRADE_KEYWORDS = [
-  "emergency", "dispatch", "triage", "transfer", "forward", "escalate", "on-call",
-  "text", "sms", "notify", "webhook",
-  "spanish", "portuguese", "french", "translate", "language",
-  "schedule automatically", "book automatically",
+  "emergency",
+  "dispatch",
+  "triage",
+  "transfer",
+  "forward",
+  "escalate",
+  "on-call",
+  "text",
+  "sms",
+  "notify",
+  "webhook",
+  "spanish",
+  "portuguese",
+  "french",
+  "translate",
+  "language",
+  "schedule automatically",
+  "book automatically",
 ];
 
 function findUpgradeHits(text) {
@@ -78,44 +101,142 @@ module.exports = async function handler(req, res) {
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(200).send("ok");
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Use POST." });
+  if (req.method !== "POST")
+    return res.status(405).json({
+      ok: false,
+      skipped: false,
+      agent_id: null,
+      llm_id: null,
+      published: false,
+      message: null,
+      refinement_request_id: null,
+      error: "Use POST.",
+      detail: null,
+    });
+
+  // Keep these in outer scope so we can always return them (even on errors)
+  let agent_id = null;
+  let llm_id = null;
+  let refinement_request_id = null;
+  let published = false;
 
   try {
-    if (!RETELL_API_KEY) return res.status(500).json({ ok: false, error: "Missing RETELL_API_KEY." });
-    if (!REFINEMENT_SECRET) return res.status(500).json({ ok: false, error: "Missing REFINEMENT_SECRET." });
+    if (!RETELL_API_KEY)
+      return res.status(500).json({
+        ok: false,
+        skipped: false,
+        agent_id: null,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: null,
+        error: "Missing RETELL_API_KEY.",
+        detail: null,
+      });
 
-const rawSecret = req.headers["x-refinement-secret"] ?? req.headers["X-Refinement-Secret"];
-const secret =
-  (Array.isArray(rawSecret) ? rawSecret[0] : rawSecret || "")
-    .toString()
-    .trim();
+    if (!REFINEMENT_SECRET)
+      return res.status(500).json({
+        ok: false,
+        skipped: false,
+        agent_id: null,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: null,
+        error: "Missing REFINEMENT_SECRET.",
+        detail: null,
+      });
 
-if (secret !== (REFINEMENT_SECRET || "").trim()) {
-  return res.status(401).json({
-    ok: false,
-    error: "Unauthorized (bad secret).",
-    // TEMP DEBUG (remove after you confirm it works)
-    got: secret ? `${secret.slice(0, 4)}…(${secret.length})` : "(missing)",
-  });
-}
+    const rawSecret =
+      req.headers["x-refinement-secret"] ?? req.headers["X-Refinement-Secret"];
+    const secret = (Array.isArray(rawSecret) ? rawSecret[0] : rawSecret || "")
+      .toString()
+      .trim();
+
+    if (secret !== (REFINEMENT_SECRET || "").trim()) {
+      return res.status(401).json({
+        ok: false,
+        skipped: false,
+        agent_id: null,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: null,
+        error: "Unauthorized (bad secret).",
+        detail: {
+          // TEMP DEBUG (remove after you confirm it works)
+          got: secret ? `${secret.slice(0, 4)}…(${secret.length})` : "(missing)",
+        },
+      });
+    }
 
     const body = await readJsonBody(req);
 
-    const refinement_request_id = decodeHtml(body.refinement_request_id || body.request_id || "");
-    const agent_id = decodeHtml(body.agent_id || "");
+    refinement_request_id = decodeHtml(
+      body.refinement_request_id || body.request_id || ""
+    );
+
+    agent_id = decodeHtml(body.agent_id || "");
     const categories = normalizeCategories(body.categories || body.category);
     const update_text = decodeHtml(body.update_text || "").trim();
-    const communication_preference = decodeHtml(body.communication_preference || "").trim();
+    const communication_preference = decodeHtml(
+      body.communication_preference || ""
+    ).trim();
     const publish = body.publish === true; // optional
 
-    if (!agent_id) return res.status(400).json({ ok: false, error: "Missing agent_id." });
-    if (!categories.length) return res.status(400).json({ ok: false, error: "Missing categories." });
-    if (!update_text) return res.status(400).json({ ok: false, error: "Missing update_text." });
+    if (!agent_id)
+      return res.status(400).json({
+        ok: false,
+        skipped: false,
+        agent_id: null,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Missing agent_id.",
+        detail: null,
+      });
+
+    if (!categories.length)
+      return res.status(400).json({
+        ok: false,
+        skipped: false,
+        agent_id,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Missing categories.",
+        detail: null,
+      });
+
+    if (!update_text)
+      return res.status(400).json({
+        ok: false,
+        skipped: false,
+        agent_id,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Missing update_text.",
+        detail: null,
+      });
 
     // category allowlist
     const badCats = categories.filter((c) => !ALLOWED_CATEGORIES.has(c));
     if (badCats.length) {
-      return res.status(400).json({ ok: false, error: "Unknown category.", bad_categories: badCats });
+      return res.status(400).json({
+        ok: false,
+        skipped: false,
+        agent_id,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Unknown category.",
+        detail: { bad_categories: badCats },
+      });
     }
 
     // upgrade gating (keywords)
@@ -123,8 +244,14 @@ if (secret !== (REFINEMENT_SECRET || "").trim()) {
     if (hits.length) {
       return res.status(402).json({
         ok: false,
-        upgrade_required: true,
-        matched_keywords: hits,
+        skipped: false,
+        agent_id,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Upgrade required.",
+        detail: { upgrade_required: true, matched_keywords: hits },
       });
     }
 
@@ -135,13 +262,21 @@ if (secret !== (REFINEMENT_SECRET || "").trim()) {
     const agent = agentResp.data;
 
     const responseEngine = agent?.response_engine;
-    const llm_id = responseEngine?.type === "retell-llm" ? responseEngine?.llm_id : null;
+    llm_id =
+      responseEngine?.type === "retell-llm" ? responseEngine?.llm_id : null;
 
     if (!llm_id) {
       return res.status(400).json({
         ok: false,
-        error: "Agent is not using retell-llm response engine (cannot apply refinement via prompt patch).",
-        response_engine: responseEngine || null,
+        skipped: false,
+        agent_id,
+        llm_id: null,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error:
+          "Agent is not using retell-llm response engine (cannot apply refinement via prompt patch).",
+        detail: { response_engine: responseEngine || null },
       });
     }
 
@@ -150,18 +285,24 @@ if (secret !== (REFINEMENT_SECRET || "").trim()) {
       headers: retellHeaders(),
     });
     const currentPrompt = String(llmResp.data?.general_prompt || "").trim();
-// Idempotency guard: prevent duplicate application of same request
-if (
-  refinement_request_id &&
-  currentPrompt.includes(`Request ID: ${refinement_request_id}`)
-) {
-  return res.status(200).json({
-    ok: true,
-    skipped: true,
-    message: "Refinement already applied.",
-    refinement_request_id,
-  });
-}
+
+    // Idempotency guard: prevent duplicate application of same request
+    if (
+      refinement_request_id &&
+      currentPrompt.includes(`Request ID: ${refinement_request_id}`)
+    ) {
+      return res.status(200).json({
+        ok: true,
+        skipped: true,
+        agent_id,
+        llm_id,
+        published: false,
+        message: "Refinement already applied.",
+        refinement_request_id,
+        error: null,
+        detail: null,
+      });
+    }
 
     // C) append refinement patch (safe, additive)
     const patch =
@@ -170,15 +311,19 @@ if (
       `Timestamp: ${nowIso()}\n` +
       (refinement_request_id ? `Request ID: ${refinement_request_id}\n` : "") +
       `Categories: ${categories.join(", ")}\n` +
-      (communication_preference ? `Communication: ${communication_preference}\n` : "") +
+      (communication_preference
+        ? `Communication: ${communication_preference}\n`
+        : "") +
       `\n` +
       `${update_text}\n`;
 
     // Optional: cap prompt growth
     const MAX_CHARS = 24000;
-    let nextPrompt = (currentPrompt ? currentPrompt + patch : patch.trim());
+    let nextPrompt = currentPrompt ? currentPrompt + patch : patch.trim();
     if (nextPrompt.length > MAX_CHARS) {
-      nextPrompt = `...TRUNCATED OLDER CONTENT...\n` + nextPrompt.slice(nextPrompt.length - MAX_CHARS);
+      nextPrompt =
+        `...TRUNCATED OLDER CONTENT...\n` +
+        nextPrompt.slice(nextPrompt.length - MAX_CHARS);
     }
 
     // D) update llm
@@ -198,18 +343,35 @@ if (
       );
       pub = pubResp.data;
     }
+    published = Boolean(pub);
 
     return res.status(200).json({
       ok: true,
+      skipped: false,
       agent_id,
       llm_id,
-      published: Boolean(pub),
-      message: publish ? "Refinement applied + published." : "Refinement applied (draft).",
+      published,
+      message: publish
+        ? "Refinement applied + published."
+        : "Refinement applied (draft).",
+      refinement_request_id: refinement_request_id || null,
+      error: null,
+      detail: null,
       retell_update: upd.data,
     });
   } catch (err) {
     const status = err?.response?.status || 500;
     const detail = err?.response?.data || err?.message || "Unknown error";
-    return res.status(status).json({ ok: false, error: "Refinement failed.", detail });
+    return res.status(status).json({
+      ok: false,
+      skipped: false,
+      agent_id: agent_id || null,
+      llm_id: llm_id || null,
+      published: published || false,
+      message: null,
+      refinement_request_id: refinement_request_id || null,
+      error: "Refinement failed.",
+      detail,
+    });
   }
 };
