@@ -1,3 +1,4 @@
+
 // /api/provision.js
 const axios = require("axios");
 
@@ -36,13 +37,8 @@ function pick(obj, keys, fallback = undefined) {
 
 // ✅ Voice resolver (NO energetic)
 function resolveVoiceId(body) {
-  const tone = String(pick(body, ["voice_tone", "tone"], "warm"))
-    .toLowerCase()
-    .trim();
-
-  const gender = String(pick(body, ["agent_gender", "gender"], "female"))
-    .toLowerCase()
-    .trim();
+  const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "gender"], "female")).toLowerCase().trim();
 
   const VOICE_MAP = {
     female_warm: process.env.VOICE_FEMALE_WARM,
@@ -56,22 +52,6 @@ function resolveVoiceId(body) {
   return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
 }
 
-function digitsOnly(s) {
-  return String(s || "").replace(/\D/g, "");
-}
-
-function inferAreaCode(body) {
-  const preferred = digitsOnly(pick(body, ["preferred_area_code", "area_code"], "")).slice(0, 3);
-  if (preferred.length === 3) return preferred;
-
-  const bizPhone = pick(body, ["business_phone", "phone", "company_phone"], "");
-  const d = digitsOnly(bizPhone);
-  if (d.length === 10) return d.slice(0, 3);
-  if (d.length === 11 && d.startsWith("1")) return d.slice(1, 4);
-
-  return "508";
-}
-
 const RETELL_BASE = "https://api.retellai.com";
 
 function retellHeaders() {
@@ -80,55 +60,23 @@ function retellHeaders() {
   return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 }
 
-async function createPhoneNumber({ areaCode, nickname }) {
-  const resp = await axios.post(
-    `${RETELL_BASE}/create-phone-number`,
-    { area_code: Number(areaCode), nickname },
-    { headers: retellHeaders(), timeout: 12000 }
-  );
-  return resp.data;
-}
-
-async function bindPhoneNumberToAgent({ phoneData, agentId }) {
-  const phoneNumber = phoneData.phone_number || phoneData.e164 || phoneData.number || null;
-  const phoneId = phoneData.phone_number_id || phoneData.id || null;
-
-  if (phoneNumber) {
-    await axios.patch(
-      `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneNumber)}`,
-      { inbound_agent_id: agentId, outbound_agent_id: agentId },
-      { headers: retellHeaders(), timeout: 7000 }
-    );
-    return { phone_number: phoneNumber };
-  }
-
-  if (phoneId) {
-    await axios.patch(
-      `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneId)}`,
-      { inbound_agent_id: agentId, outbound_agent_id: agentId },
-      { headers: retellHeaders(), timeout: 7000 }
-    );
-    return { phone_number: phoneNumber || "(assigned)" };
-  }
-
-  throw new Error("Could not bind phone number");
-}
-
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
     const body = await readJsonBody(req);
 
+    const mode = String(pick(body, ["mode"], "agent_only")).toLowerCase().trim();
+
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const voiceId = resolveVoiceId(body);
-    const areaCode = inferAreaCode(body);
 
     const prompt = pick(body, ["general_prompt", "final_prompt", "prompt"], "");
     const beginMessage = pick(body, ["begin_message", "greeting"], "");
 
+    // --- 1) Create LLM ---
     const llmPayload = {
       general_prompt: prompt || `You are Allie, the AI receptionist for ${bizName}.`,
       model: pick(body, ["llm_model"], "gpt-4o-mini"),
@@ -141,34 +89,43 @@ module.exports = async (req, res) => {
       { headers: retellHeaders(), timeout: 12000 }
     );
 
+    const llmId = llmResp.data.llm_id || llmResp.data.id;
+    if (!llmId) throw new Error("LLM creation failed (no llm_id returned).");
+
+    // --- 2) Create Agent ---
     const agentResp = await axios.post(
       `${RETELL_BASE}/create-agent`,
       {
         agent_name: `${bizName} - Allie`,
         voice_id: voiceId,
-        response_engine: { type: "retell-llm", llm_id: llmResp.data.llm_id },
+        response_engine: { type: "retell-llm", llm_id: llmId },
+        metadata: {
+          business_name: bizName,
+          client_email: pick(body, ["email", "client_email"], ""),
+          mode,
+        },
       },
       { headers: retellHeaders(), timeout: 12000 }
     );
 
-    const phoneData = await createPhoneNumber({
-      areaCode,
-      nickname: `${bizName} - Main Line`,
-    });
+    const agentId = agentResp.data.agent_id || agentResp.data.id;
+    if (!agentId) throw new Error("Agent creation failed (no agent_id returned).");
 
-    const bound = await bindPhoneNumberToAgent({
-      phoneData,
-      agentId: agentResp.data.agent_id,
-    });
-
+    // ✅ AGENT ONLY RESPONSE
     return res.status(200).json({
       ok: true,
-      agent_id: agentResp.data.agent_id,
-      phone_number: bound.phone_number,
+      mode,
+      llm_id: llmId,
+      agent_id: agentId,
+      phone_number: "(not purchased)",
     });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error("provision failed:", err?.response?.data || err?.message || err);
+    return res.status(500).json({
+      ok: false,
+      error: "Provisioning Failed",
+      details: err?.response?.data || err?.message,
+    });
   }
 };
