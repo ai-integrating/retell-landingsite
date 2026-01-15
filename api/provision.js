@@ -20,7 +20,34 @@ async function readJsonBody(req) {
       try { resolve(JSON.parse(data)); } catch { resolve({}); }
     });
   });
+}function pick(obj, keys, fallback = undefined) {
+  for (const k of keys) {
+    let val = obj?.[k];
+    if (val !== undefined && val !== null && val !== "") {
+      if (typeof val === "object" && val.output) return val.output; // supports Zapier objects
+      return val;
+    }
+  }
+  return fallback;
 }
+
+function resolveVoiceId(body) {
+  const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "gender"], "female")).toLowerCase().trim();
+
+  const VOICE_MAP = {
+    female_authoritative: process.env.VOICE_FEMALE_AUTHORITATIVE,
+    female_warm: process.env.VOICE_FEMALE_WARM,
+    female_calm: process.env.VOICE_FEMALE_CALM,
+    female_energetic: process.env.VOICE_FEMALE_ENERGETIC,
+    male_authoritative: process.env.VOICE_MALE_AUTHORITATIVE,
+    male_warm: process.env.VOICE_MALE_WARM,
+    male_calm: process.env.VOICE_MALE_CALM,
+  };
+
+  return VOICE_MAP[`${gender}_${tone}`] || process.env.DEFAULT_VOICE_ID;
+}
+
 
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
