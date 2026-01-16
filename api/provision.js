@@ -134,6 +134,23 @@ async function scrapeWebsiteText(url) {
     return { ok: false, text: "", reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed" };
   }
 }
+if (String(pick(body, ["debug_scrape"], "false")).toLowerCase() === "true") {
+  return res.status(200).json({
+    ok: true,
+    debug_scrape: true,
+    website_used: website,
+    scrape_reason: scrape.reason,
+    scraped_ok: scrape.ok,
+    scraped_preview: (scrape.text || "").slice(0, 300),
+    received_website_keys: {
+      website: body.website,
+      web: body.web,
+      website_url: body.website_url,
+      url: body.url,
+      site: body.site,
+    },
+  });
+}
 
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
 
