@@ -82,8 +82,6 @@ function normalizeRole(roleRaw) {
 // -------------------- VOICE --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
-
-  // Support both agent_gender and voice_gender
   const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female")).toLowerCase().trim();
 
   const VOICE_MAP = {
@@ -110,6 +108,29 @@ function normalizeUrl(url) {
   return u;
 }
 
+// ✅ Clean up r.jina.ai markdown so prompts stay readable
+function cleanScrapedText(raw) {
+  if (!raw) return "";
+
+  let text = String(raw);
+
+  // Remove image markdown lines: ![alt](url)
+  text = text.replace(/!\[.*?\]\(.*?\)\s*/g, "");
+
+  // Remove "Markdown Content:" label if present
+  text = text.replace(/Markdown Content:\s*/gi, "");
+
+  // Remove long separator lines
+  text = text.replace(/-{3,}/g, "");
+
+  // Normalize whitespace
+  text = text.replace(/\r/g, "");
+  text = text.replace(/[ \t]+\n/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+
+  return text.trim();
+}
+
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
@@ -118,27 +139,26 @@ async function scrapeWebsiteText(url) {
 
   try {
     const resp = await axios.get(scrapeUrl, { timeout: 8000 });
-    let text = (resp.data || "").toString();
 
-    text = text.replace(/\r/g, "");
-    text = text.replace(/[ \t]+\n/g, "\n");
-    text = text.trim();
+    let text = cleanScrapedText(resp.data || "");
 
-    const MAX_CHARS = 6000;
+    // Cap size so it doesn't overwhelm the receptionist
+    const MAX_CHARS = 1800;
     if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
 
     if (text.length < 80) return { ok: false, text: "", reason: "too_short" };
 
     return { ok: true, text, reason: "ok" };
   } catch (e) {
-    return { ok: false, text: "", reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed" };
+    return {
+      ok: false,
+      text: "",
+      reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed",
+    };
   }
 }
 
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
-
-// If you pass a fully written global_setup string, we’ll use it.
-// Otherwise we’ll generate a nice “employee handbook” style block from fields.
 function getGlobalSetupBlock(body) {
   return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
 }
@@ -208,8 +228,7 @@ function buildSetupForRole(body, roleKey) {
   if (roleKey === "emergency") return emergency;
   if (roleKey === "lead_revival") return lead;
 
-  // receptionist has no role-specific setup by default (but WILL get global setup)
-  return "";
+  return ""; // receptionist role-specific setup is optional; global covers it
 }
 
 function formatSetupBlock(setupText) {
@@ -262,8 +281,8 @@ OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can
   return bases[roleKey] || bases.receptionist;
 }
 
+// ✅ Updated: NO website here (prevents duplication)
 function buildBusinessContext(body) {
-  const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
   const tz = pick(body, ["timezone", "tz"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const industry = pick(body, ["industry"], "");
@@ -272,7 +291,6 @@ function buildBusinessContext(body) {
   if (industry) lines.push(`Industry: ${industry}`);
   if (tz) lines.push(`Time Zone: ${tz}`);
   if (hours) lines.push(`Business Hours: ${hours}`);
-  if (website) lines.push(`Website: ${website}`);
 
   if (!lines.length) return "";
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
@@ -342,19 +360,17 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ✅ Setup blocks:
-    // global_setup: explicit string OR generated from normal fields
+    // ✅ Setup blocks
     const explicitGlobalSetup = getGlobalSetupBlock(body);
     const generatedGlobalSetup = buildGlobalSetupFromFields(body);
     const globalSetup = explicitGlobalSetup || generatedGlobalSetup;
 
-    // role setup: explicit `${roleKey}_setup` OR enqueue-style builder fallback
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
 
     const combinedSetupText = [globalSetup, roleSetup].filter(Boolean).join("\n\n");
     const setupSection = formatSetupBlock(combinedSetupText);
 
-    // Build prompt (fallback)
+    // Build prompt
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
 
