@@ -137,10 +137,50 @@ async function scrapeWebsiteText(url) {
 
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
 
-// ✅ NEW: global info block (applies to receptionist too)
+// If you pass a fully written global_setup string, we’ll use it.
+// Otherwise we’ll generate a nice “employee handbook” style block from fields.
 function getGlobalSetupBlock(body) {
-  // pick ONE naming convention in your Sheet/Zap; global_setup is recommended
   return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
+}
+
+// ✅ NEW: build a clean global setup from normal Zap/Sheet fields
+function buildGlobalSetupFromFields(body) {
+  const bizName = pick(body, ["business_name", "biz_name", "company"], "");
+  const website = pick(body, ["website", "web"], "");
+  const tz = pick(body, ["timezone", "tz", "time_zone"], "");
+  const hours = pick(body, ["business_hours", "hours"], "");
+  const area = pick(body, ["service_area", "service_area_cities", "cities", "towns"], "");
+  const industry = pick(body, ["industry", "primary_business_type", "business_type"], "");
+  const phone = pick(body, ["business_phone", "phone"], "");
+  const email = pick(body, ["email", "client_email", "summary_email", "alert_email"], "");
+
+  const facts = [];
+  if (bizName) facts.push(`Business Name: ${bizName}`);
+  if (industry) facts.push(`Industry: ${industry}`);
+  if (area) facts.push(`Service Area: ${area}`);
+  if (hours) facts.push(`Business Hours: ${hours}`);
+  if (tz) facts.push(`Time Zone: ${tz}`);
+  if (phone) facts.push(`Primary Phone: ${phone}`);
+  if (email) facts.push(`Email for Summaries/Alerts: ${email}`);
+  if (website) facts.push(`Website: ${website}`);
+
+  if (!facts.length) return "";
+
+  const instructions = [
+    `Receptionist Instructions:`,
+    `- Be warm, calm, and professional.`,
+    `- Ask one question at a time.`,
+    `- Collect: caller name, callback number, and a brief reason for calling.`,
+    `- Do NOT give exact pricing or guarantees; offer to have the team follow up.`,
+    `- If unsure about a service detail, take a message rather than guessing.`,
+  ];
+
+  return [
+    `GLOBAL BUSINESS INFO (internal reference):`,
+    ...facts.map((l) => `- ${l}`),
+    ``,
+    ...instructions,
+  ].join("\n");
 }
 
 function getRoleSetupBlock(body, roleKey) {
@@ -168,7 +208,7 @@ function buildSetupForRole(body, roleKey) {
   if (roleKey === "emergency") return emergency;
   if (roleKey === "lead_revival") return lead;
 
-  // receptionist has no role-specific setup by default (but WILL get global_setup)
+  // receptionist has no role-specific setup by default (but WILL get global setup)
   return "";
 }
 
@@ -283,10 +323,14 @@ module.exports = async (req, res) => {
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
     // ✅ Setup blocks:
-    // - global_setup applies to ALL roles (including receptionist)
-    // - role setup: explicit `${roleKey}_setup` OR enqueue-style builder fallback
-    const globalSetup = getGlobalSetupBlock(body);
+    // global_setup: explicit string OR generated from normal fields
+    const explicitGlobalSetup = getGlobalSetupBlock(body);
+    const generatedGlobalSetup = buildGlobalSetupFromFields(body);
+    const globalSetup = explicitGlobalSetup || generatedGlobalSetup;
+
+    // role setup: explicit `${roleKey}_setup` OR enqueue-style builder fallback
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
+
     const combinedSetupText = [globalSetup, roleSetup].filter(Boolean).join("\n\n");
     const setupSection = formatSetupBlock(combinedSetupText);
 
@@ -352,7 +396,6 @@ module.exports = async (req, res) => {
           website: normalizeUrl(website),
           website_scrape: scrape.ok ? "ok" : scrape.reason,
           prompt_source: promptSource,
-          // optional: tiny signal that global info was present (helps debugging)
           global_setup_present: globalSetup ? "yes" : "no",
         },
       },
