@@ -134,23 +134,6 @@ async function scrapeWebsiteText(url) {
     return { ok: false, text: "", reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed" };
   }
 }
-if (String(pick(body, ["debug_scrape"], "false")).toLowerCase() === "true") {
-  return res.status(200).json({
-    ok: true,
-    debug_scrape: true,
-    website_used: website,
-    scrape_reason: scrape.reason,
-    scraped_ok: scrape.ok,
-    scraped_preview: (scrape.text || "").slice(0, 300),
-    received_website_keys: {
-      website: body.website,
-      web: body.web,
-      website_url: body.website_url,
-      url: body.url,
-      site: body.site,
-    },
-  });
-}
 
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
 
@@ -160,10 +143,10 @@ function getGlobalSetupBlock(body) {
   return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
 }
 
-// ✅ NEW: build a clean global setup from normal Zap/Sheet fields
+// ✅ build a clean global setup from normal Zap/Sheet fields
 function buildGlobalSetupFromFields(body) {
   const bizName = pick(body, ["business_name", "biz_name", "company"], "");
-  const website = pick(body, ["website", "web"], "");
+  const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
   const tz = pick(body, ["timezone", "tz", "time_zone"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const area = pick(body, ["service_area", "service_area_cities", "cities", "towns"], "");
@@ -280,7 +263,7 @@ OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can
 }
 
 function buildBusinessContext(body) {
-  const website = pick(body, ["website", "web"], "");
+  const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
   const tz = pick(body, ["timezone", "tz"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const industry = pick(body, ["industry"], "");
@@ -335,9 +318,29 @@ module.exports = async (req, res) => {
     // If you send a full explicit prompt, we’ll use it. Otherwise we build.
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
 
-    // Website scrape (only if website provided)
-    const website = pick(body, ["website", "web"], "");
+    // ✅ Website scrape (accept more key names)
+    const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
+
+    // ✅ DEBUG SCRAPE MODE (ONLY when debug_scrape=true)
+    const debugScrape = String(pick(body, ["debug_scrape"], "false")).toLowerCase() === "true";
+    if (debugScrape) {
+      return res.status(200).json({
+        ok: true,
+        debug_scrape: true,
+        website_used: website,
+        scrape_reason: scrape.reason,
+        scraped_ok: scrape.ok,
+        scraped_preview: (scrape.text || "").slice(0, 300),
+        received_website_keys: {
+          website: body.website,
+          web: body.web,
+          website_url: body.website_url,
+          url: body.url,
+          site: body.site,
+        },
+      });
+    }
 
     // ✅ Setup blocks:
     // global_setup: explicit string OR generated from normal fields
@@ -361,7 +364,7 @@ module.exports = async (req, res) => {
 
       const websiteSection = scrape.ok
         ? `WEBSITE KNOWLEDGE (use to answer questions accurately):\n${scrape.text}`
-        : `WEBSITE KNOWLEDGE:\n(Not provided or could not be scraped. If asked about services, ask clarifying questions and take a message.)`;
+        : `WEBSITE KNOWLEDGE:\n(Not available. Reason: ${scrape.reason}. If asked about services, ask clarifying questions and take a message.)`;
 
       promptToUse = [base, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
