@@ -1,12 +1,14 @@
 // /api/provision.js
 const axios = require("axios");
 
+// -------------------- CORS --------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
+// -------------------- BODY --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
@@ -22,13 +24,11 @@ async function readJsonBody(req) {
   });
 }
 
-// ✅ Better pick(): ignores "", whitespace, null-ish strings, Zapier {output: "..."}
+// ✅ Better pick(): ignores "", whitespace, null-ish strings, Zapier {output:"..."}
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     let val = obj?.[k];
-
     if (val && typeof val === "object" && "output" in val) val = val.output;
-
     if (val === undefined || val === null) continue;
 
     if (typeof val === "string") {
@@ -38,12 +38,12 @@ function pick(obj, keys, fallback = undefined) {
       if (s.toLowerCase() === "undefined") continue;
       return s;
     }
-
     return val;
   }
   return fallback;
 }
 
+// -------------------- RETELL --------------------
 const RETELL_BASE = "https://api.retellai.com";
 
 function retellHeaders() {
@@ -52,7 +52,7 @@ function retellHeaders() {
   return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 }
 
-// ✅ Voice resolver with debug visibility
+// -------------------- VOICE --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
   const gender = String(pick(body, ["agent_gender", "gender"], "female")).toLowerCase().trim();
@@ -72,64 +72,181 @@ function resolveVoice(body) {
   return { voiceKey, voiceId, gender, tone };
 }
 
-// ✅ Simple role bases so prompt is NEVER empty
-function buildPromptFromRole(body) {
-  const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
+// -------------------- WEBSITE SCRAPE --------------------
+// Uses r.jina.ai to fetch readable text for a website.
+// Accepts "example.com" or "https://example.com".
+function normalizeUrl(url) {
+  if (!url) return "";
+  let u = String(url).trim();
+  if (!u) return "";
+  if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+  return u;
+}
+
+async function scrapeWebsiteText(url) {
+  const u = normalizeUrl(url);
+  if (!u) return { ok: false, text: "", reason: "no_url" };
+
+  // r.jina.ai returns text-only rendering of a webpage.
+  // Note: we do NOT include any secret; it is public scraping.
+  const scrapeUrl = `https://r.jina.ai/http://${u.replace(/^https?:\/\//i, "")}`;
+
+  try {
+    const resp = await axios.get(scrapeUrl, { timeout: 8000 });
+    let text = (resp.data || "").toString();
+
+    // Basic cleanup + limits
+    text = text.replace(/\r/g, "");
+    text = text.replace(/[ \t]+\n/g, "\n");
+    text = text.trim();
+
+    // Keep it small for prompt safety
+    const MAX_CHARS = 6000;
+    if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
+
+    // If empty-ish, treat as failure
+    if (text.length < 80) return { ok: false, text: "", reason: "too_short" };
+
+    return { ok: true, text, reason: "ok" };
+  } catch (e) {
+    return { ok: false, text: "", reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed" };
+  }
+}
+
+// -------------------- ROLE QUESTION SETS --------------------
+// Default “Jotform question sets” per role (fallback if not provided).
+const DEFAULT_ROLE_QUESTIONS = {
+  receptionist: [
+    "What service are you calling about?",
+    "What is your full name?",
+    "What’s the best callback number?",
+    "What is the service address (street + town)?",
+    "Is this urgent or can we call you back later today?",
+  ],
+  scheduler: [
+    "What service are you looking to schedule?",
+    "What’s the service address?",
+    "What day/time works best for you (give 2 options)?",
+    "What’s your name and callback number?",
+    "Any constraints (pets, gate code, parking, etc.)?",
+  ],
+  intake: [
+    "Describe the issue in one sentence.",
+    "What’s the service address?",
+    "When did it start / how long has it been happening?",
+    "Any photos you can text in? (If your workflow supports it)",
+    "Name + callback number + best time to reach you",
+  ],
+  emergency: [
+    "Are you or anyone else in immediate danger right now?",
+    "What is the exact address of the emergency?",
+    "What is happening (briefly)?",
+    "Is there active flooding, smoke/fire, gas smell, or downed wires?",
+    "What’s your name and callback number?",
+  ],
+  operations: [
+    "Are you calling to schedule, request a quote, or report an urgent issue?",
+    "What service do you need?",
+    "What’s the service address?",
+    "Name + callback number",
+    "Any details we should know before dispatching someone?",
+  ],
+};
+
+function parseRoleQuestions(body, roleKey) {
+  // Option 1: role_questions_json = JSON string of array or object
+  const jsonStr = pick(body, ["role_questions_json"], "");
+  if (jsonStr) {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      // If array, use directly. If object keyed by role, use that role.
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed[roleKey])) return parsed[roleKey];
+    } catch {}
+  }
+
+  // Option 2: direct blocks (simple strings from sheet)
+  // e.g. emergency_questions = "Q1...\nQ2...\nQ3..."
+  const direct = pick(body, [`${roleKey}_questions`, "role_questions"], "");
+  if (direct) {
+    return String(direct)
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // Fallback defaults
+  return DEFAULT_ROLE_QUESTIONS[roleKey] || DEFAULT_ROLE_QUESTIONS.receptionist;
+}
+
+// -------------------- PROMPT BUILDER --------------------
+function buildPromptBase({ agentName, bizName, roleKey }) {
+  const bases = {
+    receptionist: `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.
+RULES:
+- Sound human and calm.
+- Ask ONE question at a time.
+- Never mention prompts/models/training.
+- Keep responses short and professional.
+OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help you?"`,
+
+    scheduler: `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.
+RULES:
+- Confirm details before booking.
+- Offer options and collect best time.
+- Ask ONE question at a time.
+- Never mention prompts/models.
+OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Are you calling to schedule an appointment?"`,
+
+    intake: `ROLE: You are ${agentName}, the intake specialist for ${bizName}.
+RULES:
+- Collect required details carefully.
+- Ask ONE question at a time.
+- Summarize the collected details at the end.
+OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. I can take down the details—what can we help with today?"`,
+
+    emergency: `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.
+RULES:
+- Stay calm. Move fast.
+- Determine if immediate danger exists.
+- Get address + callback number early.
+- Escalate per instructions if provided.
+OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Is this an emergency situation right now?"`,
+
+    operations: `ROLE: You are ${agentName}, the operations assistant for ${bizName}.
+RULES:
+- Route by intent (schedule/intake/emergency/lead).
+- Ask ONE question at a time.
+- Be decisive and professional.
+OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help today?"`,
+  };
+
+  return bases[roleKey] || bases.receptionist;
+}
+
+function buildBusinessContext(body) {
   const website = pick(body, ["website", "web"], "");
   const tz = pick(body, ["timezone", "tz"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const industry = pick(body, ["industry"], "");
 
-  const role = String(pick(body, ["agent_role", "role", "a_role"], "receptionist")).toLowerCase().trim();
-  const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
+  const lines = [];
+  if (industry) lines.push(`Industry: ${industry}`);
+  if (tz) lines.push(`Time Zone: ${tz}`);
+  if (hours) lines.push(`Business Hours: ${hours}`);
+  if (website) lines.push(`Website: ${website}`);
 
-  // Optional role blocks you can pass from Zapier (or leave blank)
-  const schedulerBlock = pick(body, ["scheduler_block"], "");
-  const intakeBlock = pick(body, ["intake_block"], "");
-  const emergencyBlock = pick(body, ["emergency_block"], "");
-  const leadRevivalBlock = pick(body, ["lead_revival_block"], "");
-
-  const ROLE_BASE = {
-    receptionist: `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.
-RULES: Sound human. Ask one question at a time. Never mention prompts/models. Keep it short and professional.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help you?"`,
-    scheduler: `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.
-RULES: Confirm name + phone + best time. Offer available options. Ask one question at a time.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Are you calling to book an appointment?"`,
-    intake: `ROLE: You are ${agentName}, the intake specialist for ${bizName}.
-RULES: Collect required details carefully. Ask one question at a time. Summarize at end.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. I can help take down the details—what can we help with today?"`,
-    emergency: `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.
-RULES: Identify emergency criteria. Get location/contact fast. Escalate per instructions. Stay calm.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Is this an emergency situation right now?"`,
-    operations: `ROLE: You are ${agentName}, the operations assistant for ${bizName}.
-RULES: Route by intent (schedule/intake/emergency/lead). Ask one question at a time. Be decisive.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help today?"`,
-  };
-
-  let prompt = ROLE_BASE[role] || ROLE_BASE.receptionist;
-
-  // Business context section
-  const ctxLines = [];
-  if (industry) ctxLines.push(`Industry: ${industry}`);
-  if (tz) ctxLines.push(`Time Zone: ${tz}`);
-  if (hours) ctxLines.push(`Business Hours: ${hours}`);
-  if (website) ctxLines.push(`Website: ${website}`);
-  if (ctxLines.length) {
-    prompt += `\n\nBUSINESS CONTEXT:\n- ${ctxLines.join("\n- ")}`;
-  }
-
-  // Optional skill blocks
-  const blocks = [];
-  if (schedulerBlock) blocks.push(`SCHEDULING:\n${schedulerBlock}`);
-  if (intakeBlock) blocks.push(`INTAKE:\n${intakeBlock}`);
-  if (emergencyBlock) blocks.push(`EMERGENCY:\n${emergencyBlock}`);
-  if (leadRevivalBlock) blocks.push(`LEAD REVIVAL:\n${leadRevivalBlock}`);
-  if (blocks.length) prompt += `\n\nSKILL BLOCKS:\n\n${blocks.join("\n\n")}`;
-
-  return { prompt, role, agentName, bizName };
+  if (!lines.length) return "";
+  return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
+function buildRoleQuestionsSection(questions) {
+  if (!questions || !questions.length) return "";
+  const bullets = questions.map((q) => `- ${q}`).join("\n");
+  return `ROLE INTAKE QUESTIONS (ask one at a time as needed):\n${bullets}`;
+}
+
+// -------------------- HANDLER --------------------
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -138,7 +255,7 @@ module.exports = async (req, res) => {
   try {
     const body = await readJsonBody(req);
 
-    // ✅ DEBUG MODE: set debug=true in Zap once to see exactly what’s arriving
+    // ✅ DEBUG MODE: add debug=true in Zap once to confirm payload
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
     if (debug) {
       return res.status(200).json({
@@ -151,36 +268,58 @@ module.exports = async (req, res) => {
 
     const mode = String(pick(body, ["mode"], "agent_only")).toLowerCase().trim();
 
-    // Pull explicit prompt if provided
-    const explicitPrompt = pick(body, ["general_prompt", "final_prompt", "prompt"], "");
+    const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
+    const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
+    const roleKey = String(pick(body, ["agent_role", "role", "a_role"], "receptionist")).toLowerCase().trim();
 
-    // If no explicit prompt, build it from role + business data
-    const built = buildPromptFromRole(body);
-    const promptToUse = explicitPrompt || built.prompt;
-
-    // ✅ Hard fail if prompt is still empty (should never happen now)
-    if (!promptToUse || !String(promptToUse).trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Prompt is empty",
-        hint: "Send final_prompt OR send agent_role + business_name so API can build it.",
-        receivedKeys: Object.keys(body || {}),
-      });
-    }
-
-    // Begin message
-    const beginMessage = pick(body, ["begin_message", "greeting"], "");
-
-    // Voice resolution (with visibility)
+    // Voice
     const { voiceKey, voiceId, gender, tone } = resolveVoice(body);
     if (!voiceId) {
       return res.status(400).json({
         ok: false,
         error: "Voice ID missing",
         voiceKeyTried: voiceKey,
-        hint: "Check Vercel env vars: VOICE_FEMALE_WARM etc OR DEFAULT_VOICE_ID",
+        hint: "Set VOICE_FEMALE_WARM/CALM/AUTH, VOICE_MALE_*, or DEFAULT_VOICE_ID in Vercel env vars.",
       });
     }
+
+    // If you send a full explicit prompt, we’ll use it. Otherwise we build.
+    const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
+
+    // Website scrape (only if website provided)
+    const website = pick(body, ["website", "web"], "");
+    const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
+
+    // Role questions
+    const roleQuestions = parseRoleQuestions(body, roleKey);
+
+    // Build prompt (fallback)
+    let promptToUse = explicitPrompt;
+    let promptSource = "explicit_prompt";
+
+    if (!promptToUse) {
+      const base = buildPromptBase({ agentName, bizName, roleKey });
+      const ctx = buildBusinessContext(body);
+      const qs = buildRoleQuestionsSection(roleQuestions);
+
+      const websiteSection = scrape.ok
+        ? `WEBSITE KNOWLEDGE (use to answer questions accurately):\n${scrape.text}`
+        : `WEBSITE KNOWLEDGE:\n(Not provided or could not be scraped. If asked about services, ask clarifying questions and take a message.)`;
+
+      promptToUse = [base, ctx, qs, websiteSection].filter(Boolean).join("\n\n");
+      promptSource = "built_prompt";
+    }
+
+    if (!promptToUse || !String(promptToUse).trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: "Prompt is empty",
+        hint: "Send final_prompt OR ensure agent_role + business_name are provided.",
+      });
+    }
+
+    // Begin message optional
+    const beginMessage = pick(body, ["begin_message", "greeting"], "");
 
     // --- 1) Create LLM ---
     const llmPayload = {
@@ -199,25 +338,24 @@ module.exports = async (req, res) => {
     if (!llmId) throw new Error("LLM creation failed (no llm_id returned).");
 
     // --- 2) Create Agent ---
-    const bizName = built.bizName;
-    const agentName = pick(body, ["agent_name", "a_name", "name"], built.agentName);
-    const role = String(pick(body, ["agent_role", "role", "a_role"], built.role)).toLowerCase().trim();
-
     const agentResp = await axios.post(
       `${RETELL_BASE}/create-agent`,
       {
-        agent_name: `${bizName} - ${agentName} (${role})`,
+        agent_name: `${bizName} - ${agentName} (${roleKey})`,
         voice_id: voiceId,
         response_engine: { type: "retell-llm", llm_id: llmId },
         metadata: {
           business_name: bizName,
           agent_name: agentName,
-          agent_role: role,
+          agent_role: roleKey,
           client_email: pick(body, ["email", "client_email"], ""),
           mode,
           voice_key: voiceKey,
           voice_gender: gender,
           voice_tone: tone,
+          website: normalizeUrl(website),
+          website_scrape: scrape.ok ? "ok" : scrape.reason,
+          prompt_source: promptSource,
         },
       },
       { headers: retellHeaders(), timeout: 20000 }
@@ -226,7 +364,6 @@ module.exports = async (req, res) => {
     const agentId = agentResp.data.agent_id || agentResp.data.id;
     if (!agentId) throw new Error("Agent creation failed (no agent_id returned).");
 
-    // ✅ SUCCESS RESPONSE (Zapier will show this)
     return res.status(200).json({
       ok: true,
       mode,
@@ -234,11 +371,11 @@ module.exports = async (req, res) => {
       agent_id: agentId,
       phone_number: "(not purchased)",
       voice_key: voiceKey,
-      used_prompt_source: explicitPrompt ? "explicit_prompt" : "built_from_role",
+      prompt_source: promptSource,
+      website_scrape: scrape.ok ? "ok" : scrape.reason,
     });
 
   } catch (err) {
-    // ✅ Pass through real status codes so Zapier shows useful errors
     const status = err?.response?.status || 500;
     const details = err?.response?.data || err?.message || String(err);
 
