@@ -83,7 +83,7 @@ function normalizeRole(roleRaw) {
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
 
-  // Support both agent_gender and voice_gender (your Zap screenshot used voice_gender)
+  // Support both agent_gender and voice_gender
   const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female")).toLowerCase().trim();
 
   const VOICE_MAP = {
@@ -135,16 +135,19 @@ async function scrapeWebsiteText(url) {
   }
 }
 
-// -------------------- SETUP BLOCK (JOTFORM ANSWERS) --------------------
-// You will map these from Google Sheets lookup row.
-// Columns recommended:
-// receptionist_setup, scheduler_setup, intake_setup, emergency_setup, operations_setup
+// -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
+
+// ✅ NEW: global info block (applies to receptionist too)
+function getGlobalSetupBlock(body) {
+  // pick ONE naming convention in your Sheet/Zap; global_setup is recommended
+  return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
+}
 
 function getRoleSetupBlock(body, roleKey) {
   return pick(body, [`${roleKey}_setup`, "role_setup", "setup_block"], "");
 }
 
-// ✅ NEW: fallback builder (matches enqueue "beauty" logic)
+// ✅ fallback builder (matches enqueue "beauty" logic)
 function buildSetupForRole(body, roleKey) {
   const scheduler = pick(body, ["scheduler_setup", "scheduler_config"], "");
   const intake = pick(body, ["intake_setup", "intake_config"], "");
@@ -165,7 +168,7 @@ function buildSetupForRole(body, roleKey) {
   if (roleKey === "emergency") return emergency;
   if (roleKey === "lead_revival") return lead;
 
-  // receptionist uses global info only; return empty setup
+  // receptionist has no role-specific setup by default (but WILL get global_setup)
   return "";
 }
 
@@ -279,10 +282,13 @@ module.exports = async (req, res) => {
     const website = pick(body, ["website", "web"], "");
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
-    // ✅ Setup block (Jotform answers)
-    // First try explicit `${roleKey}_setup`, then fall back to enqueue-style builder.
-    const setupText = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
-    const setupSection = formatSetupBlock(setupText);
+    // ✅ Setup blocks:
+    // - global_setup applies to ALL roles (including receptionist)
+    // - role setup: explicit `${roleKey}_setup` OR enqueue-style builder fallback
+    const globalSetup = getGlobalSetupBlock(body);
+    const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
+    const combinedSetupText = [globalSetup, roleSetup].filter(Boolean).join("\n\n");
+    const setupSection = formatSetupBlock(combinedSetupText);
 
     // Build prompt (fallback)
     let promptToUse = explicitPrompt;
@@ -346,6 +352,8 @@ module.exports = async (req, res) => {
           website: normalizeUrl(website),
           website_scrape: scrape.ok ? "ok" : scrape.reason,
           prompt_source: promptSource,
+          // optional: tiny signal that global info was present (helps debugging)
+          global_setup_present: globalSetup ? "yes" : "no",
         },
       },
       { headers: retellHeaders(), timeout: 20000 }
@@ -363,6 +371,7 @@ module.exports = async (req, res) => {
       voice_key: voiceKey,
       prompt_source: promptSource,
       website_scrape: scrape.ok ? "ok" : scrape.reason,
+      global_setup_present: globalSetup ? true : false,
     });
 
   } catch (err) {
