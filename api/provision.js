@@ -69,6 +69,9 @@ function normalizeRole(roleRaw) {
     emergency_dispatch: "emergency",
     dispatcher: "emergency",
 
+    lead_revival: "lead_revival",
+    revival: "lead_revival",
+
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
@@ -136,8 +139,34 @@ async function scrapeWebsiteText(url) {
 // You will map these from Google Sheets lookup row.
 // Columns recommended:
 // receptionist_setup, scheduler_setup, intake_setup, emergency_setup, operations_setup
+
 function getRoleSetupBlock(body, roleKey) {
   return pick(body, [`${roleKey}_setup`, "role_setup", "setup_block"], "");
+}
+
+// ✅ NEW: fallback builder (matches enqueue "beauty" logic)
+function buildSetupForRole(body, roleKey) {
+  const scheduler = pick(body, ["scheduler_setup", "scheduler_config"], "");
+  const intake = pick(body, ["intake_setup", "intake_config"], "");
+  const emergency = pick(body, ["emergency_setup", "dispatch_setup", "dispatch_config"], "");
+  const lead = pick(body, ["lead_revival_setup", "lead_revival_config"], "");
+
+  if (roleKey === "operations") {
+    return [
+      scheduler && `SCHEDULING SETUP:\n${scheduler}`,
+      intake && `INTAKE SETUP:\n${intake}`,
+      emergency && `EMERGENCY DISPATCH SETUP:\n${emergency}`,
+      lead && `LEAD REVIVAL SETUP:\n${lead}`,
+    ].filter(Boolean).join("\n\n");
+  }
+
+  if (roleKey === "scheduler") return scheduler;
+  if (roleKey === "intake") return intake;
+  if (roleKey === "emergency") return emergency;
+  if (roleKey === "lead_revival") return lead;
+
+  // receptionist uses global info only; return empty setup
+  return "";
 }
 
 function formatSetupBlock(setupText) {
@@ -250,8 +279,9 @@ module.exports = async (req, res) => {
     const website = pick(body, ["website", "web"], "");
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
-    // Setup block (Jotform answers)
-    const setupText = getRoleSetupBlock(body, roleKey);
+    // ✅ Setup block (Jotform answers)
+    // First try explicit `${roleKey}_setup`, then fall back to enqueue-style builder.
+    const setupText = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock(setupText);
 
     // Build prompt (fallback)
