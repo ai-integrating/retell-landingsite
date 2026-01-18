@@ -12,14 +12,22 @@ function setCors(res) {
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -79,10 +87,29 @@ function normalizeRole(roleRaw) {
   return map[r] || "receptionist";
 }
 
+// -------------------- NUMBER TIER --------------------
+function tierForRole(roleKey) {
+  // outbound-heavy roles = premium (better pickup/reputation)
+  const premium = new Set(["scheduler", "operations", "lead_revival"]);
+  return premium.has(roleKey) ? "premium" : "standard";
+}
+
+// -------------------- BASE URL (internal API calls) --------------------
+function getBaseUrl(req) {
+  const envBase = process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || "";
+  if (envBase) return String(envBase).replace(/\/+$/, "");
+
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
 // -------------------- VOICE --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
-  const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female")).toLowerCase().trim();
+  const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female"))
+    .toLowerCase()
+    .trim();
 
   const VOICE_MAP = {
     female_warm: process.env.VOICE_FEMALE_WARM,
@@ -195,12 +222,9 @@ function buildGlobalSetupFromFields(body) {
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
 
-  return [
-    `GLOBAL BUSINESS INFO (internal reference):`,
-    ...facts.map((l) => `- ${l}`),
-    ``,
-    ...instructions,
-  ].join("\n");
+  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join(
+    "\n"
+  );
 }
 
 function getRoleSetupBlock(body, roleKey) {
@@ -220,7 +244,9 @@ function buildSetupForRole(body, roleKey) {
       intake && `INTAKE SETUP:\n${intake}`,
       emergency && `EMERGENCY DISPATCH SETUP:\n${emergency}`,
       lead && `LEAD REVIVAL SETUP:\n${lead}`,
-    ].filter(Boolean).join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   if (roleKey === "scheduler") return scheduler;
@@ -316,7 +342,15 @@ module.exports = async (req, res) => {
       });
     }
 
-    const mode = String(pick(body, ["mode"], "agent_only")).toLowerCase().trim();
+    // Purchase toggle: either mode=agent_and_number OR purchase_number=true
+    const purchaseNumber =
+      String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+
+    const mode = String(
+      pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")
+    )
+      .toLowerCase()
+      .trim();
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
@@ -404,11 +438,10 @@ module.exports = async (req, res) => {
     };
     if (beginMessage) llmPayload.begin_message = beginMessage;
 
-    const llmResp = await axios.post(
-      `${RETELL_BASE}/create-retell-llm`,
-      llmPayload,
-      { headers: retellHeaders(), timeout: 20000 }
-    );
+    const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, llmPayload, {
+      headers: retellHeaders(),
+      timeout: 20000,
+    });
 
     const llmId = llmResp.data.llm_id || llmResp.data.id;
     if (!llmId) throw new Error("LLM creation failed (no llm_id returned).");
@@ -441,12 +474,51 @@ module.exports = async (req, res) => {
     const agentId = agentResp.data.agent_id || agentResp.data.id;
     if (!agentId) throw new Error("Agent creation failed (no agent_id returned).");
 
+    // --- 3) OPTIONAL: Buy + Bind Phone Number ---
+    let phoneNumber = "(not purchased)";
+    let phoneNumberId = null;
+
+    const shouldBuyNumber = mode === "agent_and_number";
+    const numberTier = tierForRole(roleKey);
+
+    if (shouldBuyNumber) {
+      const baseUrl = getBaseUrl(req);
+
+      // Use Jotform/Job as idempotency key (prevents duplicates if worker retries)
+      const idempotencyKey = pick(body, ["idempotency_key", "job_id", "submission_id", "jotform_submission_id"], "");
+
+      // Optional preference inputs
+      const preferredAreaCode = pick(body, ["preferred_area_code", "area_code"], "");
+
+      const buyResp = await axios.post(
+        `${baseUrl}/api/buy-number`,
+        {
+          agent_id: agentId,
+          business_name: bizName,
+          idempotency_key: idempotencyKey || undefined,
+          number_tier: numberTier,
+          preferred_area_code: preferredAreaCode || undefined,
+          business_phone: pick(body, ["business_phone", "phone"], ""),
+        },
+        { timeout: 20000 }
+      );
+
+      if (!buyResp?.data?.ok) {
+        throw new Error(`Buy number failed: ${JSON.stringify(buyResp?.data || {})}`);
+      }
+
+      phoneNumber = buyResp.data.phone_number || "(not purchased)";
+      phoneNumberId = buyResp.data.phone_number_id || null;
+    }
+
     return res.status(200).json({
       ok: true,
       mode,
       llm_id: llmId,
       agent_id: agentId,
-      phone_number: "(not purchased)",
+      phone_number: phoneNumber,
+      phone_number_id: phoneNumberId,
+      number_tier: numberTier,
       voice_key: voiceKey,
       prompt_source: promptSource,
       website_scrape: scrape.ok ? "ok" : scrape.reason,
@@ -466,3 +538,5 @@ module.exports = async (req, res) => {
     });
   }
 };
+
+Sent from my iPhone
