@@ -168,6 +168,23 @@ module.exports = async (req, res) => {
     });
 
     const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
+function formatPrettyPhone(number) {
+  if (!number) return "";
+
+  const d = digitsOnly(number);
+
+  // Handle US numbers only (10 or 11 digits)
+  if (d.length === 11 && d.startsWith("1")) {
+    return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
+  }
+
+  if (d.length === 10) {
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+
+  // Fallback: return original
+  return number;
+}
 
     return res.status(200).json({
       ok: true,
