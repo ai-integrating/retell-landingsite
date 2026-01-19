@@ -38,6 +38,20 @@ function digitsOnly(s) {
   return String(s || "").replace(/\D/g, "");
 }
 
+// ✅ Pretty formatter (US)
+function formatPrettyPhone(number) {
+  if (!number) return "";
+  const d = digitsOnly(number);
+
+  if (d.length === 11 && d.startsWith("1")) {
+    return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
+  }
+  if (d.length === 10) {
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  return String(number);
+}
+
 function inferAreaCode(body) {
   const preferred = digitsOnly(pick(body, ["preferred_area_code", "area_code"], "")).slice(0, 3);
   if (preferred.length === 3) return preferred;
@@ -122,10 +136,8 @@ module.exports = async (req, res) => {
     const idempotencyKey = pick(body, ["idempotency_key", "job_id", "submission_id"], "");
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
 
-    // ✅ NEW: Tier support (accept from provision, normalize)
-    const numberTierRaw = String(pick(body, ["number_tier", "tier"], "standard"))
-      .toLowerCase()
-      .trim();
+    // ✅ Tier support (accept from provision, normalize)
+    const numberTierRaw = String(pick(body, ["number_tier", "tier"], "standard")).toLowerCase().trim();
     const numberTier = numberTierRaw === "premium" ? "premium" : "standard";
 
     // If caller already has number recorded in sheet, they should NOT call this endpoint.
@@ -136,6 +148,7 @@ module.exports = async (req, res) => {
         ok: true,
         agent_id: agentId,
         phone_number: existingNumber,
+        pretty_phone_number: formatPrettyPhone(existingNumber),
         phone_number_id: pick(body, ["retell_phone_number_id", "phone_number_id"], null),
         number_tier: numberTier,
         message: "Already has phone_number in payload; skipping purchase.",
@@ -153,6 +166,7 @@ module.exports = async (req, res) => {
         ok: true,
         agent_id: agentId,
         phone_number: detected.phone_number,
+        pretty_phone_number: formatPrettyPhone(detected.phone_number),
         phone_number_id: detected.phone_number_id || null,
         number_tier: numberTier,
         message: "Detected existing bound number; skipping purchase.",
@@ -163,33 +177,19 @@ module.exports = async (req, res) => {
     // ✅ Buy + bind in one transaction-like flow
     const phoneData = await createPhoneNumber({
       areaCode,
-      // ✅ NEW: include tier in nickname so you can audit in Retell
+      // ✅ include tier in nickname so you can audit in Retell
       nickname: `${bizName} - Main Line [${numberTier}]${idempotencyKey ? ` (${idempotencyKey})` : ""}`,
     });
 
     const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
-function formatPrettyPhone(number) {
-  if (!number) return "";
-
-  const d = digitsOnly(number);
-
-  // Handle US numbers only (10 or 11 digits)
-  if (d.length === 11 && d.startsWith("1")) {
-    return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
-  }
-
-  if (d.length === 10) {
-    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
-  }
-
-  // Fallback: return original
-  return number;
-}
 
     return res.status(200).json({
       ok: true,
       agent_id: agentId,
+
       phone_number: bound.phone_number,
+      pretty_phone_number: formatPrettyPhone(bound.phone_number),
+
       phone_number_id: bound.phone_number_id || phoneData.phone_number_id || phoneData.id || null,
       area_code: areaCode,
       number_tier: numberTier,
