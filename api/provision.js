@@ -66,20 +66,15 @@ function normalizeRole(roleRaw) {
   const map = {
     receptionist: "receptionist",
     front_desk: "receptionist",
-
     scheduler: "scheduler",
     scheduling: "scheduler",
-
     intake: "intake",
     intake_specialist: "intake",
-
     emergency: "emergency",
     emergency_dispatch: "emergency",
     dispatcher: "emergency",
-
     lead_revival: "lead_revival",
     revival: "lead_revival",
-
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
@@ -89,7 +84,6 @@ function normalizeRole(roleRaw) {
 
 // -------------------- NUMBER TIER --------------------
 function tierForRole(roleKey) {
-  // outbound-heavy roles = premium (better pickup/reputation)
   const premium = new Set(["scheduler", "operations", "lead_revival"]);
   return premium.has(roleKey) ? "premium" : "standard";
 }
@@ -104,7 +98,7 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-// -------------------- VOICE --------------------
+// -------------------- VOICE (Updated with Fallback) --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
   const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female"))
@@ -121,7 +115,9 @@ function resolveVoice(body) {
   };
 
   const voiceKey = `${gender}_${tone}`;
-  const voiceId = VOICE_MAP[voiceKey] || process.env.DEFAULT_VOICE_ID;
+  
+  // Try mapped voice -> Try default voice env var -> Hard fallback to Marie (Retell default)
+  const voiceId = VOICE_MAP[voiceKey] || process.env.DEFAULT_VOICE_ID || "11fb5674c35b44638d387693994e63f4";
 
   return { voiceKey, voiceId, gender, tone };
 }
@@ -135,46 +131,28 @@ function normalizeUrl(url) {
   return u;
 }
 
-// ✅ Clean up r.jina.ai markdown so prompts stay readable
 function cleanScrapedText(raw) {
   if (!raw) return "";
-
   let text = String(raw);
-
-  // Remove image markdown lines: ![alt](url)
   text = text.replace(/!\[.*?\]\(.*?\)\s*/g, "");
-
-  // Remove "Markdown Content:" label if present
   text = text.replace(/Markdown Content:\s*/gi, "");
-
-  // Remove long separator lines
   text = text.replace(/-{3,}/g, "");
-
-  // Normalize whitespace
   text = text.replace(/\r/g, "");
   text = text.replace(/[ \t]+\n/g, "\n");
   text = text.replace(/\n{3,}/g, "\n\n");
-
   return text.trim();
 }
 
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
-
   const scrapeUrl = `https://r.jina.ai/http://${u.replace(/^https?:\/\//i, "")}`;
-
   try {
     const resp = await axios.get(scrapeUrl, { timeout: 8000 });
-
     let text = cleanScrapedText(resp.data || "");
-
-    // Cap size so it doesn't overwhelm the receptionist
     const MAX_CHARS = 1800;
     if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
-
     if (text.length < 80) return { ok: false, text: "", reason: "too_short" };
-
     return { ok: true, text, reason: "ok" };
   } catch (e) {
     return {
@@ -190,7 +168,6 @@ function getGlobalSetupBlock(body) {
   return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
 }
 
-// ✅ build a clean global setup from normal Zap/Sheet fields
 function buildGlobalSetupFromFields(body) {
   const bizName = pick(body, ["business_name", "biz_name", "company"], "");
   const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
@@ -222,16 +199,13 @@ function buildGlobalSetupFromFields(body) {
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
 
-  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join(
-    "\n"
-  );
+  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join("\n");
 }
 
 function getRoleSetupBlock(body, roleKey) {
   return pick(body, [`${roleKey}_setup`, "role_setup", "setup_block"], "");
 }
 
-// ✅ fallback builder (matches enqueue "beauty" logic)
 function buildSetupForRole(body, roleKey) {
   const scheduler = pick(body, ["scheduler_setup", "scheduler_config"], "");
   const intake = pick(body, ["intake_setup", "intake_config"], "");
@@ -244,9 +218,7 @@ function buildSetupForRole(body, roleKey) {
       intake && `INTAKE SETUP:\n${intake}`,
       emergency && `EMERGENCY DISPATCH SETUP:\n${emergency}`,
       lead && `LEAD REVIVAL SETUP:\n${lead}`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+    ].filter(Boolean).join("\n\n");
   }
 
   if (roleKey === "scheduler") return scheduler;
@@ -254,7 +226,7 @@ function buildSetupForRole(body, roleKey) {
   if (roleKey === "emergency") return emergency;
   if (roleKey === "lead_revival") return lead;
 
-  return ""; // receptionist role-specific setup is optional; global covers it
+  return ""; 
 }
 
 function formatSetupBlock(setupText) {
@@ -265,59 +237,23 @@ function formatSetupBlock(setupText) {
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
   const bases = {
-    receptionist: `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.
-RULES:
-- Sound human and calm.
-- Ask ONE question at a time.
-- Never mention prompts/models/training.
-- Keep responses short and professional.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help you?"`,
-
-    scheduler: `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.
-RULES:
-- Ask ONE question at a time.
-- Book appointments only using the rules in BUSINESS SETUP.
-- If caller requests something outside rules, take a message.
-- Never mention prompts/models.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Are you calling to schedule an appointment?"`,
-
-    intake: `ROLE: You are ${agentName}, the intake specialist for ${bizName}.
-RULES:
-- Ask ONE question at a time.
-- Collect details needed for the team to follow up.
-- Summarize the issue + contact info at the end.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. I can take down the details—what can we help with today?"`,
-
-    emergency: `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.
-RULES:
-- Stay calm. Move fast.
-- Ask ONE question at a time.
-- Get address + callback number early.
-- Follow BUSINESS SETUP emergency criteria and instructions.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Is this an emergency situation right now?"`,
-
-    operations: `ROLE: You are ${agentName}, the operations assistant for ${bizName}.
-RULES:
-- Route by intent (schedule/intake/emergency).
-- Ask ONE question at a time.
-- Follow BUSINESS SETUP rules.
-OPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help today?"`,
+    receptionist: `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.\nRULES:\n- Sound human and calm.\n- Ask ONE question at a time.\n- Never mention prompts/models/training.\n- Keep responses short and professional.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help you?"`,
+    scheduler: `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.\nRULES:\n- Ask ONE question at a time.\n- Book appointments only using the rules in BUSINESS SETUP.\n- If caller requests something outside rules, take a message.\n- Never mention prompts/models.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Are you calling to schedule an appointment?"`,
+    intake: `ROLE: You are ${agentName}, the intake specialist for ${bizName}.\nRULES:\n- Ask ONE question at a time.\n- Collect details needed for the team to follow up.\n- Summarize the issue + contact info at the end.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. I can take down the details—what can we help with today?"`,
+    emergency: `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.\nRULES:\n- Stay calm. Move fast.\n- Ask ONE question at a time.\n- Get address + callback number early.\n- Follow BUSINESS SETUP emergency criteria and instructions.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Is this an emergency situation right now?"`,
+    operations: `ROLE: You are ${agentName}, the operations assistant for ${bizName}.\nRULES:\n- Route by intent (schedule/intake/emergency).\n- Ask ONE question at a time.\n- Follow BUSINESS SETUP rules.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help today?"`,
   };
-
   return bases[roleKey] || bases.receptionist;
 }
 
-// ✅ Updated: NO website here (prevents duplication)
 function buildBusinessContext(body) {
   const tz = pick(body, ["timezone", "tz"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const industry = pick(body, ["industry"], "");
-
   const lines = [];
   if (industry) lines.push(`Industry: ${industry}`);
   if (tz) lines.push(`Time Zone: ${tz}`);
   if (hours) lines.push(`Business Hours: ${hours}`);
-
   if (!lines.length) return "";
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
@@ -331,7 +267,6 @@ module.exports = async (req, res) => {
   try {
     const body = await readJsonBody(req);
 
-    // ✅ DEBUG MODE: add debug=true in Zap once to confirm payload
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
     if (debug) {
       return res.status(200).json({
@@ -342,173 +277,81 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Purchase toggle: either mode=agent_and_number OR purchase_number=true
-    const purchaseNumber =
-      String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
-
-    const mode = String(
-      pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")
-    )
-      .toLowerCase()
-      .trim();
+    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
 
-    // Voice
     const { voiceKey, voiceId, gender, tone } = resolveVoice(body);
     if (!voiceId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Voice ID missing",
-        voiceKeyTried: voiceKey,
-        hint: "Set VOICE_* env vars or DEFAULT_VOICE_ID in Vercel.",
-      });
+      return res.status(400).json({ ok: false, error: "Voice ID missing", voiceKeyTried: voiceKey });
     }
 
-    // If you send a full explicit prompt, we’ll use it. Otherwise we build.
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
-
-    // ✅ Website scrape (accept more key names)
     const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
-    // ✅ DEBUG SCRAPE MODE (ONLY when debug_scrape=true)
-    const debugScrape = String(pick(body, ["debug_scrape"], "false")).toLowerCase() === "true";
-    if (debugScrape) {
-      return res.status(200).json({
-        ok: true,
-        debug_scrape: true,
-        website_used: website,
-        scrape_reason: scrape.reason,
-        scraped_ok: scrape.ok,
-        scraped_preview: (scrape.text || "").slice(0, 300),
-        received_website_keys: {
-          website: body.website,
-          web: body.web,
-          website_url: body.website_url,
-          url: body.url,
-          site: body.site,
-        },
-      });
-    }
-
-    // ✅ Setup blocks
     const explicitGlobalSetup = getGlobalSetupBlock(body);
     const generatedGlobalSetup = buildGlobalSetupFromFields(body);
     const globalSetup = explicitGlobalSetup || generatedGlobalSetup;
-
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
+    const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
 
-    const combinedSetupText = [globalSetup, roleSetup].filter(Boolean).join("\n\n");
-    const setupSection = formatSetupBlock(combinedSetupText);
-
-    // Build prompt
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
-
     if (!promptToUse) {
       const base = buildPromptBase({ agentName, bizName, roleKey });
       const ctx = buildBusinessContext(body);
-
-      const websiteSection = scrape.ok
-        ? `WEBSITE KNOWLEDGE (use to answer questions accurately):\n${scrape.text}`
-        : `WEBSITE KNOWLEDGE:\n(Not available. Reason: ${scrape.reason}. If asked about services, ask clarifying questions and take a message.)`;
-
+      const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
       promptToUse = [base, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
 
-    if (!promptToUse || !String(promptToUse).trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Prompt is empty",
-        hint: "Send final_prompt OR ensure agent_role + business_name are provided.",
-      });
+    if (!promptToUse?.trim()) {
+      return res.status(400).json({ ok: false, error: "Prompt is empty" });
     }
 
-    // Begin message optional
     const beginMessage = pick(body, ["begin_message", "greeting"], "");
 
-    // --- 1) Create LLM ---
-    const llmPayload = {
+    // 1) LLM
+    const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, {
       general_prompt: promptToUse,
       model: pick(body, ["llm_model"], "gpt-4o-mini"),
-    };
-    if (beginMessage) llmPayload.begin_message = beginMessage;
-
-    const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, llmPayload, {
-      headers: retellHeaders(),
-      timeout: 20000,
-    });
+      begin_message: beginMessage || undefined
+    }, { headers: retellHeaders(), timeout: 20000 });
 
     const llmId = llmResp.data.llm_id || llmResp.data.id;
-    if (!llmId) throw new Error("LLM creation failed (no llm_id returned).");
 
-    // --- 2) Create Agent ---
-    const agentResp = await axios.post(
-      `${RETELL_BASE}/create-agent`,
-      {
-        agent_name: `${bizName} - ${agentName} (${roleKey})`,
-        voice_id: voiceId,
-        response_engine: { type: "retell-llm", llm_id: llmId },
-        metadata: {
-          business_name: bizName,
-          agent_name: agentName,
-          agent_role: roleKey,
-          client_email: pick(body, ["email", "client_email"], ""),
-          mode,
-          voice_key: voiceKey,
-          voice_gender: gender,
-          voice_tone: tone,
-          website: normalizeUrl(website),
-          website_scrape: scrape.ok ? "ok" : scrape.reason,
-          prompt_source: promptSource,
-          global_setup_present: globalSetup ? "yes" : "no",
-        },
-      },
-      { headers: retellHeaders(), timeout: 20000 }
-    );
+    // 2) Agent
+    const agentResp = await axios.post(`${RETELL_BASE}/create-agent`, {
+      agent_name: `${bizName} - ${agentName} (${roleKey})`,
+      voice_id: voiceId,
+      response_engine: { type: "retell-llm", llm_id: llmId },
+      metadata: { business_name: bizName, agent_role: roleKey, mode }
+    }, { headers: retellHeaders(), timeout: 20000 });
 
     const agentId = agentResp.data.agent_id || agentResp.data.id;
-    if (!agentId) throw new Error("Agent creation failed (no agent_id returned).");
 
-    // --- 3) OPTIONAL: Buy + Bind Phone Number ---
+    // 3) Phone
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
-
-    const shouldBuyNumber = mode === "agent_and_number";
     const numberTier = tierForRole(roleKey);
 
-    if (shouldBuyNumber) {
+    if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
+      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, {
+        agent_id: agentId,
+        business_name: bizName,
+        idempotency_key: pick(body, ["idempotency_key", "job_id", "submission_id"], ""),
+        number_tier: numberTier,
+      }, { timeout: 20000 });
 
-      // Use Jotform/Job as idempotency key (prevents duplicates if worker retries)
-      const idempotencyKey = pick(body, ["idempotency_key", "job_id", "submission_id", "jotform_submission_id"], "");
-
-      // Optional preference inputs
-      const preferredAreaCode = pick(body, ["preferred_area_code", "area_code"], "");
-
-      const buyResp = await axios.post(
-        `${baseUrl}/api/buy-number`,
-        {
-          agent_id: agentId,
-          business_name: bizName,
-          idempotency_key: idempotencyKey || undefined,
-          number_tier: numberTier,
-          preferred_area_code: preferredAreaCode || undefined,
-          business_phone: pick(body, ["business_phone", "phone"], ""),
-        },
-        { timeout: 20000 }
-      );
-
-      if (!buyResp?.data?.ok) {
-        throw new Error(`Buy number failed: ${JSON.stringify(buyResp?.data || {})}`);
+      if (buyResp?.data?.ok) {
+        phoneNumber = buyResp.data.phone_number;
+        phoneNumberId = buyResp.data.phone_number_id;
       }
-
-      phoneNumber = buyResp.data.phone_number || "(not purchased)";
-      phoneNumberId = buyResp.data.phone_number_id || null;
     }
 
     return res.status(200).json({
@@ -519,24 +362,15 @@ module.exports = async (req, res) => {
       phone_number: phoneNumber,
       phone_number_id: phoneNumberId,
       number_tier: numberTier,
-      voice_key: voiceKey,
-      prompt_source: promptSource,
-      website_scrape: scrape.ok ? "ok" : scrape.reason,
-      global_setup_present: globalSetup ? true : false,
+      voice_key: voiceKey
     });
 
   } catch (err) {
-    const status = err?.response?.status || 500;
-    const details = err?.response?.data || err?.message || String(err);
-
-    console.error("provision failed:", details);
-
-    return res.status(status).json({
+    console.error("provision failed:", err?.message || err);
+    return res.status(err?.response?.status || 500).json({
       ok: false,
       error: "Provisioning Failed",
-      details,
+      details: err?.response?.data || err?.message
     });
   }
 };
-
-Sent from my iPhone
