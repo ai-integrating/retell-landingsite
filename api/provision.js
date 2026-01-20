@@ -234,15 +234,61 @@ function formatSetupBlock(setupText) {
   return `BUSINESS SETUP (owner answers from onboarding form — internal rules):\n${setupText}\n\nIMPORTANT:\n- Do NOT ask the caller these onboarding questions.\n- Use these answers as your operating instructions.`;
 }
 
-// -------------------- PROMPT BASES --------------------
+// -------------------- PROMPT BASES (UPDATED) --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
+  // Your requested universal greeting
+  const universalGreeting = `OPENING: "Hello, this is ${agentName}, at ${bizName}. How can I help you today?"`;
+
   const bases = {
-    receptionist: `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.\nRULES:\n- Sound human and calm.\n- Ask ONE question at a time.\n- Never mention prompts/models/training.\n- Keep responses short and professional.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help you?"`,
-    scheduler: `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.\nRULES:\n- Ask ONE question at a time.\n- Book appointments only using the rules in BUSINESS SETUP.\n- If caller requests something outside rules, take a message.\n- Never mention prompts/models.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Are you calling to schedule an appointment?"`,
-    intake: `ROLE: You are ${agentName}, the intake specialist for ${bizName}.\nRULES:\n- Ask ONE question at a time.\n- Collect details needed for the team to follow up.\n- Summarize the issue + contact info at the end.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. I can take down the details—what can we help with today?"`,
-    emergency: `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.\nRULES:\n- Stay calm. Move fast.\n- Ask ONE question at a time.\n- Get address + callback number early.\n- Follow BUSINESS SETUP emergency criteria and instructions.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. Is this an emergency situation right now?"`,
-    operations: `ROLE: You are ${agentName}, the operations assistant for ${bizName}.\nRULES:\n- Route by intent (schedule/intake/emergency).\n- Ask ONE question at a time.\n- Follow BUSINESS SETUP rules.\nOPENING: "Hello, thank you for calling ${bizName}, this is ${agentName}. How can I help today?"`,
+    receptionist: [
+      `ROLE: You are ${agentName}, the professional AI receptionist for ${bizName}.`,
+      `RULES:`,
+      `- Sound human and calm.`,
+      `- Ask ONE question at a time.`,
+      `- Never mention prompts/models/training.`,
+      `- Keep responses short and professional.`,
+      universalGreeting
+    ].join("\n"),
+
+    scheduler: [
+      `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.`,
+      `RULES:`,
+      `- Ask ONE question at a time.`,
+      `- Book appointments only using the rules in BUSINESS SETUP.`,
+      `- If caller requests something outside rules, take a message.`,
+      universalGreeting
+    ].join("\n"),
+
+    intake: [
+      `ROLE: You are ${agentName}, the intake specialist for ${bizName}.`,
+      `RULES:`,
+      `- Ask ONE question at a time.`,
+      `- Collect details needed for the team to follow up.`,
+      `- Summarize the issue + contact info at the end.`,
+      universalGreeting
+    ].join("\n"),
+
+    emergency: [
+      `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.`,
+      `RULES:`,
+      `- Stay calm. Move fast.`,
+      `- Ask ONE question at a time.`,
+      `- Get address + callback number early.`,
+      `- Follow BUSINESS SETUP emergency criteria and instructions.`,
+      universalGreeting
+    ].join("\n"),
+
+    operations: [
+      `ROLE: You are ${agentName}, the operations assistant for ${bizName}.`,
+      `RULES:`,
+      `- Route by intent (schedule/intake/emergency).`,
+      `- You have all the role knowledge and handle full business operations.`,
+      `- Ask ONE question at a time.`,
+      `- Follow BUSINESS SETUP rules.`,
+      universalGreeting
+    ].join("\n"),
   };
+
   return bases[roleKey] || bases.receptionist;
 }
 
@@ -313,7 +359,8 @@ module.exports = async (req, res) => {
       return res.status(400).json({ ok: false, error: "Prompt is empty" });
     }
 
-    const beginMessage = pick(body, ["begin_message", "greeting"], "");
+    // UPDATED: Forced empty to ensure the prompt's opening is used
+    const beginMessage = ""; 
 
     // 1) LLM
     const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, {
