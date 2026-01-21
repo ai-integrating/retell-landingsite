@@ -90,11 +90,22 @@ module.exports = async function handler(req, res) {
     // Accept either snake_case or camelCase to make Zap mapping easier
     const agent_id = pick(body, ["agent_id", "agentId"]);
     const to_phone_raw = pick(body, ["to_phone", "toPhone", "phone", "to"]);
+
+    // ✅ Support either Retell phone number ID (pn_...) OR a literal from_number (+1...)
     const from_phone_number_id = pick(body, [
       "from_phone_number_id",
       "fromPhoneNumberId",
       "phone_number_id",
       "phoneNumberId",
+    ]);
+
+    const from_number_raw = pick(body, [
+      "from_number",
+      "fromNumber",
+      "from_phone",
+      "fromPhone",
+      "caller_id",
+      "callerId",
     ]);
 
     const metadata = pick(body, ["metadata"], {});
@@ -119,16 +130,11 @@ module.exports = async function handler(req, res) {
       return okJson(res, 400, { ok: false, error: "Missing/invalid to_phone" });
     }
 
+    const from_number = cleanPhone(from_number_raw);
+
     // -------------------- RETELL OUTBOUND CALL --------------------
-    // IMPORTANT:
-    // - This endpoint assumes the agent already exists.
-    // - Best practice is to pass a from_phone_number_id that is already bound / approved for your agent/account.
-    // - If your Retell account allows agent-level default outbound number, you may omit from_phone_number_id.
-    //
-    // You MUST update the URL/path below to match Retell's current outbound API endpoint.
-    // Keep it in one place so it's easy to change if Retell updates.
     const RETELL_BASE = "https://api.retellai.com";
-    const OUTBOUND_PATH = "/create-phone-call"; // <-- adjust if your Retell docs use a different path
+    const OUTBOUND_PATH = "/create-phone-call"; // <-- may vary by Retell account/version
 
     const payload = {
       // Required
@@ -138,22 +144,20 @@ module.exports = async function handler(req, res) {
       // Optional: specify from number id if you want strict control
       ...(from_phone_number_id ? { from_phone_number_id } : {}),
 
-      // Helpful for routing + summaries
+      // ✅ If you don't have the pn_... id, allow a literal outbound caller ID number
+      ...(!from_phone_number_id && from_number ? { from_number } : {}),
+
       metadata: {
         ...(typeof metadata === "object" && metadata ? metadata : {}),
-        // Put your own trace fields here:
         idempotency_key: idempotency_key || undefined,
         outbound: true,
       },
 
-      // If Retell supports dynamic vars / context injection, include them.
-      // These names may differ in Retell—keep them here and adjust once.
       dynamic_variables:
         typeof dynamic_variables === "object" && dynamic_variables
           ? dynamic_variables
           : {},
 
-      // Also include a plain "context" object in case your agent prompt expects it via metadata
       context: typeof context === "object" && context ? context : {},
     };
 
@@ -162,8 +166,6 @@ module.exports = async function handler(req, res) {
       "Content-Type": "application/json",
     };
 
-    // If Retell supports explicit idempotency headers, this is where you’d add it.
-    // (Many APIs use "Idempotency-Key".)
     if (idempotency_key) {
       headers["Idempotency-Key"] = idempotency_key;
     }
@@ -171,7 +173,7 @@ module.exports = async function handler(req, res) {
     const resp = await axios.post(`${RETELL_BASE}${OUTBOUND_PATH}`, payload, {
       headers,
       timeout: 60_000,
-      validateStatus: () => true, // we’ll handle non-200s ourselves
+      validateStatus: () => true,
     });
 
     if (resp.status < 200 || resp.status >= 300) {
@@ -180,16 +182,22 @@ module.exports = async function handler(req, res) {
         error: "Retell outbound call failed",
         status: resp.status,
         data: resp.data,
+        sent: {
+          agent_id,
+          to_number,
+          from_phone_number_id: from_phone_number_id || null,
+          from_number: !from_phone_number_id ? (from_number || null) : null,
+        },
       });
     }
 
-    // Return the call object (or whatever Retell returns)
     return okJson(res, 200, {
       ok: true,
       mode: "outbound_call",
       agent_id,
       to_number,
       from_phone_number_id: from_phone_number_id || null,
+      from_number: !from_phone_number_id ? (from_number || null) : null,
       idempotency_key: idempotency_key || null,
       retell: resp.data,
     });
