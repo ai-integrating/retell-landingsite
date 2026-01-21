@@ -107,7 +107,7 @@ module.exports = async function handler(req, res) {
       pick(body, ["idempotency_key", "idempotencyKey"], "");
 
     if (!process.env.OUTBOUND_RETELL_API_KEY) {
-      return okJson(res, 500, { ok: false, error: "Missing RETELL_API_KEY" });
+      return okJson(res, 500, { ok: false, error: "Missing OUTBOUND_RETELL_API_KEY" });
     }
 
     if (!agent_id) {
