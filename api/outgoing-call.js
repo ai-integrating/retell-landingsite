@@ -106,7 +106,7 @@ module.exports = async function handler(req, res) {
       req.headers["x-idempotency-key"] ||
       pick(body, ["idempotency_key", "idempotencyKey"], "");
 
-    if (!process.env.RETELL_API_KEY) {
+    if (!process.env.OUTBOUND_RETELL_API_KEY) {
       return okJson(res, 500, { ok: false, error: "Missing RETELL_API_KEY" });
     }
 
@@ -127,7 +127,7 @@ module.exports = async function handler(req, res) {
     //
     // You MUST update the URL/path below to match Retell's current outbound API endpoint.
     // Keep it in one place so it's easy to change if Retell updates.
-    const RETELL_BASE = "https://api.retellai.com/v2";
+    const RETELL_BASE = "https://api.retellai.com";
     const OUTBOUND_PATH = "/create-phone-call"; // <-- adjust if your Retell docs use a different path
 
     const payload = {
@@ -158,7 +158,7 @@ module.exports = async function handler(req, res) {
     };
 
     const headers = {
-      Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
+      Authorization: `Bearer ${process.env.OUTBOUND_RETELL_API_KEY}`,
       "Content-Type": "application/json",
     };
 
