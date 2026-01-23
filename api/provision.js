@@ -461,8 +461,15 @@ module.exports = async (req, res) => {
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
 
-    // ✅ Operations should now reliably be premium because role normalization is fixed
+    // ✅ Default tier based on role
     const numberTier = tierForRole(roleKey);
+
+    // ✅ NEW: allow explicit override from Zap/Sheet request (premium/standard)
+    const numberTierOverride = String(pick(body, ["number_tier"], "")).toLowerCase().trim();
+    const numberTierFinal =
+      numberTierOverride === "premium" || numberTierOverride === "standard"
+        ? numberTierOverride
+        : numberTier;
 
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
@@ -472,7 +479,7 @@ module.exports = async (req, res) => {
           agent_id: agentId,
           business_name: bizName,
           idempotency_key: pick(body, ["idempotency_key", "job_id", "submission_id"], ""),
-          number_tier: numberTier,
+          number_tier: numberTierFinal,
         },
         { timeout: 20000 }
       );
@@ -490,7 +497,7 @@ module.exports = async (req, res) => {
       agent_id: agentId,
       phone_number: phoneNumber,
       phone_number_id: phoneNumberId,
-      number_tier: numberTier,
+      number_tier: numberTierFinal,
       voice_key: voiceKey,
       role: roleKey,
     });
