@@ -60,9 +60,21 @@ function retellHeaders() {
   return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 }
 
-// -------------------- ROLE NORMALIZATION --------------------
+// -------------------- ROLE NORMALIZATION (UPDATED: fuzzy matching for operations/full staff) --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
+
+  // ✅ IMPORTANT: Zap/Jotform values are often "Full Staff", "Operations (Full Staff)", "Julian - Operations", etc.
+  // Use fuzzy matching first so operations doesn't fall back to receptionist.
+  if (r.includes("full staff") || r.includes("full_staff") || r.includes("operations") || r.includes("operator"))
+    return "operations";
+  if (r.includes("lead") || r.includes("revival")) return "lead_revival";
+  if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
+  if (r.includes("intake")) return "intake";
+  if (r.includes("sched")) return "scheduler";
+  if (r.includes("reception") || r.includes("front")) return "receptionist";
+
+  // Exact map fallback (kept)
   const map = {
     receptionist: "receptionist",
     front_desk: "receptionist",
@@ -79,11 +91,13 @@ function normalizeRole(roleRaw) {
     full_staff: "operations",
     operator: "operations",
   };
+
   return map[r] || "receptionist";
 }
 
 // -------------------- NUMBER TIER --------------------
 function tierForRole(roleKey) {
+  // ✅ Operations MUST always be premium (this relies on normalizeRole() working correctly)
   const premium = new Set(["scheduler", "operations", "lead_revival"]);
   return premium.has(roleKey) ? "premium" : "standard";
 }
@@ -305,7 +319,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       inboundGreeting,
     ].join("\n"),
 
-    // ✅ Added explicit lead_revival base (so it isn't defaulting to receptionist)
     lead_revival: [
       `ROLE: You are ${agentName}, the lead revival / follow-up specialist for ${bizName}.`,
       `RULES:`,
@@ -319,8 +332,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     operations: [
       `ROLE: You are ${agentName}, the operations assistant for ${bizName}.`,
       `RULES:`,
-      `- Route by intent (schedule/intake/emergency).`,
-      `- You have all the role knowledge and handle full business operations.`,
+      `- Route by intent (schedule/intake/emergency) and handle full business operations.`,
       `- Ask ONE question at a time.`,
       `- Follow BUSINESS SETUP rules.`,
       inboundGreeting,
@@ -372,6 +384,8 @@ module.exports = async (req, res) => {
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
+
+    // ✅ IMPORTANT: normalizeRole now correctly recognizes "Full Staff / Operations" strings
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
 
     const { voiceKey, voiceId } = resolveVoice(body);
@@ -393,10 +407,9 @@ module.exports = async (req, res) => {
     let promptSource = "explicit_prompt";
 
     if (!promptToUse) {
-      // ✅ Build base prompt
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
-      // ✅ Append Outbound Mode only for the roles you listed
+      // ✅ Append Outbound Mode for the outbound-capable roles (includes operations)
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) {
         base = [base, outboundPromptBlock(agentName, bizName)].join("\n\n");
@@ -415,7 +428,6 @@ module.exports = async (req, res) => {
       return res.status(400).json({ ok: false, error: "Prompt is empty" });
     }
 
-    // UPDATED: Forced empty to ensure the prompt's opening is used
     const beginMessage = "";
 
     // 1) LLM
@@ -448,6 +460,8 @@ module.exports = async (req, res) => {
     // 3) Phone
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
+
+    // ✅ Operations should now reliably be premium because role normalization is fixed
     const numberTier = tierForRole(roleKey);
 
     if (mode === "agent_and_number") {
