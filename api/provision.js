@@ -1,5 +1,6 @@
 // /api/provision.js
 const axios = require("axios");
+const { kv } = require("@vercel/kv");
 
 // -------------------- CORS --------------------
 function setCors(res) {
@@ -60,12 +61,9 @@ function retellHeaders() {
   return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 }
 
-// -------------------- ROLE NORMALIZATION (UPDATED: fuzzy matching for operations/full staff) --------------------
+// -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
-
-  // ✅ IMPORTANT: Zap/Jotform values are often "Full Staff", "Operations (Full Staff)", "Julian - Operations", etc.
-  // Use fuzzy matching first so operations doesn't fall back to receptionist.
   if (r.includes("full staff") || r.includes("full_staff") || r.includes("operations") || r.includes("operator"))
     return "operations";
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
@@ -74,7 +72,6 @@ function normalizeRole(roleRaw) {
   if (r.includes("sched")) return "scheduler";
   if (r.includes("reception") || r.includes("front")) return "receptionist";
 
-  // Exact map fallback (kept)
   const map = {
     receptionist: "receptionist",
     front_desk: "receptionist",
@@ -97,7 +94,6 @@ function normalizeRole(roleRaw) {
 
 // -------------------- NUMBER TIER --------------------
 function tierForRole(roleKey) {
-  // ✅ Operations MUST always be premium (this relies on normalizeRole() working correctly)
   const premium = new Set(["scheduler", "operations", "lead_revival"]);
   return premium.has(roleKey) ? "premium" : "standard";
 }
@@ -112,7 +108,7 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-// -------------------- VOICE (Updated with Fallback) --------------------
+// -------------------- VOICE --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
   const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female"))
@@ -129,8 +125,6 @@ function resolveVoice(body) {
   };
 
   const voiceKey = `${gender}_${tone}`;
-
-  // Try mapped voice -> Try default voice env var -> Hard fallback to Marie (Retell default)
   const voiceId =
     VOICE_MAP[voiceKey] || process.env.DEFAULT_VOICE_ID || "11fb5674c35b44638d387693994e63f4";
 
@@ -256,7 +250,7 @@ function formatSetupBlock(setupText) {
   return `BUSINESS SETUP (owner answers from onboarding form — internal rules):\n${setupText}\n\nIMPORTANT:\n- Do NOT ask the caller these onboarding questions.\n- Use these answers as your operating instructions.`;
 }
 
-// -------------------- OUTBOUND MODE BLOCK (NEW) --------------------
+// -------------------- OUTBOUND MODE BLOCK --------------------
 function outboundPromptBlock(agentName, bizName) {
   return [
     `OUTBOUND CALL MODE (when YOU are placing a call)`,
@@ -275,9 +269,8 @@ function outboundPromptBlock(agentName, bizName) {
   ].join("\n");
 }
 
-// -------------------- PROMPT BASES (UPDATED) --------------------
+// -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ Make greeting explicitly INBOUND-only
   const inboundGreeting = `INBOUND OPENING (only when the caller called you): "Hello, this is ${agentName}, at ${bizName}. How can I help you today?"`;
 
   const bases = {
@@ -354,12 +347,66 @@ function buildBusinessContext(body) {
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
+// -------------------- IDEMPOTENCY HELPERS --------------------
+async function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function getSubmissionId(body) {
+  return String(
+    pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
+  )
+    .trim();
+}
+
+async function getExistingProvision(idemKey) {
+  const existing = await kv.get(idemKey);
+  if (existing && typeof existing === "object" && existing.agent_id) return existing;
+  return null;
+}
+
+async function acquireLock(lockKey, ttlSeconds = 120) {
+  // SETNX: only set if missing
+  return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds });
+}
+
+async function releaseLock(lockKey) {
+  try {
+    await kv.del(lockKey);
+  } catch {}
+}
+
+function normalizeProvisionRecord({
+  mode,
+  llmId,
+  agentId,
+  phoneNumber,
+  phoneNumberId,
+  numberTierFinal,
+  voiceKey,
+  roleKey,
+}) {
+  return {
+    mode,
+    llm_id: llmId,
+    agent_id: agentId,
+    phone_number: phoneNumber ?? "(not purchased)",
+    phone_number_id: phoneNumberId ?? null,
+    number_tier: numberTierFinal ?? null,
+    voice_key: voiceKey ?? null,
+    role: roleKey ?? null,
+    created_at: new Date().toISOString(),
+  };
+}
+
 // -------------------- HANDLER --------------------
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST")
     return res.status(405).json({ ok: false, error: "Method not allowed" });
+
+  let lockKey = null;
 
   try {
     const body = await readJsonBody(req);
@@ -374,6 +421,37 @@ module.exports = async (req, res) => {
       });
     }
 
+    // ✅ IDENTITY KEY (submission id) — REQUIRED
+    const submissionId = getSubmissionId(body);
+    if (!submissionId) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Missing jotform_submission_id / submission_id / idempotency_key / job_id. Provide a stable submission id for idempotency.",
+      });
+    }
+
+    const idemKey = `prov:${submissionId}`;
+    lockKey = `provlock:${submissionId}`;
+
+    // 0) Return existing provision result (idempotent)
+    const existing = await getExistingProvision(idemKey);
+    if (existing) {
+      return res.status(200).json({ ok: true, idempotent: true, ...existing });
+    }
+
+    // 0.5) Acquire lock (only one creator allowed)
+    const locked = await acquireLock(lockKey, 120);
+    if (!locked) {
+      // Someone else is creating it — wait briefly for record, then return it.
+      for (let i = 0; i < 8; i++) {
+        await sleep(600);
+        const after = await getExistingProvision(idemKey);
+        if (after) return res.status(200).json({ ok: true, idempotent: true, ...after });
+      }
+      return res.status(409).json({ ok: false, error: "Provisioning in progress, retry shortly" });
+    }
+
     const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false"))
       .toLowerCase() === "true";
     const mode = String(
@@ -385,12 +463,13 @@ module.exports = async (req, res) => {
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
 
-    // ✅ IMPORTANT: normalizeRole now correctly recognizes "Full Staff / Operations" strings
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
 
     const { voiceKey, voiceId } = resolveVoice(body);
     if (!voiceId) {
-      return res.status(400).json({ ok: false, error: "Voice ID missing", voiceKeyTried: voiceKey });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Voice ID missing", voiceKeyTried: voiceKey });
     }
 
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
@@ -409,7 +488,6 @@ module.exports = async (req, res) => {
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
-      // ✅ Append Outbound Mode for the outbound-capable roles (includes operations)
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) {
         base = [base, outboundPromptBlock(agentName, bizName)].join("\n\n");
@@ -429,6 +507,14 @@ module.exports = async (req, res) => {
     }
 
     const beginMessage = "";
+
+    // ✅ Number tier (compute before storing record)
+    const numberTier = tierForRole(roleKey);
+    const numberTierOverride = String(pick(body, ["number_tier"], "")).toLowerCase().trim();
+    const numberTierFinal =
+      numberTierOverride === "premium" || numberTierOverride === "standard"
+        ? numberTierOverride
+        : numberTier;
 
     // 1) LLM
     const llmResp = await axios.post(
@@ -450,27 +536,40 @@ module.exports = async (req, res) => {
         agent_name: `${bizName} - ${agentName} (${roleKey})`,
         voice_id: voiceId,
         response_engine: { type: "retell-llm", llm_id: llmId },
-        metadata: { business_name: bizName, agent_role: roleKey, mode, prompt_source: promptSource },
+        metadata: {
+          business_name: bizName,
+          agent_role: roleKey,
+          mode,
+          prompt_source: promptSource,
+          submission_id: submissionId, // helpful for debugging
+        },
       },
       { headers: retellHeaders(), timeout: 20000 }
     );
 
     const agentId = agentResp.data.agent_id || agentResp.data.id;
 
-    // 3) Phone
+    // 3) Phone (default)
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
 
-    // ✅ Default tier based on role
-    const numberTier = tierForRole(roleKey);
+    // ✅ Save mapping IMMEDIATELY after agent creation (this closes the duplicate window)
+    await kv.set(
+      idemKey,
+      normalizeProvisionRecord({
+        mode,
+        llmId,
+        agentId,
+        phoneNumber,
+        phoneNumberId,
+        numberTierFinal,
+        voiceKey,
+        roleKey,
+      }),
+      { ex: 60 * 60 * 24 * 30 } // 30 days
+    );
 
-    // ✅ NEW: allow explicit override from Zap/Sheet request (premium/standard)
-    const numberTierOverride = String(pick(body, ["number_tier"], "")).toLowerCase().trim();
-    const numberTierFinal =
-      numberTierOverride === "premium" || numberTierOverride === "standard"
-        ? numberTierOverride
-        : numberTier;
-
+    // 4) Optional phone purchase
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
       const buyResp = await axios.post(
@@ -478,7 +577,9 @@ module.exports = async (req, res) => {
         {
           agent_id: agentId,
           business_name: bizName,
-          idempotency_key: pick(body, ["idempotency_key", "job_id", "submission_id"], ""),
+          // ✅ pass the SAME stable idempotency key
+          idempotency_key: submissionId,
+          submission_id: submissionId,
           number_tier: numberTierFinal,
         },
         { timeout: 20000 }
@@ -487,11 +588,29 @@ module.exports = async (req, res) => {
       if (buyResp?.data?.ok) {
         phoneNumber = buyResp.data.phone_number;
         phoneNumberId = buyResp.data.phone_number_id;
+
+        // ✅ Update stored record with phone info
+        await kv.set(
+          idemKey,
+          normalizeProvisionRecord({
+            mode,
+            llmId,
+            agentId,
+            phoneNumber,
+            phoneNumberId,
+            numberTierFinal,
+            voiceKey,
+            roleKey,
+          }),
+          { ex: 60 * 60 * 24 * 30 }
+        );
       }
     }
 
+    // ✅ Return the same shape (plus idempotency info)
     return res.status(200).json({
       ok: true,
+      idempotent: false,
       mode,
       llm_id: llmId,
       agent_id: agentId,
@@ -500,6 +619,7 @@ module.exports = async (req, res) => {
       number_tier: numberTierFinal,
       voice_key: voiceKey,
       role: roleKey,
+      submission_id: submissionId,
     });
   } catch (err) {
     console.error("provision failed:", err?.message || err);
@@ -508,5 +628,7 @@ module.exports = async (req, res) => {
       error: "Provisioning Failed",
       details: err?.response?.data || err?.message,
     });
+  } finally {
+    if (lockKey) await releaseLock(lockKey);
   }
 };
