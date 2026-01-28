@@ -4,6 +4,7 @@
 // ✅ Does NOT buy numbers
 // ✅ Safe to call from Zapier / your portal
 // ✅ Enforces outbound entitlements + daily + concurrent limits via Vercel KV
+// ✅ Retry-safe via Idempotency-Key (Zapier retries won't double count)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -55,12 +56,13 @@ function cleanPhone(phone) {
   return digits ? `+${digits}` : "";
 }
 
-// ✅ Slightly more Zapier-tolerant pick (handles {output:"..."})
+// ✅ Zapier-tolerant pick (handles {output:"..."} shapes)
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     let v = obj?.[k];
     if (v && typeof v === "object" && "output" in v) v = v.output;
     if (v === undefined || v === null) continue;
+
     if (typeof v === "string") {
       const s = v.trim();
       if (!s) continue;
@@ -198,35 +200,48 @@ module.exports = async function handler(req, res) {
     const outbound_hours_start = toInt(pick(body, ["outbound_hours_start"], 9), 9);
     const outbound_hours_end = toInt(pick(body, ["outbound_hours_end"], 18), 18);
 
+    // -------------------- IDEMPOTENCY DEDUPE (prevents double counts on retries) --------------------
+    const idemKey = idempotency_key ? `outbound:${agent_id}:idem:${idempotency_key}` : null;
+    if (idemKey) {
+      const prior = await kv.get(idemKey);
+      if (prior && typeof prior === "object" && prior.ok) {
+        return okJson(res, 200, { ...prior, idempotent: true });
+      }
+      // Reserve for 10 minutes (so simultaneous retries don't both proceed)
+      await kv.set(idemKey, { reserved: true }, { ex: 60 * 10 });
+    }
+
     if (!premium_outbound_enabled) {
-      return okJson(res, 403, {
-        ok: false,
-        blocked: true,
-        reason: "outbound_not_enabled",
-      });
+      const blocked = { ok: false, blocked: true, reason: "outbound_not_enabled" };
+      if (idemKey) await kv.set(idemKey, blocked, { ex: 60 * 10 });
+      return okJson(res, 403, blocked);
     }
 
     if (daily_call_limit <= 0 || concurrent_limit <= 0) {
-      return okJson(res, 403, {
+      const blocked = {
         ok: false,
         blocked: true,
         reason: "limits_not_configured",
         daily_call_limit,
         concurrent_limit,
-      });
+      };
+      if (idemKey) await kv.set(idemKey, blocked, { ex: 60 * 10 });
+      return okJson(res, 403, blocked);
     }
 
     // Business-hours gate
     const lp = localParts(timezone);
     if (lp.hh < outbound_hours_start || lp.hh >= outbound_hours_end) {
-      return okJson(res, 403, {
+      const blocked = {
         ok: false,
         blocked: true,
         reason: "outside_outbound_hours",
         timezone: lp.tz,
         local_hour: lp.hh,
         allowed: { start: outbound_hours_start, end: outbound_hours_end },
-      });
+      };
+      if (idemKey) await kv.set(idemKey, blocked, { ex: 60 * 10 });
+      return okJson(res, 403, blocked);
     }
 
     // KV keys
@@ -243,14 +258,17 @@ module.exports = async function handler(req, res) {
 
     if (dailyCount > daily_call_limit) {
       await kv.decr(dailyKey);
-      return okJson(res, 429, {
+      const blocked = {
         ok: false,
         blocked: true,
         reason: "daily_limit_reached",
-        dailyCount,
+        calls_today: dailyCount,
         daily_call_limit,
         day,
-      });
+        timezone: lp.tz,
+      };
+      if (idemKey) await kv.set(idemKey, blocked, { ex: 60 * 10 });
+      return okJson(res, 429, blocked);
     }
 
     // Concurrent counter (atomic)
@@ -263,13 +281,18 @@ module.exports = async function handler(req, res) {
     if (active > concurrent_limit) {
       await kv.decr(activeKey);
       await kv.decr(dailyKey); // rollback daily because we won't place call
-      return okJson(res, 429, {
+      const blocked = {
         ok: false,
         blocked: true,
         reason: "concurrent_limit_reached",
-        active,
+        active_now: active,
         concurrent_limit,
-      });
+        calls_today: dailyCount - 1, // rolled back
+        day,
+        timezone: lp.tz,
+      };
+      if (idemKey) await kv.set(idemKey, blocked, { ex: 60 * 10 });
+      return okJson(res, 429, blocked);
     }
 
     countersIncremented = true;
@@ -321,7 +344,7 @@ module.exports = async function handler(req, res) {
         } catch {}
       }
 
-      return okJson(res, 502, {
+      const failed = {
         ok: false,
         error: "Retell outbound call failed",
         status: resp.status,
@@ -332,14 +355,17 @@ module.exports = async function handler(req, res) {
           from_phone_number_id: from_phone_number_id || null,
           from_number: !from_phone_number_id ? (from_number || null) : null,
         },
-      });
+      };
+
+      if (idemKey) await kv.set(idemKey, failed, { ex: 60 * 10 });
+      return okJson(res, 502, failed);
     }
 
     // NOTE: We are NOT decrementing activeKey here because the call is now in progress.
     // We rely on the 10-minute TTL as a safety guard.
     // Later, you can decrement activeKey on a Retell "call ended" webhook.
 
-    return okJson(res, 200, {
+    const success = {
       ok: true,
       mode: "outbound_call",
       agent_id,
@@ -347,14 +373,26 @@ module.exports = async function handler(req, res) {
       from_phone_number_id: from_phone_number_id || null,
       from_number: !from_phone_number_id ? (from_number || null) : null,
       idempotency_key: idempotency_key || null,
+
+      // ✅ These let Zap update your Sheet:
+      calls_today: dailyCount,
+      active_now: active,
+
       limits: {
-        day: localDateKey(lp.tz),
+        day,
         timezone: lp.tz,
         daily_call_limit,
         concurrent_limit,
+        outbound_hours_start,
+        outbound_hours_end,
       },
+
       retell: resp.data,
-    });
+    };
+
+    if (idemKey) await kv.set(idemKey, success, { ex: 60 * 10 });
+
+    return okJson(res, 200, success);
   } catch (err) {
     // If we incremented counters but crashed before finishing, rollback best-effort
     if (countersIncremented && activeKey && dailyKey) {
