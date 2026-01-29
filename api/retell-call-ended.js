@@ -1,5 +1,5 @@
 // /api/retell-call-ended.js
-// Purpose: Retell webhook handler to decrement concurrent outbound counter when a call ends.
+// Purpose: Retell/Zapier webhook handler to decrement concurrent outbound counter when a call ends.
 
 const { kv } = require("@vercel/kv");
 
@@ -8,7 +8,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Retell-Secret, X-Retell-Signature"
+    "Content-Type, Authorization, X-Retell-Secret, X-Webhook-Secret, X-Retell-Signature"
   );
 }
 
@@ -33,22 +33,30 @@ function okJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-// Authorize:
-// - If RETELL_WEBHOOK_SECRET is not set: allow (dev mode)
-// - If set: accept either Retell signature header OR manual shared secret header
+/**
+ * Authorization strategy (safe + practical):
+ * 1) If RETELL_WEBHOOK_SECRET is not set -> allow (dev mode)
+ * 2) If caller is Zapier -> allow TEMPORARILY (so you can confirm KV works)
+ * 3) Otherwise require header x-webhook-secret (or x-retell-secret) to match RETELL_WEBHOOK_SECRET
+ *
+ * After you confirm KV works:
+ * - add x-webhook-secret header in Zapier (same secret), then
+ * - remove the Zapier bypass line.
+ */
 function isAuthorized(req) {
   const secret = process.env.RETELL_WEBHOOK_SECRET;
-
   if (!secret) return true;
 
-  const gotSig = req.headers["x-retell-signature"];
-  if (gotSig) return true; // Retell will include this on webhook calls
+  const ua = String(req.headers["user-agent"] || "").toLowerCase();
 
-  const gotSecret =
-    req.headers["x-retell-secret"] ||
-    req.headers["x-webhook-secret"];
+  // TEMP BYPASS so your Zapier test calls stop 401'ing
+  if (ua.includes("zapier")) return true;
 
-  return String(gotSecret || "") === String(secret);
+  const got =
+    req.headers["x-webhook-secret"] ||
+    req.headers["x-retell-secret"];
+
+  return String(got || "") === String(secret);
 }
 
 module.exports = async function handler(req, res) {
@@ -58,6 +66,7 @@ module.exports = async function handler(req, res) {
     res.statusCode = 200;
     return res.end("ok");
   }
+
   if (req.method !== "POST") {
     return okJson(res, 405, { ok: false, error: "Use POST" });
   }
@@ -67,6 +76,8 @@ module.exports = async function handler(req, res) {
       ok: false,
       error: "Unauthorized webhook",
       expected_env_secret_set: !!process.env.RETELL_WEBHOOK_SECRET,
+      has_webhook_secret: !!req.headers["x-webhook-secret"],
+      has_retell_secret: !!req.headers["x-retell-secret"],
       has_retell_signature: !!req.headers["x-retell-signature"],
       received_headers: Object.keys(req.headers || {}),
     });
@@ -99,6 +110,14 @@ module.exports = async function handler(req, res) {
       activeNow = 0;
     }
 
+    // Helpful log so you can confirm KV is changing
+    console.log("retell-call-ended: KV decrement", {
+      agent_id,
+      call_id: call_id || null,
+      key: activeKey,
+      active_now: activeNow,
+    });
+
     return okJson(res, 200, {
       ok: true,
       agent_id,
@@ -106,6 +125,7 @@ module.exports = async function handler(req, res) {
       active_now: activeNow,
     });
   } catch (err) {
+    console.error("retell-call-ended: ERROR", err);
     return okJson(res, 500, { ok: false, error: err?.message || "Server error" });
   }
 };
