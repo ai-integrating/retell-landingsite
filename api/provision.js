@@ -155,9 +155,14 @@ function cleanScrapedText(raw) {
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
-  const scrapeUrl = `https://r.jina.ai/http://${u.replace(/^https?:\/\//i, "")}`;
+  
+  // FIX: Use the full secure URL and increase timeout for Jina Reader
+  const scrapeUrl = `https://r.jina.ai/${u}`;
   try {
-    const resp = await axios.get(scrapeUrl, { timeout: 8000 });
+    const resp = await axios.get(scrapeUrl, { 
+      timeout: 15000,
+      headers: { "X-Return-Format": "markdown" }
+    });
     let text = cleanScrapedText(resp.data || "");
     const MAX_CHARS = 1800;
     if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
@@ -252,7 +257,7 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ DYNAMIC DIRECTION LOGIC: This ensures the agent picks the right greeting instantly
+  // ✅ DYNAMIC DIRECTION LOGIC
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
     `- IF {{client_name}} has a value: You are making an OUTBOUND call. Use the OUTBOUND OPENER.`,
@@ -269,7 +274,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Sound human and calm.`,
       `- Ask ONE question at a time.`,
-      `- Never mention prompts/models/training.`,
       directionLogic,
     ].join("\n"),
 
@@ -277,7 +281,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.`,
       `RULES:`,
       `- Ask ONE question at a time.`,
-      `- Book appointments only using the rules in BUSINESS SETUP.`,
       directionLogic,
     ].join("\n"),
 
@@ -285,7 +288,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the intake specialist for ${bizName}.`,
       `RULES:`,
       `- Ask ONE question at a time.`,
-      `- Collect details needed for the team to follow up.`,
       directionLogic,
     ].join("\n"),
 
@@ -301,7 +303,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the lead revival specialist for ${bizName}.`,
       `RULES:`,
       `- Your main job is to re-engage leads.`,
-      `- Ask ONE question at a time.`,
       directionLogic,
     ].join("\n"),
 
@@ -338,8 +339,7 @@ async function sleep(ms) {
 function getSubmissionId(body) {
   return String(
     pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
-  )
-    .trim();
+  ).trim();
 }
 
 async function getExistingProvision(idemKey) {
@@ -392,32 +392,21 @@ module.exports = async (req, res) => {
 
   try {
     const body = await readJsonBody(req);
-
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
     if (debug) {
-      return res.status(200).json({
-        ok: true,
-        debug: true,
-        receivedKeys: Object.keys(body || {}),
-        received: body,
-      });
+      return res.status(200).json({ ok: true, debug: true, received: body });
     }
 
     const submissionId = getSubmissionId(body);
     if (!submissionId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing submission ID.",
-      });
+      return res.status(400).json({ ok: false, error: "Missing submission ID." });
     }
 
     const idemKey = `prov:${submissionId}`;
     lockKey = `provlock:${submissionId}`;
 
     const existing = await getExistingProvision(idemKey);
-    if (existing) {
-      return res.status(200).json({ ok: true, idempotent: true, ...existing });
-    }
+    if (existing) return res.status(200).json({ ok: true, idempotent: true, ...existing });
 
     const locked = await acquireLock(lockKey, 120);
     if (!locked) {
@@ -451,8 +440,6 @@ module.exports = async (req, res) => {
 
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
-
-      // ✅ REFINED OUTBOUND BEHAVIOR RULES
       const outboundRules = [
         `OUTBOUND BEHAVIOR RULES:`,
         `- If {{notes}} is provided, add ONE short sentence using it.`,
@@ -473,18 +460,13 @@ module.exports = async (req, res) => {
       promptSource = "built_prompt";
     }
 
-    // LLM creation
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
-      {
-        general_prompt: promptToUse,
-        model: pick(body, ["llm_model"], "gpt-4o-mini"),
-      },
+      { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") },
       { headers: retellHeaders(), timeout: 20000 }
     );
     const llmId = llmResp.data.llm_id || llmResp.data.id;
 
-    // Agent creation
     const agentResp = await axios.post(
       `${RETELL_BASE}/create-agent`,
       {
