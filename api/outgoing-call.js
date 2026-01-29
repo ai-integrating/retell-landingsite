@@ -149,10 +149,6 @@ module.exports = async function handler(req, res) {
     const agent_id = pick(body, ["agent_id", "agentId"]);
     const to_phone_raw = pick(body, ["to_phone", "toPhone", "phone", "to"]);
 
-    // You may pass either:
-    // - from_phone_number_id (Retell id pn_...)
-    // - OR an E164 from_number (+1...)
-    // - OR digits (we'll convert to E164 and treat as from_number)
     const from_phone_number_id_raw = pick(body, [
       "from_phone_number_id",
       "fromPhoneNumberId",
@@ -230,8 +226,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // -------------------- IDEMPOTENCY DEDUPE (Zap retries) --------------------
-    // If Zap retries the same call, we don’t want to increment counters twice.
+    // -------------------- IDEMPOTENCY DEDUPE --------------------
     const dedupeKey =
       idempotency_key && String(idempotency_key).trim()
         ? `outbound:dedupe:${agent_id}:${String(idempotency_key).trim()}`
@@ -249,11 +244,8 @@ module.exports = async function handler(req, res) {
     dailyKey = `outbound:${agent_id}:${day}:count`;
     activeKey = `outbound:${agent_id}:active`;
 
-    // Daily counter
     const dailyCount = await kv.incr(dailyKey);
-    if (dailyCount === 1) {
-      await kv.expire(dailyKey, 60 * 60 * 48); // 48h
-    }
+    if (dailyCount === 1) await kv.expire(dailyKey, 60 * 60 * 48);
 
     if (dailyCount > daily_call_limit) {
       await kv.decr(dailyKey);
@@ -267,11 +259,8 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Concurrent counter
     const activeNow = await kv.incr(activeKey);
-    if (activeNow === 1) {
-      await kv.expire(activeKey, 60 * 10); // 10 minutes TTL safety
-    }
+    if (activeNow === 1) await kv.expire(activeKey, 60 * 10);
 
     if (activeNow > concurrent_limit) {
       await kv.decr(activeKey);
@@ -287,11 +276,7 @@ module.exports = async function handler(req, res) {
 
     countersIncremented = true;
 
-    // -------------------- FROM NUMBER LOGIC (fixes your sheet value issues) --------------------
-    // Priority:
-    // 1) If from_phone_number_id looks like pn_... => use it
-    // 2) Else if from_phone_number_id is digits/+... => treat as from_number (caller ID)
-    // 3) Else fallback to from_number_raw
+    // -------------------- FROM NUMBER LOGIC --------------------
     let from_phone_number_id = null;
     let from_number = null;
 
@@ -299,7 +284,6 @@ module.exports = async function handler(req, res) {
       if (looksLikeRetellPhoneId(from_phone_number_id_raw)) {
         from_phone_number_id = String(from_phone_number_id_raw).trim();
       } else {
-        // if they accidentally stored E164/digits in the "...Sid" column, treat it as from_number
         const maybePhone = cleanPhone(from_phone_number_id_raw);
         if (maybePhone) from_number = maybePhone;
       }
@@ -311,9 +295,6 @@ module.exports = async function handler(req, res) {
     }
 
     // -------------------- RETELL OUTBOUND CALL --------------------
-    const RETELL_BASE = "https://api.retellai.com";
-    const OUTBOUND_PATH = "/create-phone-call";
-
     const payload = {
       agent_id,
       to_number,
@@ -336,14 +317,16 @@ module.exports = async function handler(req, res) {
 
     if (idempotency_key) headers["Idempotency-Key"] = idempotency_key;
 
-    const resp = await axios.post(`${RETELL_BASE}${OUTBOUND_PATH}`, payload, {
+    const resp = await axios.post("https://api.retellai.com/create-phone-call", payload, {
       headers,
       timeout: 60_000,
       validateStatus: () => true,
     });
 
     if (resp.status < 200 || resp.status >= 300) {
-      // rollback counters on failure
+      // 🚨 LOG THE SPECIFIC RETELL ERROR TO VERCEL
+      console.error("RETELL API ERROR DETAILS:", JSON.stringify(resp.data, null, 2));
+
       if (countersIncremented) {
         try {
           await kv.decr(activeKey);
@@ -354,48 +337,26 @@ module.exports = async function handler(req, res) {
       return okJson(res, 502, {
         ok: false,
         error: "Retell outbound call failed",
+        retell_reason: resp.data, // This helps Zapier tell you what's wrong
         status: resp.status,
-        data: resp.data,
-        sent: {
-          agent_id,
-          to_number,
-          from_phone_number_id: from_phone_number_id || null,
-          from_number: !from_phone_number_id ? (from_number || null) : null,
-        },
+        sent_payload: { agent_id, to_number, from_number, from_phone_number_id }
       });
     }
 
     const responsePayload = {
       ok: true,
       mode: "outbound_call",
-      agent_id,
-      to_number,
-      from_phone_number_id: from_phone_number_id || null,
-      from_number: !from_phone_number_id ? (from_number || null) : null,
-      idempotency_key: idempotency_key || null,
-      limits: {
-        day,
-        timezone: lp.tz,
-        daily_call_limit,
-        concurrent_limit,
-        calls_today: dailyCount,
-        active_now: activeNow,
-        outbound_hours: { start: outbound_hours_start, end: outbound_hours_end },
-      },
       retell: resp.data,
+      limits: { calls_today: dailyCount, active_now: activeNow }
     };
 
-    // Store dedupe record (so retries return same result without double counting)
     if (dedupeKey) {
-      await kv.set(dedupeKey, responsePayload, { ex: 60 * 60 * 6 }); // 6h
+      await kv.set(dedupeKey, responsePayload, { ex: 60 * 60 * 6 });
     }
-
-    // NOTE: activeKey is NOT decremented here (call is in progress).
-    // We rely on the 10-min TTL safety until you add a "call ended" webhook decrement.
 
     return okJson(res, 200, responsePayload);
   } catch (err) {
-    if (countersIncremented && activeKey && dailyKey) {
+    if (countersIncremented) {
       try {
         await kv.decr(activeKey);
         await kv.decr(dailyKey);
