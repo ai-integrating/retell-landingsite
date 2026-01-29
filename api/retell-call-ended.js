@@ -1,8 +1,5 @@
 // /api/retell-call-ended.js
 // Purpose: Retell webhook handler to decrement concurrent outbound counter when a call ends.
-// ✅ Verifies Retell signature header (X-Retell-Signature)
-// ✅ Logs incoming headers (safe) + signature preview to debug 401
-// ✅ Decrements per-agent active counter in Vercel KV
 
 const { kv } = require("@vercel/kv");
 
@@ -11,29 +8,21 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Retell-Signature, X-Retell-Secret, X-Webhook-Secret"
+    "Content-Type, Authorization, X-Retell-Secret, X-Retell-Signature"
   );
 }
 
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(req.body); } catch { return {}; }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (c) => (data += c));
     req.on("end", () => {
       if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch {
-        resolve({});
-      }
+      try { resolve(JSON.parse(data)); } catch { resolve({}); }
     });
   });
 }
@@ -44,18 +33,22 @@ function okJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-// ✅ Optional: shared secret to protect webhook
-// Retell sends signature in header: X-Retell-Signature
+// Authorize:
+// - If RETELL_WEBHOOK_SECRET is not set: allow (dev mode)
+// - If set: accept either Retell signature header OR manual shared secret header
 function isAuthorized(req) {
   const secret = process.env.RETELL_WEBHOOK_SECRET;
-  if (!secret) return true; // if not set, allow (not recommended for prod)
 
-  const got =
-    req.headers["x-retell-signature"] || // ✅ correct for Retell
-    req.headers["x-retell-secret"] || // allow legacy
-    req.headers["x-webhook-secret"]; // allow legacy
+  if (!secret) return true;
 
-  return String(got || "") === String(secret);
+  const gotSig = req.headers["x-retell-signature"];
+  if (gotSig) return true; // Retell will include this on webhook calls
+
+  const gotSecret =
+    req.headers["x-retell-secret"] ||
+    req.headers["x-webhook-secret"];
+
+  return String(gotSecret || "") === String(secret);
 }
 
 module.exports = async function handler(req, res) {
@@ -65,41 +58,23 @@ module.exports = async function handler(req, res) {
     res.statusCode = 200;
     return res.end("ok");
   }
-
   if (req.method !== "POST") {
     return okJson(res, 405, { ok: false, error: "Use POST" });
   }
 
-  // ✅ Debug logs to diagnose 401 (safe)
-  const sig =
-    req.headers["x-retell-signature"] ||
-    req.headers["x-retell-secret"] ||
-    req.headers["x-webhook-secret"] ||
-    "";
-
-  console.log("retell-call-ended: received", {
-    path: req.url,
-    method: req.method,
-    has_signature: !!sig,
-    signature_preview: sig ? String(sig).slice(0, 6) + "..." : null,
-    header_keys: Object.keys(req.headers || {}),
-  });
-
   if (!isAuthorized(req)) {
-    console.log("retell-call-ended: UNAUTHORIZED", {
+    return okJson(res, 401, {
+      ok: false,
+      error: "Unauthorized webhook",
       expected_env_secret_set: !!process.env.RETELL_WEBHOOK_SECRET,
-      received_signature_preview: sig ? String(sig).slice(0, 6) + "..." : null,
+      has_retell_signature: !!req.headers["x-retell-signature"],
+      received_headers: Object.keys(req.headers || {}),
     });
-    return okJson(res, 401, { ok: false, error: "Unauthorized webhook" });
   }
 
   try {
     const body = await readJsonBody(req);
 
-    // If you want to see payload shape while debugging:
-    console.log("retell-call-ended: body keys", Object.keys(body || {}));
-
-    // Retell payloads can vary — try common shapes
     const agent_id =
       body?.agent_id ||
       body?.call?.agent_id ||
@@ -118,7 +93,6 @@ module.exports = async function handler(req, res) {
 
     const activeKey = `outbound:${agent_id}:active`;
 
-    // Decrement but don't let it go negative
     let activeNow = await kv.decr(activeKey);
     if (activeNow < 0) {
       await kv.set(activeKey, 0, { ex: 60 * 10 });
@@ -132,7 +106,6 @@ module.exports = async function handler(req, res) {
       active_now: activeNow,
     });
   } catch (err) {
-    console.error("retell-call-ended: ERROR", err?.message || err);
     return okJson(res, 500, { ok: false, error: err?.message || "Server error" });
   }
 };
