@@ -203,7 +203,7 @@ function buildGlobalSetupFromFields(body) {
     `Receptionist Instructions:`,
     `- Be warm, calm, and professional.`,
     `- Ask one question at a time.`,
-    `- Collect: caller name, callback number, and a brief reason for calling.`,
+    `- Collect: caller name, callback number, and a brief hair-service goal.`,
     `- Do NOT give exact pricing or guarantees; offer to have the team follow up.`,
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
@@ -250,28 +250,18 @@ function formatSetupBlock(setupText) {
   return `BUSINESS SETUP (owner answers from onboarding form — internal rules):\n${setupText}\n\nIMPORTANT:\n- Do NOT ask the caller these onboarding questions.\n- Use these answers as your operating instructions.`;
 }
 
-// -------------------- OUTBOUND MODE BLOCK --------------------
-function outboundPromptBlock(agentName, bizName) {
-  return [
-    `OUTBOUND CALL MODE (when YOU are placing a call)`,
-    `If this call is outbound (you are calling someone), do NOT say “Thanks for calling” and do NOT use the inbound opening.`,
-    `Use this exact opener instead:`,
-    `"Hi {{client_name}}, this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
-    ``,
-    `Then:`,
-    `- If {{notes}} is provided, add ONE short sentence using it.`,
-    `- Ask ONE clear question to move the call forward.`,
-    ``,
-    `Fallbacks:`,
-    `- If {{client_name}} is blank: say “Hi there,”`,
-    `- If {{reason_for_call}} is blank: say “about something you requested.”`,
-    `- If {{notes}} is blank: skip it.`,
-  ].join("\n");
-}
-
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  const inboundGreeting = `INBOUND OPENING (only when the caller called you): "Hello, this is ${agentName}, at ${bizName}. How can I help you today?"`;
+  // ✅ DYNAMIC DIRECTION LOGIC: This ensures the agent picks the right greeting instantly
+  const directionLogic = [
+    `CRITICAL CALL-START LOGIC:`,
+    `- IF {{client_name}} has a value: You are making an OUTBOUND call. Use the OUTBOUND OPENER.`,
+    `- IF {{client_name}} is empty or "Hi there": You are receiving an INBOUND call. Use the INBOUND OPENER.`,
+    `- NEVER ask "How can I help you?" if you are the one calling.`,
+    ``,
+    `INBOUND OPENER: "Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
+    `OUTBOUND OPENER: "Hi {{client_name}}, this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
+  ].join("\n");
 
   const bases = {
     receptionist: [
@@ -280,8 +270,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Sound human and calm.`,
       `- Ask ONE question at a time.`,
       `- Never mention prompts/models/training.`,
-      `- Keep responses short and professional.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
 
     scheduler: [
@@ -289,8 +278,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Ask ONE question at a time.`,
       `- Book appointments only using the rules in BUSINESS SETUP.`,
-      `- If caller requests something outside rules, take a message.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
 
     intake: [
@@ -298,8 +286,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Ask ONE question at a time.`,
       `- Collect details needed for the team to follow up.`,
-      `- Summarize the issue + contact info at the end.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
 
     emergency: [
@@ -307,19 +294,15 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Stay calm. Move fast.`,
       `- Ask ONE question at a time.`,
-      `- Get address + callback number early.`,
-      `- Follow BUSINESS SETUP emergency criteria and instructions.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
 
     lead_revival: [
-      `ROLE: You are ${agentName}, the lead revival / follow-up specialist for ${bizName}.`,
+      `ROLE: You are ${agentName}, the lead revival specialist for ${bizName}.`,
       `RULES:`,
-      `- Your main job is to re-engage leads and follow up politely.`,
+      `- Your main job is to re-engage leads.`,
       `- Ask ONE question at a time.`,
-      `- Confirm interest, timing, and next step (schedule / message / callback).`,
-      `- Keep it short, friendly, and confident.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
 
     operations: [
@@ -328,7 +311,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Route by intent (schedule/intake/emergency) and handle full business operations.`,
       `- Ask ONE question at a time.`,
       `- Follow BUSINESS SETUP rules.`,
-      inboundGreeting,
+      directionLogic,
     ].join("\n"),
   };
 
@@ -366,7 +349,6 @@ async function getExistingProvision(idemKey) {
 }
 
 async function acquireLock(lockKey, ttlSeconds = 120) {
-  // SETNX: only set if missing
   return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds });
 }
 
@@ -421,64 +403,46 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ✅ IDENTITY KEY (submission id) — REQUIRED
     const submissionId = getSubmissionId(body);
     if (!submissionId) {
       return res.status(400).json({
         ok: false,
-        error:
-          "Missing jotform_submission_id / submission_id / idempotency_key / job_id. Provide a stable submission id for idempotency.",
+        error: "Missing submission ID.",
       });
     }
 
     const idemKey = `prov:${submissionId}`;
     lockKey = `provlock:${submissionId}`;
 
-    // 0) Return existing provision result (idempotent)
     const existing = await getExistingProvision(idemKey);
     if (existing) {
       return res.status(200).json({ ok: true, idempotent: true, ...existing });
     }
 
-    // 0.5) Acquire lock (only one creator allowed)
     const locked = await acquireLock(lockKey, 120);
     if (!locked) {
-      // Someone else is creating it — wait briefly for record, then return it.
       for (let i = 0; i < 8; i++) {
         await sleep(600);
         const after = await getExistingProvision(idemKey);
         if (after) return res.status(200).json({ ok: true, idempotent: true, ...after });
       }
-      return res.status(409).json({ ok: false, error: "Provisioning in progress, retry shortly" });
+      return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
 
-    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false"))
-      .toLowerCase() === "true";
-    const mode = String(
-      pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")
-    )
-      .toLowerCase()
-      .trim();
+    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
 
-    const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
-    const agentName = pick(body, ["agent_name", "a_name", "name"], "Allie");
+    const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
+    const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
 
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
-
     const { voiceKey, voiceId } = resolveVoice(body);
-    if (!voiceId) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Voice ID missing", voiceKeyTried: voiceKey });
-    }
 
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
     const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
-    const explicitGlobalSetup = getGlobalSetupBlock(body);
-    const generatedGlobalSetup = buildGlobalSetupFromFields(body);
-    const globalSetup = explicitGlobalSetup || generatedGlobalSetup;
+    const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
 
@@ -488,146 +452,76 @@ module.exports = async (req, res) => {
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
+      // ✅ REFINED OUTBOUND BEHAVIOR RULES
+      const outboundRules = [
+        `OUTBOUND BEHAVIOR RULES:`,
+        `- If {{notes}} is provided, add ONE short sentence using it.`,
+        `- Fallback for blank name: say “Hi there,”`,
+        `- Fallback for blank reason: say “calling about something you requested.”`,
+        `- Ask ONE clear question to move the call forward.`,
+      ].join("\n");
+
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) {
-        base = [base, outboundPromptBlock(agentName, bizName)].join("\n\n");
+        base = [base, outboundRules].join("\n\n");
       }
 
       const ctx = buildBusinessContext(body);
-      const websiteSection = scrape.ok
-        ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
-        : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
+      const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
       promptToUse = [base, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
 
-    if (!promptToUse?.trim()) {
-      return res.status(400).json({ ok: false, error: "Prompt is empty" });
-    }
-
-    const beginMessage = "";
-
-    // ✅ Number tier (compute before storing record)
-    const numberTier = tierForRole(roleKey);
-    const numberTierOverride = String(pick(body, ["number_tier"], "")).toLowerCase().trim();
-    const numberTierFinal =
-      numberTierOverride === "premium" || numberTierOverride === "standard"
-        ? numberTierOverride
-        : numberTier;
-
-    // 1) LLM
+    // LLM creation
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
       {
         general_prompt: promptToUse,
         model: pick(body, ["llm_model"], "gpt-4o-mini"),
-        begin_message: beginMessage || undefined,
       },
       { headers: retellHeaders(), timeout: 20000 }
     );
-
     const llmId = llmResp.data.llm_id || llmResp.data.id;
 
-    // 2) Agent
+    // Agent creation
     const agentResp = await axios.post(
       `${RETELL_BASE}/create-agent`,
       {
         agent_name: `${bizName} - ${agentName} (${roleKey})`,
         voice_id: voiceId,
         response_engine: { type: "retell-llm", llm_id: llmId },
-        metadata: {
-          business_name: bizName,
-          agent_role: roleKey,
-          mode,
-          prompt_source: promptSource,
-          submission_id: submissionId, // helpful for debugging
-        },
+        metadata: { business_name: bizName, agent_role: roleKey, submission_id: submissionId },
       },
       { headers: retellHeaders(), timeout: 20000 }
     );
-
     const agentId = agentResp.data.agent_id || agentResp.data.id;
 
-    // 3) Phone (default)
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
+    const numberTierFinal = tierForRole(roleKey);
 
-    // ✅ Save mapping IMMEDIATELY after agent creation (this closes the duplicate window)
-    await kv.set(
-      idemKey,
-      normalizeProvisionRecord({
-        mode,
-        llmId,
-        agentId,
-        phoneNumber,
-        phoneNumberId,
-        numberTierFinal,
-        voiceKey,
-        roleKey,
-      }),
-      { ex: 60 * 60 * 24 * 30 } // 30 days
-    );
+    await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
 
-    // 4) Optional phone purchase
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
-      const buyResp = await axios.post(
-        `${baseUrl}/api/buy-number`,
-        {
-          agent_id: agentId,
-          business_name: bizName,
-          // ✅ pass the SAME stable idempotency key
-          idempotency_key: submissionId,
-          submission_id: submissionId,
-          number_tier: numberTierFinal,
-        },
-        { timeout: 20000 }
-      );
+      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, {
+        agent_id: agentId,
+        business_name: bizName,
+        idempotency_key: submissionId,
+        number_tier: numberTierFinal,
+      });
 
       if (buyResp?.data?.ok) {
         phoneNumber = buyResp.data.phone_number;
         phoneNumberId = buyResp.data.phone_number_id;
-
-        // ✅ Update stored record with phone info
-        await kv.set(
-          idemKey,
-          normalizeProvisionRecord({
-            mode,
-            llmId,
-            agentId,
-            phoneNumber,
-            phoneNumberId,
-            numberTierFinal,
-            voiceKey,
-            roleKey,
-          }),
-          { ex: 60 * 60 * 24 * 30 }
-        );
+        await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
       }
     }
 
-    // ✅ Return the same shape (plus idempotency info)
-    return res.status(200).json({
-      ok: true,
-      idempotent: false,
-      mode,
-      llm_id: llmId,
-      agent_id: agentId,
-      phone_number: phoneNumber,
-      phone_number_id: phoneNumberId,
-      number_tier: numberTierFinal,
-      voice_key: voiceKey,
-      role: roleKey,
-      submission_id: submissionId,
-    });
+    return res.status(200).json({ ok: true, agent_id: agentId, phone_number: phoneNumber, role: roleKey });
   } catch (err) {
-    console.error("provision failed:", err?.message || err);
-    return res.status(err?.response?.status || 500).json({
-      ok: false,
-      error: "Provisioning Failed",
-      details: err?.response?.data || err?.message,
-    });
+    return res.status(500).json({ ok: false, error: err.message });
   } finally {
     if (lockKey) await releaseLock(lockKey);
   }
