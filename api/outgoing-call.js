@@ -317,10 +317,10 @@ module.exports = async function handler(req, res) {
 
     if (idempotency_key) headers["Idempotency-Key"] = idempotency_key;
 
-    const resp = await axios.post("https://api.retellai.com/create-phone-call", payload, {
-      headers,
-      timeout: 60_000,
-      validateStatus: () => true,
+    const resp = await axios.post(
+  "https://api.retellai.com/v1/calls",
+  payload,
+  { headers, timeout: 60_000, validateStatus
     });
 
     if (resp.status < 200 || resp.status >= 300) {
