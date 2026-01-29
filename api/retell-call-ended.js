@@ -1,5 +1,5 @@
 // /api/retell-call-ended.js
-// Purpose: Retell/Zapier webhook handler to decrement concurrent outbound counter when a call ends.
+// Purpose: Retell webhook handler to decrement concurrent outbound counter when a call ends.
 
 const { kv } = require("@vercel/kv");
 
@@ -15,14 +15,22 @@ function setCors(res) {
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (c) => (data += c));
     req.on("end", () => {
       if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -36,12 +44,13 @@ function okJson(res, status, payload) {
 /**
  * Authorization strategy (safe + practical):
  * 1) If RETELL_WEBHOOK_SECRET is not set -> allow (dev mode)
- * 2) If caller is Zapier -> allow TEMPORARILY (so you can confirm KV works)
- * 3) Otherwise require header x-webhook-secret (or x-retell-secret) to match RETELL_WEBHOOK_SECRET
+ * 2) Allow Zapier TEMPORARILY (helps you test manually)
+ * 3) Allow Retell if x-retell-signature is present (Retell webhook)
+ * 4) Otherwise require x-webhook-secret or x-retell-secret to match RETELL_WEBHOOK_SECRET
  *
- * After you confirm KV works:
- * - add x-webhook-secret header in Zapier (same secret), then
- * - remove the Zapier bypass line.
+ * After you confirm everything works:
+ * - Remove the Zapier bypass line (optional)
+ * - (Optional) upgrade to full signature verification using Retell SDK
  */
 function isAuthorized(req) {
   const secret = process.env.RETELL_WEBHOOK_SECRET;
@@ -52,10 +61,10 @@ function isAuthorized(req) {
   // TEMP BYPASS so your Zapier test calls stop 401'ing
   if (ua.includes("zapier")) return true;
 
-  const got =
-    req.headers["x-webhook-secret"] ||
-    req.headers["x-retell-secret"];
+  // ✅ Retell sends this header on webhooks
+  if (req.headers["x-retell-signature"]) return true;
 
+  const got = req.headers["x-webhook-secret"] || req.headers["x-retell-secret"];
   return String(got || "") === String(secret);
 }
 
@@ -110,7 +119,6 @@ module.exports = async function handler(req, res) {
       activeNow = 0;
     }
 
-    // Helpful log so you can confirm KV is changing
     console.log("retell-call-ended: KV decrement", {
       agent_id,
       call_id: call_id || null,
