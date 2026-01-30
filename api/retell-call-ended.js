@@ -118,6 +118,11 @@ module.exports = async function handler(req, res) {
       await kv.set(activeKey, 0, { ex: 60 * 10 });
       activeNow = 0;
     }
+console.log("CALL_ENDED incoming", {
+  ua: req.headers["user-agent"],
+  keys: Object.keys(body || {}),
+  sample: body?.event ? { event: body.event, call_id: body?.call_id || body?.call?.call_id } : null,
+});
 
     console.log("retell-call-ended: KV decrement", {
       agent_id,
