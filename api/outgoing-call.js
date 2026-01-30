@@ -3,6 +3,7 @@
 // ✅ Does NOT create agents
 // ✅ Does NOT buy numbers
 // ✅ Enforces outbound entitlements + daily + concurrent limits via Vercel KV
+// ✅ Enforces plan minutes limits (daily + monthly) via KV "actual minutes" + "reserved minutes"
 // ✅ DEDUPES Zap retries using idempotency_key so counters don’t double count
 //
 // IMPORTANT: Retell "Create Phone Call" (V2) uses from_number + to_number
@@ -158,30 +159,47 @@ function nextMonthResetLocalISO(timeZone) {
   return `${y}-${m}-01T00:00:00 (${String(timeZone)})`;
 }
 
-// -------------------- PLAN + USAGE LIMITS (NEW) --------------------
-// You can tune these later. This gives you clean tiers immediately.
+// -------------------- KV LOOKUPS (NEW) --------------------
+// Supports both key styles so you don't get blocked by a mismatch.
+async function getClientIdForAgent(agent_id) {
+  return (
+    (await kv.get(`agent:${agent_id}:client_id`)) ||
+    (await kv.get(`agent:${agent_id}:client`)) ||
+    null
+  );
+}
+
+// -------------------- PLAN + USAGE LIMITS --------------------
 const PLAN_LIMITS = {
   trial: { daily_minutes: 30, monthly_minutes: 200, reserve_minutes_per_call: 5 },
   basic: { daily_minutes: 120, monthly_minutes: 1000, reserve_minutes_per_call: 5 },
   pro: { daily_minutes: 500, monthly_minutes: 5000, reserve_minutes_per_call: 10 },
 };
 
-async function getPlanForAgent(agent_id) {
-  // Set this somewhere after purchase: kv.set(`plan:${agent_id}`, "basic")
-  return (await kv.get(`plan:${agent_id}`)) || "trial";
+async function getPlanForClient(client_id) {
+  // You can set after purchase: kv.set(`plan:${client_id}`, "basic")
+  return (await kv.get(`plan:${client_id}`)) || "trial";
 }
 
 // Minutes are tracked by retell-call-ended.js (actuals)
 // We also maintain "reserved" minutes (pre-call) so we can block before dialing.
-async function checkMinutesOrBlock({ agent_id, tz, daily_minutes_cap, monthly_minutes_cap, reserve_minutes }) {
+async function checkMinutesOrBlock({
+  client_id,
+  tz,
+  daily_minutes_cap,
+  monthly_minutes_cap,
+  reserve_minutes,
+}) {
   const day = localDateKey(tz);
   const month = localMonthKey(tz);
 
-  const dayUsedKey = `metrics:${agent_id}:day:${day}:minutes`;      // actuals from call-ended
-  const monthUsedKey = `metrics:${agent_id}:month:${month}:minutes`; // actuals from call-ended
+  // actuals (call-ended increments these)
+  const dayUsedKey = `metrics:${client_id}:day:${day}:minutes`;
+  const monthUsedKey = `metrics:${client_id}:month:${month}:minutes`;
 
-  const dayResKey = `outbound:${agent_id}:day:${day}:reserved_minutes`;
-  const monthResKey = `outbound:${agent_id}:month:${month}:reserved_minutes`;
+  // reservations (outbound start increments these, call-ended releases them)
+  const dayResKey = `outbound:${client_id}:day:${day}:reserved_minutes`;
+  const monthResKey = `outbound:${client_id}:month:${month}:reserved_minutes`;
 
   const [dayUsed, monthUsed, dayRes, monthRes] = await Promise.all([
     kv.get(dayUsedKey),
@@ -195,7 +213,6 @@ async function checkMinutesOrBlock({ agent_id, tz, daily_minutes_cap, monthly_mi
   const reservedDay = Number(dayRes || 0);
   const reservedMonth = Number(monthRes || 0);
 
-  // if we reserve this call, will we exceed caps?
   if (usedDay + reservedDay + reserve_minutes > daily_minutes_cap) {
     return {
       ok: false,
@@ -245,11 +262,12 @@ module.exports = async function handler(req, res) {
     return okJson(res, 405, { ok: false, error: "Use POST" });
   }
 
+  // Call count + concurrency (client-scoped)
   let activeKey = null;
   let dailyKey = null;
   let countersIncremented = false;
 
-  // NEW: for minutes reservation rollback on failure
+  // Minutes reservation rollback on failure (client-scoped)
   let reservedKeys = null;
   let reservedMinutes = 0;
 
@@ -302,13 +320,31 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // -------------------- KV: agent -> client --------------------
+    const client_id = await getClientIdForAgent(agent_id);
+    if (!client_id) {
+      return okJson(res, 409, {
+        ok: false,
+        blocked: true,
+        reason: "missing_client_mapping_in_kv",
+        agent_id,
+        fix: "Run /api/kv-set-agent-client after buy+bind, then retry.",
+      });
+    }
+
     // -------------------- LIMITS + ENTITLEMENTS --------------------
     const premium_outbound_enabled = toBool(
       pick(body, ["premium_outbound_enabled", "Premium Outbound Enabled"], false)
     );
 
-    const daily_call_limit = toInt(pick(body, ["daily_call_limit", "Daily Call Limit"], 0), 0);
-    const concurrent_limit = toInt(pick(body, ["concurrent_limit", "Concurrent Limit"], 0), 0);
+    const daily_call_limit = toInt(
+      pick(body, ["daily_call_limit", "Daily Call Limit"], 0),
+      0
+    );
+    const concurrent_limit = toInt(
+      pick(body, ["concurrent_limit", "Concurrent Limit"], 0),
+      0
+    );
     const timezone = pick(body, ["timezone", "tz", "time_zone"], "America/New_York");
 
     const outbound_hours_start = toInt(pick(body, ["outbound_hours_start"], 9), 9);
@@ -319,6 +355,8 @@ module.exports = async function handler(req, res) {
         ok: false,
         blocked: true,
         reason: "outbound_not_enabled",
+        agent_id,
+        client_id,
       });
     }
 
@@ -329,6 +367,8 @@ module.exports = async function handler(req, res) {
         reason: "limits_not_configured",
         daily_call_limit,
         concurrent_limit,
+        agent_id,
+        client_id,
       });
     }
 
@@ -341,10 +381,13 @@ module.exports = async function handler(req, res) {
         timezone: lp.tz,
         local_hour: lp.hh,
         allowed: { start: outbound_hours_start, end: outbound_hours_end },
+        agent_id,
+        client_id,
       });
     }
 
     // -------------------- IDEMPOTENCY DEDUPE --------------------
+    // Keep dedupe per-agent so Zap retries for the same agent won't double count.
     const dedupeKey =
       idempotency_key && String(idempotency_key).trim()
         ? `outbound:dedupe:${agent_id}:${String(idempotency_key).trim()}`
@@ -357,22 +400,31 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // -------------------- PLAN MINUTES LIMITS (NEW) --------------------
-    // Determine plan + minutes caps. You can override via Zap fields later if you want.
-    const plan = await getPlanForAgent(agent_id);
+    // -------------------- PLAN MINUTES LIMITS (client-scoped) --------------------
+    const plan = await getPlanForClient(client_id);
     const planCfg = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
 
-    // Optional: allow Zap to override caps (handy while testing)
-    const daily_minutes_cap = toInt(pick(body, ["daily_minutes_cap", "Daily Minutes Cap"], planCfg.daily_minutes), planCfg.daily_minutes);
-    const monthly_minutes_cap = toInt(pick(body, ["monthly_minutes_cap", "Monthly Minutes Cap"], planCfg.monthly_minutes), planCfg.monthly_minutes);
+    // Optional: allow Zap to override caps while testing (still client-scoped)
+    const daily_minutes_cap = toInt(
+      pick(body, ["daily_minutes_cap", "Daily Minutes Cap"], planCfg.daily_minutes),
+      planCfg.daily_minutes
+    );
+    const monthly_minutes_cap = toInt(
+      pick(body, ["monthly_minutes_cap", "Monthly Minutes Cap"], planCfg.monthly_minutes),
+      planCfg.monthly_minutes
+    );
 
     reservedMinutes = toInt(
-      pick(body, ["reserve_minutes_per_call", "Reserve Minutes Per Call"], planCfg.reserve_minutes_per_call),
+      pick(
+        body,
+        ["reserve_minutes_per_call", "Reserve Minutes Per Call"],
+        planCfg.reserve_minutes_per_call
+      ),
       planCfg.reserve_minutes_per_call
     );
 
     const minutesGate = await checkMinutesOrBlock({
-      agent_id,
+      client_id,
       tz: lp.tz,
       daily_minutes_cap,
       monthly_minutes_cap,
@@ -384,11 +436,13 @@ module.exports = async function handler(req, res) {
         ok: false,
         blocked: true,
         plan,
+        agent_id,
+        client_id,
         ...minutesGate,
       });
     }
 
-    // Reserve minutes NOW (so you can’t spam calls before call-ended)
+    // Reserve minutes NOW (prevents spamming calls before call-ended posts actuals)
     reservedKeys = {
       dayResKey: minutesGate.dayResKey,
       monthResKey: minutesGate.monthResKey,
@@ -400,12 +454,13 @@ module.exports = async function handler(req, res) {
     if (dayResNow === reservedMinutes) await kv.expire(reservedKeys.dayResKey, 60 * 60 * 72);
 
     const monthResNow = await kv.incrby(reservedKeys.monthResKey, reservedMinutes);
-    if (monthResNow === reservedMinutes) await kv.expire(reservedKeys.monthResKey, 60 * 60 * 24 * 60);
+    if (monthResNow === reservedMinutes)
+      await kv.expire(reservedKeys.monthResKey, 60 * 60 * 24 * 60);
 
-    // -------------------- KV counters --------------------
+    // -------------------- CALL COUNT + CONCURRENCY (client-scoped) --------------------
     const day = localDateKey(lp.tz);
-    dailyKey = `outbound:${agent_id}:${day}:count`;
-    activeKey = `outbound:${agent_id}:active`;
+    dailyKey = `outbound:${client_id}:${day}:count`;
+    activeKey = `outbound:${client_id}:active`;
 
     const dailyCount = await kv.incr(dailyKey);
     if (dailyCount === 1) await kv.expire(dailyKey, 60 * 60 * 48);
@@ -413,7 +468,7 @@ module.exports = async function handler(req, res) {
     if (dailyCount > daily_call_limit) {
       await kv.decr(dailyKey);
 
-      // rollback minutes reserve too
+      // rollback minutes reserve
       if (reservedKeys) {
         try {
           await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
@@ -429,6 +484,9 @@ module.exports = async function handler(req, res) {
         daily_call_limit,
         day,
         resets_at: nextResetLocalISO(lp.tz),
+        agent_id,
+        client_id,
+        plan,
       });
     }
 
@@ -439,7 +497,7 @@ module.exports = async function handler(req, res) {
       await kv.decr(activeKey);
       await kv.decr(dailyKey);
 
-      // rollback minutes reserve too
+      // rollback minutes reserve
       if (reservedKeys) {
         try {
           await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
@@ -453,6 +511,9 @@ module.exports = async function handler(req, res) {
         reason: "concurrent_limit_reached",
         active_now: activeNow,
         concurrent_limit,
+        agent_id,
+        client_id,
+        plan,
       });
     }
 
@@ -466,8 +527,15 @@ module.exports = async function handler(req, res) {
         ...(typeof metadata === "object" && metadata ? metadata : {}),
         idempotency_key: idempotency_key || undefined,
         outbound: true,
+
+        // tracing
         agent_id_for_tracking: agent_id,
+
+        // billing/plan scoping
+        client_id_for_billing: client_id,
         plan_for_tracking: plan,
+
+        // minutes reservation context
         reserved_minutes: reservedMinutes,
         usage_day: reservedKeys?.day,
         usage_month: reservedKeys?.month,
@@ -483,15 +551,11 @@ module.exports = async function handler(req, res) {
 
     if (idempotency_key) headers["Idempotency-Key"] = idempotency_key;
 
-    const resp = await axios.post(
-      "https://api.retellai.com/v2/create-phone-call",
-      payload,
-      {
-        headers,
-        timeout: 60_000,
-        validateStatus: () => true,
-      }
-    );
+    const resp = await axios.post("https://api.retellai.com/v2/create-phone-call", payload, {
+      headers,
+      timeout: 60_000,
+      validateStatus: () => true,
+    });
 
     if (resp.status < 200 || resp.status >= 300) {
       console.error("RETELL API ERROR DETAILS:", JSON.stringify(resp.data, null, 2));
@@ -503,7 +567,7 @@ module.exports = async function handler(req, res) {
         } catch {}
       }
 
-      // NEW: rollback minutes reserve on failure
+      // rollback minutes reserve on failure
       if (reservedKeys) {
         try {
           await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
@@ -517,6 +581,8 @@ module.exports = async function handler(req, res) {
         status: resp.status,
         retell_reason: resp.data,
         sent_payload: payload,
+        agent_id,
+        client_id,
         limits: {
           calls_today: dailyCount,
           daily_call_limit,
@@ -535,6 +601,9 @@ module.exports = async function handler(req, res) {
     const responsePayload = {
       ok: true,
       mode: "outbound_call",
+      agent_id,
+      client_id,
+      plan,
       retell: resp.data,
       limits: {
         calls_today: dailyCount,
@@ -565,7 +634,7 @@ module.exports = async function handler(req, res) {
       } catch {}
     }
 
-    // NEW: rollback minutes reserve on server error
+    // rollback minutes reserve on server error
     if (reservedKeys) {
       try {
         await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
