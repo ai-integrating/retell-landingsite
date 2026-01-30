@@ -1,14 +1,4 @@
 // /api/retell-outbound-call.js
-// Place an outbound call via Retell Call (V2) endpoint.
-// ✅ Does NOT create agents
-// ✅ Does NOT buy numbers
-// ✅ Enforces outbound entitlements + daily + concurrent limits via Vercel KV
-// ✅ Enforces plan minutes limits (daily + monthly) via KV "actual minutes" + "reserved minutes"
-// ✅ DEDUPES Zap retries using idempotency_key so counters don’t double count
-//
-// IMPORTANT: Retell "Create Phone Call" (V2) uses from_number + to_number
-// and DOES NOT accept agent_id in the request body.
-
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
 
@@ -16,50 +6,30 @@ const { kv } = require("@vercel/kv");
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Idempotency-Key"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Idempotency-Key");
 }
 
-// -------------------- BODY --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(req.body); } catch { return {}; }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch {
-        resolve({});
-      }
+      try { resolve(JSON.parse(data)); } catch { resolve({}); }
     });
   });
 }
 
-// -------------------- HELPERS --------------------
-function cleanPhone(phone) {
-  if (!phone) return "";
-  let p = String(phone).trim();
-  const digits = p.replace(/[^\d]/g, "");
-
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-
-  if (p.startsWith("+")) return p;
-  return digits ? `+${digits}` : "";
+function okJson(res, status, payload) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(payload));
 }
 
-// Zapier-tolerant pick (handles {output:"..."} and empty strings)
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     let v = obj?.[k];
@@ -87,187 +57,60 @@ function toInt(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function okJson(res, status, payload) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(payload));
+function cleanPhone(phone) {
+  if (!phone) return "";
+  let p = String(phone).trim();
+  const digits = p.replace(/[^\d]/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (p.startsWith("+")) return p;
+  return digits ? `+${digits}` : "";
 }
 
-// Local date/hour in timezone without extra libraries
+// Local date/hour in timezone
 function localParts(timeZone) {
-  const tz =
-    timeZone && String(timeZone).trim()
-      ? String(timeZone).trim()
-      : "America/New_York";
-
+  const tz = timeZone && String(timeZone).trim() ? String(timeZone).trim() : "America/New_York";
   const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    hour12: false,
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", hour12: false,
   });
-
   const parts = fmt.formatToParts(new Date());
   const get = (type) => parts.find((p) => p.type === type)?.value;
 
-  return {
-    tz,
-    yyyy: get("year"),
-    mm: get("month"),
-    dd: get("day"),
-    hh: toInt(get("hour"), 0),
-  };
+  return { tz, yyyy: get("year"), mm: get("month"), dd: get("day"), hh: toInt(get("hour"), 0) };
 }
 
-function localDateKey(timeZone) {
-  const p = localParts(timeZone);
-  return `${p.yyyy}-${p.mm}-${p.dd}`; // YYYY-MM-DD
+function localDateKey(tz) {
+  const p = localParts(tz);
+  return `${p.yyyy}-${p.mm}-${p.dd}`;
+}
+function localMonthKey(tz) {
+  const p = localParts(tz);
+  return `${p.yyyy}-${p.mm}`;
 }
 
-function localMonthKey(timeZone) {
-  const p = localParts(timeZone);
-  return `${p.yyyy}-${p.mm}`; // YYYY-MM
-}
-
-function nextResetLocalISO(timeZone) {
-  const p = localParts(timeZone);
-  const yyyy = Number(p.yyyy);
-  const mm = Number(p.mm);
-  const dd = Number(p.dd);
-
-  const dt = new Date(Date.UTC(yyyy, mm - 1, dd, 12, 0, 0));
-  dt.setUTCDate(dt.getUTCDate() + 1);
-
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(dt.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}T00:00:00 (${String(timeZone)})`;
-}
-
-function nextMonthResetLocalISO(timeZone) {
-  const p = localParts(timeZone);
-  const yyyy = Number(p.yyyy);
-  const mm = Number(p.mm);
-
-  const dt = new Date(Date.UTC(yyyy, mm - 1, 15, 12, 0, 0)); // mid-month
-  dt.setUTCMonth(dt.getUTCMonth() + 1);
-
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}-01T00:00:00 (${String(timeZone)})`;
-}
-
-// -------------------- KV LOOKUPS (NEW) --------------------
-// Supports both key styles so you don't get blocked by a mismatch.
-async function getClientIdForAgent(agent_id) {
-  return (
-    (await kv.get(`agent:${agent_id}:client_id`)) ||
-    (await kv.get(`agent:${agent_id}:client`)) ||
-    null
-  );
-}
-
-// -------------------- PLAN + USAGE LIMITS --------------------
+// -------------------- SIMPLE PLAN LIMITS --------------------
 const PLAN_LIMITS = {
   trial: { daily_minutes: 30, monthly_minutes: 200, reserve_minutes_per_call: 5 },
   basic: { daily_minutes: 120, monthly_minutes: 1000, reserve_minutes_per_call: 5 },
   pro: { daily_minutes: 500, monthly_minutes: 5000, reserve_minutes_per_call: 10 },
 };
 
-async function getPlanForClient(client_id) {
-  // You can set after purchase: kv.set(`plan:${client_id}`, "basic")
-  return (await kv.get(`plan:${client_id}`)) || "trial";
-}
-
-// Minutes are tracked by retell-call-ended.js (actuals)
-// We also maintain "reserved" minutes (pre-call) so we can block before dialing.
-async function checkMinutesOrBlock({
-  client_id,
-  tz,
-  daily_minutes_cap,
-  monthly_minutes_cap,
-  reserve_minutes,
-}) {
-  const day = localDateKey(tz);
-  const month = localMonthKey(tz);
-
-  // actuals (call-ended increments these)
-  const dayUsedKey = `metrics:${client_id}:day:${day}:minutes`;
-  const monthUsedKey = `metrics:${client_id}:month:${month}:minutes`;
-
-  // reservations (outbound start increments these, call-ended releases them)
-  const dayResKey = `outbound:${client_id}:day:${day}:reserved_minutes`;
-  const monthResKey = `outbound:${client_id}:month:${month}:reserved_minutes`;
-
-  const [dayUsed, monthUsed, dayRes, monthRes] = await Promise.all([
-    kv.get(dayUsedKey),
-    kv.get(monthUsedKey),
-    kv.get(dayResKey),
-    kv.get(monthResKey),
-  ]);
-
-  const usedDay = Number(dayUsed || 0);
-  const usedMonth = Number(monthUsed || 0);
-  const reservedDay = Number(dayRes || 0);
-  const reservedMonth = Number(monthRes || 0);
-
-  if (usedDay + reservedDay + reserve_minutes > daily_minutes_cap) {
-    return {
-      ok: false,
-      reason: "daily_minutes_limit",
-      used_minutes_today: usedDay,
-      reserved_minutes_today: reservedDay,
-      daily_minutes_cap,
-      day,
-      resets_at: nextResetLocalISO(tz),
-    };
-  }
-
-  if (usedMonth + reservedMonth + reserve_minutes > monthly_minutes_cap) {
-    return {
-      ok: false,
-      reason: "monthly_minutes_limit",
-      used_minutes_month: usedMonth,
-      reserved_minutes_month: reservedMonth,
-      monthly_minutes_cap,
-      month,
-      resets_at: nextMonthResetLocalISO(tz),
-    };
-  }
-
-  return {
-    ok: true,
-    day,
-    month,
-    usedDay,
-    reservedDay,
-    usedMonth,
-    reservedMonth,
-    dayResKey,
-    monthResKey,
-  };
+async function getPlanForAgent(agent_id) {
+  return (await kv.get(`plan:${agent_id}`)) || "trial";
 }
 
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(res);
 
-  if (req.method === "OPTIONS") {
-    res.statusCode = 200;
-    return res.end("ok");
-  }
-  if (req.method !== "POST") {
-    return okJson(res, 405, { ok: false, error: "Use POST" });
-  }
+  if (req.method === "OPTIONS") return res.end("ok");
+  if (req.method !== "POST") return okJson(res, 405, { ok: false, error: "Use POST" });
 
-  // Call count + concurrency (client-scoped)
   let activeKey = null;
   let dailyKey = null;
   let countersIncremented = false;
 
-  // Minutes reservation rollback on failure (client-scoped)
   let reservedKeys = null;
   let reservedMinutes = 0;
 
@@ -275,101 +118,45 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
 
     const agent_id = pick(body, ["agent_id", "agentId"]);
+    if (!agent_id) return okJson(res, 400, { ok: false, error: "Missing agent_id" });
 
-    const to_phone_raw = pick(body, ["to_phone", "toPhone", "phone", "to"]);
-    const from_number_raw = pick(body, [
-      "from_number",
-      "fromNumber",
-      "from_phone",
-      "fromPhone",
-      "caller_id",
-      "callerId",
-      "from_phone_number_id",
-      "fromPhoneNumberId",
-    ]);
-
-    const metadata = pick(body, ["metadata"], {});
-    const dynamic_variables = pick(body, ["dynamic_variables", "dynamicVariables"], {});
-
-    const idempotency_key =
-      req.headers["x-idempotency-key"] ||
-      pick(body, ["idempotency_key", "idempotencyKey"], "");
-
-    if (!process.env.OUTBOUND_RETELL_API_KEY) {
-      return okJson(res, 500, {
-        ok: false,
-        error: "Missing OUTBOUND_RETELL_API_KEY",
-      });
-    }
-
-    if (!agent_id) {
-      return okJson(res, 400, { ok: false, error: "Missing agent_id" });
-    }
-
-    const to_number = cleanPhone(to_phone_raw);
-    if (!to_number) {
-      return okJson(res, 400, { ok: false, error: "Missing/invalid to_phone" });
-    }
-
-    const from_number = cleanPhone(from_number_raw);
-    if (!from_number) {
-      return okJson(res, 400, {
-        ok: false,
-        error:
-          "Missing/invalid from_number. Map your outbound caller number digits (E.164 like +1617...) into from_number.",
-      });
-    }
-
-    // -------------------- KV: agent -> client --------------------
-    const client_id = await getClientIdForAgent(agent_id);
+    // ✅ Pull client_id from KV so we can enforce "agent belongs to client"
+    const client_id = await kv.get(`agent:${agent_id}:client`);
     if (!client_id) {
-      return okJson(res, 409, {
+      return okJson(res, 403, {
         ok: false,
         blocked: true,
-        reason: "missing_client_mapping_in_kv",
-        agent_id,
-        fix: "Run /api/kv-set-agent-client after buy+bind, then retry.",
+        reason: "agent_not_registered_in_kv",
+        fix: "Run kv-set-agent-client after agent is created (and client_id is known).",
       });
     }
 
-    // -------------------- LIMITS + ENTITLEMENTS --------------------
-    const premium_outbound_enabled = toBool(
-      pick(body, ["premium_outbound_enabled", "Premium Outbound Enabled"], false)
+    const to_number = cleanPhone(pick(body, ["to_phone", "toPhone", "phone", "to"]));
+    const from_number = cleanPhone(
+      pick(body, ["from_number", "fromNumber", "from_phone", "fromPhone", "caller_id", "callerId"])
     );
 
-    const daily_call_limit = toInt(
-      pick(body, ["daily_call_limit", "Daily Call Limit"], 0),
-      0
-    );
-    const concurrent_limit = toInt(
-      pick(body, ["concurrent_limit", "Concurrent Limit"], 0),
-      0
-    );
+    if (!to_number) return okJson(res, 400, { ok: false, error: "Missing/invalid to_phone" });
+    if (!from_number) {
+      return okJson(res, 400, { ok: false, error: "Missing/invalid from_number (E.164 like +1617...)" });
+    }
+
+    if (!process.env.OUTBOUND_RETELL_API_KEY) {
+      return okJson(res, 500, { ok: false, error: "Missing OUTBOUND_RETELL_API_KEY" });
+    }
+
+    const premium_outbound_enabled = toBool(pick(body, ["premium_outbound_enabled"], false));
+    const daily_call_limit = toInt(pick(body, ["daily_call_limit"], 0), 0);
+    const concurrent_limit = toInt(pick(body, ["concurrent_limit"], 0), 0);
     const timezone = pick(body, ["timezone", "tz", "time_zone"], "America/New_York");
-
     const outbound_hours_start = toInt(pick(body, ["outbound_hours_start"], 9), 9);
     const outbound_hours_end = toInt(pick(body, ["outbound_hours_end"], 18), 18);
 
     if (!premium_outbound_enabled) {
-      return okJson(res, 403, {
-        ok: false,
-        blocked: true,
-        reason: "outbound_not_enabled",
-        agent_id,
-        client_id,
-      });
+      return okJson(res, 403, { ok: false, blocked: true, reason: "outbound_not_enabled" });
     }
-
     if (daily_call_limit <= 0 || concurrent_limit <= 0) {
-      return okJson(res, 403, {
-        ok: false,
-        blocked: true,
-        reason: "limits_not_configured",
-        daily_call_limit,
-        concurrent_limit,
-        agent_id,
-        client_id,
-      });
+      return okJson(res, 403, { ok: false, blocked: true, reason: "limits_not_configured" });
     }
 
     const lp = localParts(timezone);
@@ -381,13 +168,13 @@ module.exports = async function handler(req, res) {
         timezone: lp.tz,
         local_hour: lp.hh,
         allowed: { start: outbound_hours_start, end: outbound_hours_end },
-        agent_id,
-        client_id,
       });
     }
 
-    // -------------------- IDEMPOTENCY DEDUPE --------------------
-    // Keep dedupe per-agent so Zap retries for the same agent won't double count.
+    // -------------------- DEDUPE --------------------
+    const idempotency_key =
+      req.headers["x-idempotency-key"] || pick(body, ["idempotency_key", "idempotencyKey"], "");
+
     const dedupeKey =
       idempotency_key && String(idempotency_key).trim()
         ? `outbound:dedupe:${agent_id}:${String(idempotency_key).trim()}`
@@ -395,99 +182,60 @@ module.exports = async function handler(req, res) {
 
     if (dedupeKey) {
       const prior = await kv.get(dedupeKey);
-      if (prior && typeof prior === "object") {
-        return okJson(res, 200, { ok: true, deduped: true, ...prior });
-      }
+      if (prior && typeof prior === "object") return okJson(res, 200, { ok: true, deduped: true, ...prior });
     }
 
-    // -------------------- PLAN MINUTES LIMITS (client-scoped) --------------------
-    const plan = await getPlanForClient(client_id);
-    const planCfg = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
+    // -------------------- PLAN MINUTES (reserve now) --------------------
+    const plan = await getPlanForAgent(agent_id);
+    const cfg = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
 
-    // Optional: allow Zap to override caps while testing (still client-scoped)
-    const daily_minutes_cap = toInt(
-      pick(body, ["daily_minutes_cap", "Daily Minutes Cap"], planCfg.daily_minutes),
-      planCfg.daily_minutes
-    );
-    const monthly_minutes_cap = toInt(
-      pick(body, ["monthly_minutes_cap", "Monthly Minutes Cap"], planCfg.monthly_minutes),
-      planCfg.monthly_minutes
-    );
+    const daily_minutes_cap = toInt(pick(body, ["daily_minutes_cap"], cfg.daily_minutes), cfg.daily_minutes);
+    const monthly_minutes_cap = toInt(pick(body, ["monthly_minutes_cap"], cfg.monthly_minutes), cfg.monthly_minutes);
+    reservedMinutes = toInt(pick(body, ["reserve_minutes_per_call"], cfg.reserve_minutes_per_call), cfg.reserve_minutes_per_call);
 
-    reservedMinutes = toInt(
-      pick(
-        body,
-        ["reserve_minutes_per_call", "Reserve Minutes Per Call"],
-        planCfg.reserve_minutes_per_call
-      ),
-      planCfg.reserve_minutes_per_call
-    );
-
-    const minutesGate = await checkMinutesOrBlock({
-      client_id,
-      tz: lp.tz,
-      daily_minutes_cap,
-      monthly_minutes_cap,
-      reserve_minutes: reservedMinutes,
-    });
-
-    if (!minutesGate.ok) {
-      return okJson(res, 429, {
-        ok: false,
-        blocked: true,
-        plan,
-        agent_id,
-        client_id,
-        ...minutesGate,
-      });
-    }
-
-    // Reserve minutes NOW (prevents spamming calls before call-ended posts actuals)
-    reservedKeys = {
-      dayResKey: minutesGate.dayResKey,
-      monthResKey: minutesGate.monthResKey,
-      day: minutesGate.day,
-      month: minutesGate.month,
-    };
-
-    const dayResNow = await kv.incrby(reservedKeys.dayResKey, reservedMinutes);
-    if (dayResNow === reservedMinutes) await kv.expire(reservedKeys.dayResKey, 60 * 60 * 72);
-
-    const monthResNow = await kv.incrby(reservedKeys.monthResKey, reservedMinutes);
-    if (monthResNow === reservedMinutes)
-      await kv.expire(reservedKeys.monthResKey, 60 * 60 * 24 * 60);
-
-    // -------------------- CALL COUNT + CONCURRENCY (client-scoped) --------------------
     const day = localDateKey(lp.tz);
-    dailyKey = `outbound:${client_id}:${day}:count`;
-    activeKey = `outbound:${client_id}:active`;
+    const month = localMonthKey(lp.tz);
+
+    const dayUsedKey = `metrics:${agent_id}:day:${day}:minutes`;
+    const monthUsedKey = `metrics:${agent_id}:month:${month}:minutes`;
+    const dayResKey = `outbound:${agent_id}:day:${day}:reserved_minutes`;
+    const monthResKey = `outbound:${agent_id}:month:${month}:reserved_minutes`;
+
+    const [usedDayRaw, usedMonthRaw, resDayRaw, resMonthRaw] = await Promise.all([
+      kv.get(dayUsedKey), kv.get(monthUsedKey), kv.get(dayResKey), kv.get(monthResKey),
+    ]);
+
+    const usedDay = Number(usedDayRaw || 0);
+    const usedMonth = Number(usedMonthRaw || 0);
+    const reservedDay = Number(resDayRaw || 0);
+    const reservedMonth = Number(resMonthRaw || 0);
+
+    if (usedDay + reservedDay + reservedMinutes > daily_minutes_cap) {
+      return okJson(res, 429, { ok: false, blocked: true, reason: "daily_minutes_limit", plan, usedDay, reservedDay, daily_minutes_cap });
+    }
+    if (usedMonth + reservedMonth + reservedMinutes > monthly_minutes_cap) {
+      return okJson(res, 429, { ok: false, blocked: true, reason: "monthly_minutes_limit", plan, usedMonth, reservedMonth, monthly_minutes_cap });
+    }
+
+    // reserve minutes now
+    reservedKeys = { dayResKey, monthResKey, day, month };
+    await kv.incrby(dayResKey, reservedMinutes);
+    await kv.incrby(monthResKey, reservedMinutes);
+    await kv.expire(dayResKey, 60 * 60 * 72);
+    await kv.expire(monthResKey, 60 * 60 * 24 * 60);
+
+    // -------------------- CALL + CONCURRENCY COUNTERS --------------------
+    dailyKey = `outbound:${agent_id}:${day}:count`;
+    activeKey = `outbound:${agent_id}:active`;
 
     const dailyCount = await kv.incr(dailyKey);
     if (dailyCount === 1) await kv.expire(dailyKey, 60 * 60 * 48);
 
     if (dailyCount > daily_call_limit) {
       await kv.decr(dailyKey);
-
-      // rollback minutes reserve
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-
-      return okJson(res, 429, {
-        ok: false,
-        blocked: true,
-        reason: "daily_limit_reached",
-        calls_today: dailyCount,
-        daily_call_limit,
-        day,
-        resets_at: nextResetLocalISO(lp.tz),
-        agent_id,
-        client_id,
-        plan,
-      });
+      await kv.incrby(dayResKey, -reservedMinutes);
+      await kv.incrby(monthResKey, -reservedMinutes);
+      return okJson(res, 429, { ok: false, blocked: true, reason: "daily_limit_reached", calls_today: dailyCount, daily_call_limit });
     }
 
     const activeNow = await kv.incr(activeKey);
@@ -496,59 +244,38 @@ module.exports = async function handler(req, res) {
     if (activeNow > concurrent_limit) {
       await kv.decr(activeKey);
       await kv.decr(dailyKey);
-
-      // rollback minutes reserve
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-
-      return okJson(res, 429, {
-        ok: false,
-        blocked: true,
-        reason: "concurrent_limit_reached",
-        active_now: activeNow,
-        concurrent_limit,
-        agent_id,
-        client_id,
-        plan,
-      });
+      await kv.incrby(dayResKey, -reservedMinutes);
+      await kv.incrby(monthResKey, -reservedMinutes);
+      return okJson(res, 429, { ok: false, blocked: true, reason: "concurrent_limit_reached", active_now: activeNow, concurrent_limit });
     }
 
     countersIncremented = true;
 
-    // -------------------- RETELL OUTBOUND CALL (V2) --------------------
+    // -------------------- RETELL CALL --------------------
+    const metadata = pick(body, ["metadata"], {});
+    const dynamic_variables = pick(body, ["dynamic_variables", "dynamicVariables"], {});
+
     const payload = {
       from_number,
       to_number,
       metadata: {
         ...(typeof metadata === "object" && metadata ? metadata : {}),
-        idempotency_key: idempotency_key || undefined,
         outbound: true,
-
-        // tracing
         agent_id_for_tracking: agent_id,
-
-        // billing/plan scoping
-        client_id_for_billing: client_id,
+        client_id_for_tracking: client_id,
         plan_for_tracking: plan,
-
-        // minutes reservation context
         reserved_minutes: reservedMinutes,
-        usage_day: reservedKeys?.day,
-        usage_month: reservedKeys?.month,
+        usage_day: day,
+        usage_month: month,
+        idempotency_key: idempotency_key || undefined,
       },
-      retell_llm_dynamic_variables:
-        typeof dynamic_variables === "object" && dynamic_variables ? dynamic_variables : {},
+      retell_llm_dynamic_variables: typeof dynamic_variables === "object" && dynamic_variables ? dynamic_variables : {},
     };
 
     const headers = {
       Authorization: `Bearer ${process.env.OUTBOUND_RETELL_API_KEY}`,
       "Content-Type": "application/json",
     };
-
     if (idempotency_key) headers["Idempotency-Key"] = idempotency_key;
 
     const resp = await axios.post("https://api.retellai.com/v2/create-phone-call", payload, {
@@ -558,93 +285,51 @@ module.exports = async function handler(req, res) {
     });
 
     if (resp.status < 200 || resp.status >= 300) {
-      console.error("RETELL API ERROR DETAILS:", JSON.stringify(resp.data, null, 2));
+      console.error("RETELL OUTBOUND ERROR:", resp.status, JSON.stringify(resp.data, null, 2));
 
       if (countersIncremented) {
-        try {
-          await kv.decr(activeKey);
-          await kv.decr(dailyKey);
-        } catch {}
+        await kv.decr(activeKey).catch(() => {});
+        await kv.decr(dailyKey).catch(() => {});
       }
+      await kv.incrby(dayResKey, -reservedMinutes).catch(() => {});
+      await kv.incrby(monthResKey, -reservedMinutes).catch(() => {});
 
-      // rollback minutes reserve on failure
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-
-      return okJson(res, 502, {
+      // NOTE: Retell may return 409 if Idempotency-Key reused with different payload
+      return okJson(res, resp.status === 409 ? 409 : 502, {
         ok: false,
         error: "Retell outbound call failed",
         status: resp.status,
         retell_reason: resp.data,
-        sent_payload: payload,
-        agent_id,
-        client_id,
-        limits: {
-          calls_today: dailyCount,
-          daily_call_limit,
-          active_now: activeNow,
-          concurrent_limit,
-          day,
-          resets_at: nextResetLocalISO(lp.tz),
-          plan,
-          daily_minutes_cap,
-          monthly_minutes_cap,
-          reserved_minutes_per_call: reservedMinutes,
-        },
+        hint:
+          resp.status === 409
+            ? "Idempotency-Key conflict. Make idempotency_key unique per call attempt, or remove it while testing."
+            : undefined,
       });
     }
 
-    const responsePayload = {
+    const out = {
       ok: true,
       mode: "outbound_call",
-      agent_id,
-      client_id,
-      plan,
       retell: resp.data,
-      limits: {
-        calls_today: dailyCount,
-        daily_call_limit,
-        active_now: activeNow,
-        concurrent_limit,
-        day,
-        resets_at: nextResetLocalISO(lp.tz),
-        plan,
-        daily_minutes_cap,
-        monthly_minutes_cap,
-        reserved_minutes_per_call: reservedMinutes,
-      },
+      tracking: { agent_id, client_id, plan, reserved_minutes: reservedMinutes, day, month },
     };
 
-    if (dedupeKey) {
-      await kv.set(dedupeKey, responsePayload, { ex: 60 * 60 * 6 });
-    }
+    if (dedupeKey) await kv.set(dedupeKey, out, { ex: 60 * 60 * 6 });
 
-    return okJson(res, 200, responsePayload);
+    return okJson(res, 200, out);
   } catch (err) {
     console.error("OUTBOUND SERVER ERROR:", err);
 
+    // rollback counters + reservations if we got far enough
     if (countersIncremented && activeKey && dailyKey) {
-      try {
-        await kv.decr(activeKey);
-        await kv.decr(dailyKey);
-      } catch {}
+      await kv.decr(activeKey).catch(() => {});
+      await kv.decr(dailyKey).catch(() => {});
     }
-
-    // rollback minutes reserve on server error
     if (reservedKeys) {
-      try {
-        await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-        await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-      } catch {}
+      await kv.incrby(reservedKeys.dayResKey, -reservedMinutes).catch(() => {});
+      await kv.incrby(reservedKeys.monthResKey, -reservedMinutes).catch(() => {});
     }
 
-    return okJson(res, 500, {
-      ok: false,
-      error: err?.message || "Server error",
-    });
+    return okJson(res, 500, { ok: false, error: err?.message || "Server error" });
   }
 };
