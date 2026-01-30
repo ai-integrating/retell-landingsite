@@ -61,7 +61,7 @@ function isAuthorized(req) {
   // Dev mode: if you haven't set the env var, don't block
   if (!secret) return true;
 
-  // Retell webhooks include this header (per your earlier assumption/code)
+  // Retell webhooks include this header (as your logs show)
   return !!req.headers["x-retell-signature"];
 }
 
@@ -86,6 +86,21 @@ function extractCallId(body) {
   );
 }
 
+// Extra visibility: helps us find the *real* unique ID field Retell sends
+function logRawIdCandidates(body) {
+  console.log("CALL_ENDED raw ids", {
+    event_type: body?.event_type || body?.type || body?.event?.type || body?.event,
+    call_id_top: body?.call_id || null,
+    call_id_call: body?.call?.call_id || body?.call?.id || null,
+    call_id_data: body?.data?.call_id || body?.data?.id || null,
+    call_id_event: body?.event?.call_id || body?.event?.id || null,
+    agent_id_top: body?.agent_id || null,
+    agent_id_call: body?.call?.agent_id || null,
+    agent_id_data: body?.data?.agent_id || null,
+    agent_id_event: body?.event?.agent_id || null,
+  });
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
 
@@ -98,7 +113,6 @@ module.exports = async function handler(req, res) {
     return okJson(res, 405, { ok: false, error: "Use POST" });
   }
 
-  // ✅ Lock to Retell (no Zapier UA bypass anymore)
   if (!isAuthorized(req)) {
     return okJson(res, 401, {
       ok: false,
@@ -115,7 +129,9 @@ module.exports = async function handler(req, res) {
     const agent_id = extractAgentId(body);
     const call_id = extractCallId(body);
 
-    // Basic logging (helps you confirm which fields Retell is sending)
+    // ✅ NEW: print the raw candidate fields so we can confirm the real call_id field
+    logRawIdCandidates(body);
+
     console.log("CALL_ENDED incoming", {
       has_retell_signature: !!req.headers["x-retell-signature"],
       agent_id: agent_id || null,
@@ -128,12 +144,18 @@ module.exports = async function handler(req, res) {
     }
 
     // ✅ Idempotency: only decrement once per call_id
-    // If Retell retries the webhook, we return OK without decrementing again.
     if (call_id) {
       const seenKey = `retell:callended:${call_id}`;
       const alreadySeen = await kv.get(seenKey);
 
       if (alreadySeen) {
+        // ✅ NEW: make duplicates obvious in logs
+        console.log("retell-call-ended: DUPLICATE webhook (no decrement)", {
+          agent_id,
+          call_id,
+          seenKey,
+        });
+
         return okJson(res, 200, {
           ok: true,
           duplicate: true,
@@ -143,11 +165,8 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      // mark processed (keep a while; pick 7 days so retries / late events won't double-decr)
       await kv.set(seenKey, "1", { ex: 60 * 60 * 24 * 7 });
     } else {
-      // If no call_id, we can't dedupe perfectly.
-      // Still proceed, but you'll want to confirm the correct call_id field in logs.
       console.warn("retell-call-ended: no call_id found; cannot dedupe this event.");
     }
 
