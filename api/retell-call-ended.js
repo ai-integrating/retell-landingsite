@@ -3,15 +3,17 @@
 
 const { kv } = require("@vercel/kv");
 
+// -------------------- CORS --------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Retell-Secret, X-Webhook-Secret, X-Retell-Signature"
+    "Content-Type, Authorization, X-Retell-Signature"
   );
 }
 
+// -------------------- BODY --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
@@ -42,30 +44,46 @@ function okJson(res, status, payload) {
 }
 
 /**
- * Authorization strategy (safe + practical):
- * 1) If RETELL_WEBHOOK_SECRET is not set -> allow (dev mode)
- * 2) Allow Zapier TEMPORARILY (helps you test manually)
- * 3) Allow Retell if x-retell-signature is present (Retell webhook)
- * 4) Otherwise require x-webhook-secret or x-retell-secret to match RETELL_WEBHOOK_SECRET
+ * Auth strategy for your Retell UI limitation:
+ * - Retell UI doesn't allow custom secret headers
+ * - So we require the Retell webhook header to be present: x-retell-signature
  *
- * After you confirm everything works:
- * - Remove the Zapier bypass line (optional)
- * - (Optional) upgrade to full signature verification using Retell SDK
+ * Optional dev escape hatch:
+ * - If RETELL_WEBHOOK_SECRET is NOT set, allow (dev mode)
+ * - If it IS set, we still can't compare headers (because Retell UI can't send them),
+ *   so we rely on presence of x-retell-signature.
+ *
+ * If you later move to signature verification (recommended), this function is where it goes.
  */
 function isAuthorized(req) {
   const secret = process.env.RETELL_WEBHOOK_SECRET;
+
+  // Dev mode: if you haven't set the env var, don't block
   if (!secret) return true;
 
-  const ua = String(req.headers["user-agent"] || "").toLowerCase();
+  // Retell webhooks include this header (per your earlier assumption/code)
+  return !!req.headers["x-retell-signature"];
+}
 
-  // TEMP BYPASS so your Zapier test calls stop 401'ing
-  if (ua.includes("zapier")) return true;
+function extractAgentId(body) {
+  return (
+    body?.agent_id ||
+    body?.call?.agent_id ||
+    body?.data?.agent_id ||
+    body?.event?.agent_id
+  );
+}
 
-  // ✅ Retell sends this header on webhooks
-  if (req.headers["x-retell-signature"]) return true;
-
-  const got = req.headers["x-webhook-secret"] || req.headers["x-retell-secret"];
-  return String(got || "") === String(secret);
+function extractCallId(body) {
+  return (
+    body?.call_id ||
+    body?.call?.call_id ||
+    body?.call?.id ||
+    body?.data?.call_id ||
+    body?.data?.id ||
+    body?.event?.call_id ||
+    body?.event?.id
+  );
 }
 
 module.exports = async function handler(req, res) {
@@ -80,13 +98,12 @@ module.exports = async function handler(req, res) {
     return okJson(res, 405, { ok: false, error: "Use POST" });
   }
 
+  // ✅ Lock to Retell (no Zapier UA bypass anymore)
   if (!isAuthorized(req)) {
     return okJson(res, 401, {
       ok: false,
       error: "Unauthorized webhook",
       expected_env_secret_set: !!process.env.RETELL_WEBHOOK_SECRET,
-      has_webhook_secret: !!req.headers["x-webhook-secret"],
-      has_retell_secret: !!req.headers["x-retell-secret"],
       has_retell_signature: !!req.headers["x-retell-signature"],
       received_headers: Object.keys(req.headers || {}),
     });
@@ -95,20 +112,43 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
 
-    const agent_id =
-      body?.agent_id ||
-      body?.call?.agent_id ||
-      body?.data?.agent_id ||
-      body?.event?.agent_id;
+    const agent_id = extractAgentId(body);
+    const call_id = extractCallId(body);
 
-    const call_id =
-      body?.call_id ||
-      body?.call?.call_id ||
-      body?.data?.call_id ||
-      body?.event?.call_id;
+    // Basic logging (helps you confirm which fields Retell is sending)
+    console.log("CALL_ENDED incoming", {
+      has_retell_signature: !!req.headers["x-retell-signature"],
+      agent_id: agent_id || null,
+      call_id: call_id || null,
+      top_level_keys: Object.keys(body || {}),
+    });
 
     if (!agent_id) {
       return okJson(res, 200, { ok: true, ignored: true, reason: "no_agent_id" });
+    }
+
+    // ✅ Idempotency: only decrement once per call_id
+    // If Retell retries the webhook, we return OK without decrementing again.
+    if (call_id) {
+      const seenKey = `retell:callended:${call_id}`;
+      const alreadySeen = await kv.get(seenKey);
+
+      if (alreadySeen) {
+        return okJson(res, 200, {
+          ok: true,
+          duplicate: true,
+          agent_id,
+          call_id,
+          reason: "call_id_already_processed",
+        });
+      }
+
+      // mark processed (keep a while; pick 7 days so retries / late events won't double-decr)
+      await kv.set(seenKey, "1", { ex: 60 * 60 * 24 * 7 });
+    } else {
+      // If no call_id, we can't dedupe perfectly.
+      // Still proceed, but you'll want to confirm the correct call_id field in logs.
+      console.warn("retell-call-ended: no call_id found; cannot dedupe this event.");
     }
 
     const activeKey = `outbound:${agent_id}:active`;
@@ -118,11 +158,6 @@ module.exports = async function handler(req, res) {
       await kv.set(activeKey, 0, { ex: 60 * 10 });
       activeNow = 0;
     }
-console.log("CALL_ENDED incoming", {
-  ua: req.headers["user-agent"],
-  keys: Object.keys(body || {}),
-  sample: body?.event ? { event: body.event, call_id: body?.call_id || body?.call?.call_id } : null,
-});
 
     console.log("retell-call-ended: KV decrement", {
       agent_id,
