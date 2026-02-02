@@ -152,16 +152,32 @@ function cleanScrapedText(raw) {
   return text.trim();
 }
 
+// ✅ NEW: Extract website from global setup text if website field missing
+function extractWebsiteFromText(text) {
+  if (!text) return "";
+  const s = String(text);
+
+  // Prefer explicit http(s) URL
+  const m1 = s.match(/website\s*[:=]\s*(https?:\/\/[^\s]+)/i);
+  if (m1?.[1]) return m1[1].trim();
+
+  // Fallback: domain without protocol (e.g., www.example.com)
+  const m2 = s.match(/website\s*[:=]\s*([a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
+  if (m2?.[1]) return m2[1].trim();
+
+  return "";
+}
+
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
-  
-  // FIX: Use the full secure URL and increase timeout for Jina Reader
+
+  // Use the full secure URL and increase timeout for Jina Reader
   const scrapeUrl = `https://r.jina.ai/${u}`;
   try {
-    const resp = await axios.get(scrapeUrl, { 
+    const resp = await axios.get(scrapeUrl, {
       timeout: 15000,
-      headers: { "X-Return-Format": "markdown" }
+      headers: { "X-Return-Format": "markdown" },
     });
     let text = cleanScrapedText(resp.data || "");
     const MAX_CHARS = 1800;
@@ -257,11 +273,11 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ DYNAMIC DIRECTION LOGIC
+  // ✅ DIRECTION LOGIC (tightened)
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
-    `- IF {{client_name}} has a value: You are making an OUTBOUND call. Use the OUTBOUND OPENER.`,
-    `- IF {{client_name}} is empty or "Hi there": You are receiving an INBOUND call. Use the INBOUND OPENER.`,
+    `- IF {{client_name}} exists AND is not empty: This is an OUTBOUND call. Use the OUTBOUND OPENER.`,
+    `- ELSE: This is an INBOUND call. Use the INBOUND OPENER.`,
     `- NEVER ask "How can I help you?" if you are the one calling.`,
     ``,
     `INBOUND OPENER: "Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
@@ -418,8 +434,11 @@ module.exports = async (req, res) => {
       return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
 
-    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
-    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
+    const purchaseNumber =
+      String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only"))
+      .toLowerCase()
+      .trim();
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
@@ -428,12 +447,17 @@ module.exports = async (req, res) => {
     const { voiceKey, voiceId } = resolveVoice(body);
 
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
-    const website = pick(body, ["website", "web", "website_url", "site", "url"], "");
-    const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
+    // ✅ Build setup blocks first (so we can extract website from global_setup if needed)
     const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
+
+    // ✅ Website: prefer explicit field, else extract from global setup text
+    let website = pick(body, ["website", "web", "website_url", "site", "url"], "");
+    if (!website) website = extractWebsiteFromText(globalSetup);
+
+    const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
 
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
@@ -454,7 +478,9 @@ module.exports = async (req, res) => {
       }
 
       const ctx = buildBusinessContext(body);
-      const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
+      const websiteSection = scrape.ok
+        ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
+        : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
       promptToUse = [base, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
@@ -483,7 +509,20 @@ module.exports = async (req, res) => {
     let phoneNumberId = null;
     const numberTierFinal = tierForRole(roleKey);
 
-    await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
+    await kv.set(
+      idemKey,
+      normalizeProvisionRecord({
+        mode,
+        llmId,
+        agentId,
+        phoneNumber,
+        phoneNumberId,
+        numberTierFinal,
+        voiceKey,
+        roleKey,
+      }),
+      { ex: 60 * 60 * 24 * 30 }
+    );
 
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
@@ -497,11 +536,32 @@ module.exports = async (req, res) => {
       if (buyResp?.data?.ok) {
         phoneNumber = buyResp.data.phone_number;
         phoneNumberId = buyResp.data.phone_number_id;
-        await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
+        await kv.set(
+          idemKey,
+          normalizeProvisionRecord({
+            mode,
+            llmId,
+            agentId,
+            phoneNumber,
+            phoneNumberId,
+            numberTierFinal,
+            voiceKey,
+            roleKey,
+          }),
+          { ex: 60 * 60 * 24 * 30 }
+        );
       }
     }
 
-    return res.status(200).json({ ok: true, agent_id: agentId, phone_number: phoneNumber, role: roleKey });
+    return res.status(200).json({
+      ok: true,
+      agent_id: agentId,
+      phone_number: phoneNumber,
+      role: roleKey,
+      prompt_source: promptSource,
+      website_used: website ? normalizeUrl(website) : "",
+      website_scrape_reason: scrape.reason,
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   } finally {
