@@ -72,6 +72,16 @@ function pick(obj, keys, fallback = undefined) {
   return fallback;
 }
 
+// ✅ Lowercase all keys at the top level (Zap-proof: Client_name -> client_name)
+function lowerKeyObject(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[String(k).toLowerCase()] = v;
+  }
+  return out;
+}
+
 function toBool(v) {
   if (v === true) return true;
   if (v === false) return false;
@@ -255,26 +265,50 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJsonBody(req);
+    const bodyLC = lowerKeyObject(body);
 
-    const agent_id = pick(body, ["agent_id", "agentId"]);
-    const to_phone_raw = pick(body, ["to_phone", "toPhone", "phone", "to"]);
-    const from_number_raw = pick(body, [
-      "from_number",
-      "fromNumber",
-      "from_phone",
-      "fromPhone",
-      "caller_id",
-      "callerId",
-      "from_phone_number_id",
-      "fromPhoneNumberId",
-    ]);
+    const agent_id =
+      pick(body, ["agent_id", "agentId"]) ||
+      pick(bodyLC, ["agent_id", "agentid"]);
+
+    const to_phone_raw =
+      pick(body, ["to_phone", "toPhone", "phone", "to"]) ||
+      pick(bodyLC, ["to_phone", "tophone", "phone", "to"]);
+
+    const from_number_raw =
+      pick(body, [
+        "from_number",
+        "fromNumber",
+        "from_phone",
+        "fromPhone",
+        "caller_id",
+        "callerId",
+        "from_phone_number_id",
+        "fromPhoneNumberId",
+      ]) ||
+      pick(bodyLC, [
+        "from_number",
+        "fromnumber",
+        "from_phone",
+        "fromphone",
+        "caller_id",
+        "callerid",
+        "from_phone_number_id",
+        "fromphonenumberid",
+      ]);
 
     // Incoming objects (Zap can send these)
-    const metadataIn = pick(body, ["metadata"], {});
-    const dynamicIn = pick(body, ["dynamic_variables", "dynamicVariables"], {});
+    const metadataIn = pick(body, ["metadata"], {}) || pick(bodyLC, ["metadata"], {});
+    const dynamicIn =
+      pick(body, ["dynamic_variables", "dynamicVariables"], {}) ||
+      pick(bodyLC, ["dynamic_variables", "dynamicvariables"], {});
+
+    const dynamicLC = lowerKeyObject(dynamicIn);
+
     const idempotency_key =
       req.headers["x-idempotency-key"] ||
-      pick(body, ["idempotency_key", "idempotencyKey"], "");
+      pick(body, ["idempotency_key", "idempotencyKey"], "") ||
+      pick(bodyLC, ["idempotency_key", "idempotencykey"], "");
 
     if (!process.env.OUTBOUND_RETELL_API_KEY) {
       return okJson(res, 500, { ok: false, error: "Missing OUTBOUND_RETELL_API_KEY" });
@@ -296,7 +330,10 @@ module.exports = async function handler(req, res) {
 
     // ---- Load defaults from KV (optional but recommended) ----
     const kvLimits = await getLimitsForAgent(agent_id); // may be null
-    const timezoneFromBody = pick(body, ["timezone", "tz", "time_zone"], null);
+    const timezoneFromBody =
+      pick(body, ["timezone", "tz", "time_zone"], null) ||
+      pick(bodyLC, ["timezone", "tz", "time_zone", "time zone"], null);
+
     const timezone = await getTimezoneForAgent(agent_id, timezoneFromBody || "America/New_York");
 
     // ---- Entitlements + limits: body overrides KV ----
@@ -305,26 +342,30 @@ module.exports = async function handler(req, res) {
         body,
         ["premium_outbound_enabled", "Premium Outbound Enabled"],
         kvLimits?.premium_outbound_enabled ?? false
-      )
+      ) ?? pick(bodyLC, ["premium_outbound_enabled", "premium outbound enabled"], kvLimits?.premium_outbound_enabled ?? false)
     );
 
     const daily_call_limit = toInt(
-      pick(body, ["daily_call_limit", "Daily Call Limit"], kvLimits?.daily_call_limit ?? 0),
+      pick(body, ["daily_call_limit", "Daily Call Limit"], kvLimits?.daily_call_limit ?? 0) ??
+        pick(bodyLC, ["daily_call_limit", "daily call limit"], kvLimits?.daily_call_limit ?? 0),
       0
     );
 
     const concurrent_limit = toInt(
-      pick(body, ["concurrent_limit", "Concurrent Limit"], kvLimits?.concurrent_limit ?? 0),
+      pick(body, ["concurrent_limit", "Concurrent Limit"], kvLimits?.concurrent_limit ?? 0) ??
+        pick(bodyLC, ["concurrent_limit", "concurrent limit"], kvLimits?.concurrent_limit ?? 0),
       0
     );
 
     const outbound_hours_start = toInt(
-      pick(body, ["outbound_hours_start"], kvLimits?.outbound_hours_start ?? 9),
+      pick(body, ["outbound_hours_start"], kvLimits?.outbound_hours_start ?? 9) ??
+        pick(bodyLC, ["outbound_hours_start"], kvLimits?.outbound_hours_start ?? 9),
       9
     );
 
     const outbound_hours_end = toInt(
-      pick(body, ["outbound_hours_end"], kvLimits?.outbound_hours_end ?? 18),
+      pick(body, ["outbound_hours_end"], kvLimits?.outbound_hours_end ?? 18) ??
+        pick(bodyLC, ["outbound_hours_end"], kvLimits?.outbound_hours_end ?? 18),
       18
     );
 
@@ -372,225 +413,4 @@ module.exports = async function handler(req, res) {
     const planCfg = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
 
     const daily_minutes_cap = toInt(
-      pick(
-        body,
-        ["daily_minutes_cap", "Daily Minutes Cap"],
-        kvLimits?.daily_minutes_cap ?? planCfg.daily_minutes
-      ),
-      planCfg.daily_minutes
-    );
-
-    const monthly_minutes_cap = toInt(
-      pick(
-        body,
-        ["monthly_minutes_cap", "Monthly Minutes Cap"],
-        kvLimits?.monthly_minutes_cap ?? planCfg.monthly_minutes
-      ),
-      planCfg.monthly_minutes
-    );
-
-    reservedMinutes = toInt(
-      pick(
-        body,
-        ["reserve_minutes_per_call", "Reserve Minutes Per Call"],
-        kvLimits?.reserve_minutes_per_call ?? planCfg.reserve_minutes_per_call
-      ),
-      planCfg.reserve_minutes_per_call
-    );
-
-    const minutesGate = await checkMinutesOrBlock({
-      agent_id,
-      tz: lp.tz,
-      daily_minutes_cap,
-      monthly_minutes_cap,
-      reserve_minutes: reservedMinutes,
-    });
-
-    if (!minutesGate.ok) {
-      return okJson(res, 429, { ok: false, blocked: true, plan, ...minutesGate });
-    }
-
-    reservedKeys = {
-      dayResKey: minutesGate.dayResKey,
-      monthResKey: minutesGate.monthResKey,
-      day: minutesGate.day,
-      month: minutesGate.month,
-    };
-
-    const dayResNow = await kv.incrby(reservedKeys.dayResKey, reservedMinutes);
-    if (dayResNow === reservedMinutes) await kv.expire(reservedKeys.dayResKey, 60 * 60 * 72);
-
-    const monthResNow = await kv.incrby(reservedKeys.monthResKey, reservedMinutes);
-    if (monthResNow === reservedMinutes) await kv.expire(reservedKeys.monthResKey, 60 * 60 * 24 * 60);
-
-    // ---- Call count + concurrency ----
-    const day = localDateKey(lp.tz);
-    dailyKey = `outbound:${agent_id}:${day}:count`;
-    activeKey = `outbound:${agent_id}:active`;
-
-    const dailyCount = await kv.incr(dailyKey);
-    if (dailyCount === 1) await kv.expire(dailyKey, 60 * 60 * 48);
-
-    if (dailyCount > daily_call_limit) {
-      await kv.decr(dailyKey);
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-      return okJson(res, 429, {
-        ok: false,
-        blocked: true,
-        reason: "daily_limit_reached",
-        calls_today: dailyCount,
-        daily_call_limit,
-        day,
-        resets_at: nextResetLocalISO(lp.tz),
-      });
-    }
-
-    const activeNow = await kv.incr(activeKey);
-    if (activeNow === 1) await kv.expire(activeKey, 60 * 10);
-
-    if (activeNow > concurrent_limit) {
-      await kv.decr(activeKey);
-      await kv.decr(dailyKey);
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-      return okJson(res, 429, {
-        ok: false,
-        blocked: true,
-        reason: "concurrent_limit_reached",
-        active_now: activeNow,
-        concurrent_limit,
-      });
-    }
-
-    countersIncremented = true;
-
-    // -------------------- ✅ FORCE OUTBOUND VARIABLES --------------------
-    // Pull common fields from body (so Zap can send them at top-level OR inside dynamic_variables)
-    // IMPORTANT: do NOT pass "Hi there" as client_name because your prompt treats that as inbound.
-    const clientNameRaw = pick(body, ["client_name", "clientName", "name"], "") ||
-      pick(dynamicIn, ["client_name", "clientName", "name"], "");
-
-    const client_name =
-      String(clientNameRaw || "").trim().toLowerCase() === "hi there"
-        ? ""
-        : String(clientNameRaw || "").trim();
-
-    const reason_for_call =
-      pick(body, ["reason_for_call", "reasonForCall", "reason"], "") ||
-      pick(dynamicIn, ["reason_for_call", "reasonForCall", "reason"], "");
-
-    const notes =
-      pick(body, ["notes", "note"], "") ||
-      pick(dynamicIn, ["notes", "note"], "");
-
-    const mergedDynamicVars = {
-      ...(typeof dynamicIn === "object" && dynamicIn ? dynamicIn : {}),
-      // Deterministic outbound detection for your prompt:
-      call_direction: "outbound",
-      is_outbound: "true",
-      // Your prompt expects these exact keys:
-      client_name: client_name || undefined,
-      reason_for_call: String(reason_for_call || "").trim() || undefined,
-      notes: String(notes || "").trim() || undefined,
-    };
-
-    // ---- Retell Outbound Call (V2) ----
-    const payload = {
-      from_number,
-      to_number,
-      metadata: {
-        ...(typeof metadataIn === "object" && metadataIn ? metadataIn : {}),
-        idempotency_key: idempotency_key || undefined,
-        outbound: true,
-        agent_id_for_tracking: agent_id,
-        plan_for_tracking: plan,
-        reserved_minutes: reservedMinutes,
-        usage_day: reservedKeys?.day,
-        usage_month: reservedKeys?.month,
-        timezone: lp.tz,
-      },
-      // ✅ These are what your prompt can actually read as {{...}}
-      retell_llm_dynamic_variables: mergedDynamicVars,
-    };
-
-    const headers = {
-      Authorization: `Bearer ${process.env.OUTBOUND_RETELL_API_KEY}`,
-      "Content-Type": "application/json",
-    };
-    if (idempotency_key) headers["Idempotency-Key"] = idempotency_key;
-
-    const resp = await axios.post("https://api.retellai.com/v2/create-phone-call", payload, {
-      headers,
-      timeout: 60_000,
-      validateStatus: () => true,
-    });
-
-    if (resp.status < 200 || resp.status >= 300) {
-      if (countersIncremented) {
-        try {
-          await kv.decr(activeKey);
-          await kv.decr(dailyKey);
-        } catch {}
-      }
-      if (reservedKeys) {
-        try {
-          await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-          await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-        } catch {}
-      }
-
-      return okJson(res, 502, {
-        ok: false,
-        error: "Retell outbound call failed",
-        status: resp.status,
-        retell_reason: resp.data,
-      });
-    }
-
-    const responsePayload = {
-      ok: true,
-      mode: "outbound_call",
-      retell: resp.data,
-      sent_dynamic_variables: mergedDynamicVars, // helpful debug (remove later if you want)
-      limits: {
-        calls_today: dailyCount,
-        daily_call_limit,
-        active_now: activeNow,
-        concurrent_limit,
-        day,
-        resets_at: nextResetLocalISO(lp.tz),
-        plan,
-        daily_minutes_cap,
-        monthly_minutes_cap,
-        reserved_minutes_per_call: reservedMinutes,
-      },
-    };
-
-    if (dedupeKey) await kv.set(dedupeKey, responsePayload, { ex: 60 * 60 * 6 });
-
-    return okJson(res, 200, responsePayload);
-  } catch (err) {
-    if (countersIncremented && activeKey && dailyKey) {
-      try {
-        await kv.decr(activeKey);
-        await kv.decr(dailyKey);
-      } catch {}
-    }
-    if (reservedKeys) {
-      try {
-        await kv.incrby(reservedKeys.dayResKey, -reservedMinutes);
-        await kv.incrby(reservedKeys.monthResKey, -reservedMinutes);
-      } catch {}
-    }
-    return okJson(res, 500, { ok: false, error: err?.message || "Server error" });
-  }
-};
+      p
