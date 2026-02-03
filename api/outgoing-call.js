@@ -56,6 +56,7 @@ function cleanPhone(phone) {
   return digits ? `+${digits}` : "";
 }
 
+// ✅ Better pick(): ignores "", whitespace, null-ish strings, Zapier {output:"..."}
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     let v = obj?.[k];
@@ -268,8 +269,9 @@ module.exports = async function handler(req, res) {
       "fromPhoneNumberId",
     ]);
 
-    const metadata = pick(body, ["metadata"], {});
-    const dynamic_variables = pick(body, ["dynamic_variables", "dynamicVariables"], {});
+    // Incoming objects (Zap can send these)
+    const metadataIn = pick(body, ["metadata"], {});
+    const dynamicIn = pick(body, ["dynamic_variables", "dynamicVariables"], {});
     const idempotency_key =
       req.headers["x-idempotency-key"] ||
       pick(body, ["idempotency_key", "idempotencyKey"], "");
@@ -299,7 +301,11 @@ module.exports = async function handler(req, res) {
 
     // ---- Entitlements + limits: body overrides KV ----
     const premium_outbound_enabled = toBool(
-      pick(body, ["premium_outbound_enabled", "Premium Outbound Enabled"], kvLimits?.premium_outbound_enabled ?? false)
+      pick(
+        body,
+        ["premium_outbound_enabled", "Premium Outbound Enabled"],
+        kvLimits?.premium_outbound_enabled ?? false
+      )
     );
 
     const daily_call_limit = toInt(
@@ -366,12 +372,20 @@ module.exports = async function handler(req, res) {
     const planCfg = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
 
     const daily_minutes_cap = toInt(
-      pick(body, ["daily_minutes_cap", "Daily Minutes Cap"], kvLimits?.daily_minutes_cap ?? planCfg.daily_minutes),
+      pick(
+        body,
+        ["daily_minutes_cap", "Daily Minutes Cap"],
+        kvLimits?.daily_minutes_cap ?? planCfg.daily_minutes
+      ),
       planCfg.daily_minutes
     );
 
     const monthly_minutes_cap = toInt(
-      pick(body, ["monthly_minutes_cap", "Monthly Minutes Cap"], kvLimits?.monthly_minutes_cap ?? planCfg.monthly_minutes),
+      pick(
+        body,
+        ["monthly_minutes_cap", "Monthly Minutes Cap"],
+        kvLimits?.monthly_minutes_cap ?? planCfg.monthly_minutes
+      ),
       planCfg.monthly_minutes
     );
 
@@ -459,12 +473,42 @@ module.exports = async function handler(req, res) {
 
     countersIncremented = true;
 
+    // -------------------- ✅ FORCE OUTBOUND VARIABLES --------------------
+    // Pull common fields from body (so Zap can send them at top-level OR inside dynamic_variables)
+    // IMPORTANT: do NOT pass "Hi there" as client_name because your prompt treats that as inbound.
+    const clientNameRaw = pick(body, ["client_name", "clientName", "name"], "") ||
+      pick(dynamicIn, ["client_name", "clientName", "name"], "");
+
+    const client_name =
+      String(clientNameRaw || "").trim().toLowerCase() === "hi there"
+        ? ""
+        : String(clientNameRaw || "").trim();
+
+    const reason_for_call =
+      pick(body, ["reason_for_call", "reasonForCall", "reason"], "") ||
+      pick(dynamicIn, ["reason_for_call", "reasonForCall", "reason"], "");
+
+    const notes =
+      pick(body, ["notes", "note"], "") ||
+      pick(dynamicIn, ["notes", "note"], "");
+
+    const mergedDynamicVars = {
+      ...(typeof dynamicIn === "object" && dynamicIn ? dynamicIn : {}),
+      // Deterministic outbound detection for your prompt:
+      call_direction: "outbound",
+      is_outbound: "true",
+      // Your prompt expects these exact keys:
+      client_name: client_name || undefined,
+      reason_for_call: String(reason_for_call || "").trim() || undefined,
+      notes: String(notes || "").trim() || undefined,
+    };
+
     // ---- Retell Outbound Call (V2) ----
     const payload = {
       from_number,
       to_number,
       metadata: {
-        ...(typeof metadata === "object" && metadata ? metadata : {}),
+        ...(typeof metadataIn === "object" && metadataIn ? metadataIn : {}),
         idempotency_key: idempotency_key || undefined,
         outbound: true,
         agent_id_for_tracking: agent_id,
@@ -474,8 +518,8 @@ module.exports = async function handler(req, res) {
         usage_month: reservedKeys?.month,
         timezone: lp.tz,
       },
-      retell_llm_dynamic_variables:
-        typeof dynamic_variables === "object" && dynamic_variables ? dynamic_variables : {},
+      // ✅ These are what your prompt can actually read as {{...}}
+      retell_llm_dynamic_variables: mergedDynamicVars,
     };
 
     const headers = {
@@ -516,6 +560,7 @@ module.exports = async function handler(req, res) {
       ok: true,
       mode: "outbound_call",
       retell: resp.data,
+      sent_dynamic_variables: mergedDynamicVars, // helpful debug (remove later if you want)
       limits: {
         calls_today: dailyCount,
         daily_call_limit,
