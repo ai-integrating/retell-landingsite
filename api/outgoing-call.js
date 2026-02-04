@@ -119,7 +119,6 @@ module.exports = async (req, res) => {
   }
 
   // --- usage counters (attempts) ---
-  // (We increment ONLY after Retell accepts the call creation request.)
   const now = new Date();
   const ymd = now.toISOString().slice(0, 10); // YYYY-MM-DD
   const dailyKey = agent_id ? `outbound:${agent_id}:${ymd}:count` : null;
@@ -132,13 +131,13 @@ module.exports = async (req, res) => {
     // Retell V2 create call endpoint
     const url = "https://api.retellai.com/v2/create-phone-call";
 
-    // Retell expects string values for dynamic variables.
-    // Also: use override_agent_id (NOT agent_id) per Retell v2 docs.
+    // ✅ UPDATED PAYLOAD: Including CALL_DIRECTION to trigger the Outbound Opener in your prompt
     const payload = {
       from_number,
       to_number,
       ...(agent_id ? { override_agent_id: agent_id } : {}),
       retell_llm_dynamic_variables: {
+        CALL_DIRECTION: "outbound",
         client_name: asString(client_name, ""),
         reason_for_call: asString(reason_for_call, ""),
         notes: asString(notes, ""),
