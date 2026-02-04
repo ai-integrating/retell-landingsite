@@ -275,30 +275,32 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ NEW: Outbound/inbound direction is explicit & resilient
+  // ✅ ENFORCED: Identity-first direction logic
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
     `- You may be given CALL_DIRECTION = "outbound" or "inbound".`,
-    `- If CALL_DIRECTION is "outbound": YOU are calling the customer first.`,
+    `- If CALL_DIRECTION is "outbound": YOU are calling the customer.`,
     `  - Do NOT start with "How can I help you?"`,
-    `  - Use the OUTBOUND OPENER.`,
+    `  - You MUST use the OUTBOUND OPENER structure.`,
     `- If CALL_DIRECTION is "inbound" OR missing: assume this is an INBOUND call.`,
     `  - Use the INBOUND OPENER.`,
     ``,
     `VARIABLES YOU MAY RECEIVE (may be blank):`,
-    `- CLIENT_NAME (or client_name): name of the person you are calling (outbound)`,
-    `- REASON_FOR_CALL (or reason_for_call): why you are calling (outbound)`,
-    `- NOTES (or notes): extra context to include in ONE short sentence (outbound)`,
+    `- CLIENT_NAME: name of the person you are calling (outbound)`,
+    `- REASON_FOR_CALL: why you are calling (outbound)`,
+    `- NOTES: extra context to include in ONE short sentence (outbound)`,
     ``,
     `INBOUND OPENER:`,
     `"Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
     ``,
-    `OUTBOUND OPENER (must sound natural even if fields are blank):`,
-    `"Hi there — this is ${agentName} calling from ${bizName}. I'm calling about something you requested."`,
-    `- If CLIENT_NAME is provided, replace "Hi there" with "Hi CLIENT_NAME".`,
-    `- If REASON_FOR_CALL is provided, replace "something you requested" with REASON_FOR_CALL.`,
-    `- If NOTES is provided, add ONE short sentence using it.`,
-    `- Then ask ONE clear question to move the call forward.`,
+    `OUTBOUND OPENER (MANDATORY STEP-BY-STEP STRUCTURE):`,
+    `1. GREET: "Hi {{CLIENT_NAME}}" (or "Hi there" if blank).`,
+    `2. IDENTIFY: "This is ${agentName} calling from ${bizName}."`,
+    `3. REASON: "I'm calling about {{REASON_FOR_CALL}}" (or "something you requested" if blank).`,
+    `4. CONTEXT: If NOTES is provided, add it as ONE brief sentence.`,
+    `5. ENGAGE: Ask one clear question to move the call forward.`,
+    ``,
+    `Example Outbound: "Hi Rose, this is ${agentName} calling from ${bizName}. I'm calling about the missed call we had earlier. Did you still need help with grooming today?"`,
   ].join("\n");
 
   const bases = {
@@ -458,12 +460,11 @@ module.exports = async (req, res) => {
 
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
 
-    // ✅ Build setup blocks first (so we can extract website from global_setup if needed)
+    // ✅ Build setup blocks
     const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
 
-    // ✅ Website: prefer explicit field, else extract from global setup text
     let website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     if (!website) website = extractWebsiteFromText(globalSetup);
 
@@ -475,15 +476,14 @@ module.exports = async (req, res) => {
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
-      // ✅ UPDATED outbound rules: no hard dependency on {{client_name}} templates
+      // ✅ ADDED strict outbound rules
       const outboundRules = [
         `OUTBOUND BEHAVIOR RULES (apply ONLY when CALL_DIRECTION is "outbound"):`,
-        `- You initiate the conversation (you called them).`,
-        `- If CLIENT_NAME (or client_name) is blank: start with "Hi there".`,
-        `- If REASON_FOR_CALL (or reason_for_call) is blank: say "calling about something you requested."`,
-        `- If NOTES (or notes) is provided: add ONE short sentence using it.`,
-        `- Then ask ONE clear question to move the call forward.`,
-        `- NEVER ask "How can I help you?" as your first line on outbound.`,
+        `- You initiated the call.`,
+        `- Follow the 5-step MANDATORY structure above.`,
+        `- Never forget to state you are from ${bizName}.`,
+        `- If CLIENT_NAME is blank, start with "Hi there".`,
+        `- NEVER ask "How can I help you?" as your first line.`,
       ].join("\n");
 
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
