@@ -64,7 +64,12 @@ function retellHeaders() {
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
-  if (r.includes("full staff") || r.includes("full_staff") || r.includes("operations") || r.includes("operator"))
+  if (
+    r.includes("full staff") ||
+    r.includes("full_staff") ||
+    r.includes("operations") ||
+    r.includes("operator")
+  )
     return "operations";
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
@@ -229,12 +234,9 @@ function buildGlobalSetupFromFields(body) {
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
 
-  return [
-    `GLOBAL BUSINESS INFO (internal reference):`,
-    ...facts.map((l) => `- ${l}`),
-    ``,
-    ...instructions,
-  ].join("\n");
+  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join(
+    "\n"
+  );
 }
 
 function getRoleSetupBlock(body, roleKey) {
@@ -273,15 +275,30 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ DIRECTION LOGIC (tightened)
+  // ✅ NEW: Outbound/inbound direction is explicit & resilient
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
-    `- IF {{client_name}} exists AND is not empty: This is an OUTBOUND call. Use the OUTBOUND OPENER.`,
-    `- ELSE: This is an INBOUND call. Use the INBOUND OPENER.`,
-    `- NEVER ask "How can I help you?" if you are the one calling.`,
+    `- You may be given CALL_DIRECTION = "outbound" or "inbound".`,
+    `- If CALL_DIRECTION is "outbound": YOU are calling the customer first.`,
+    `  - Do NOT start with "How can I help you?"`,
+    `  - Use the OUTBOUND OPENER.`,
+    `- If CALL_DIRECTION is "inbound" OR missing: assume this is an INBOUND call.`,
+    `  - Use the INBOUND OPENER.`,
     ``,
-    `INBOUND OPENER: "Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
-    `OUTBOUND OPENER: "Hi {{client_name}}, this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
+    `VARIABLES YOU MAY RECEIVE (may be blank):`,
+    `- CLIENT_NAME (or client_name): name of the person you are calling (outbound)`,
+    `- REASON_FOR_CALL (or reason_for_call): why you are calling (outbound)`,
+    `- NOTES (or notes): extra context to include in ONE short sentence (outbound)`,
+    ``,
+    `INBOUND OPENER:`,
+    `"Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
+    ``,
+    `OUTBOUND OPENER (must sound natural even if fields are blank):`,
+    `"Hi there — this is ${agentName} calling from ${bizName}. I'm calling about something you requested."`,
+    `- If CLIENT_NAME is provided, replace "Hi there" with "Hi CLIENT_NAME".`,
+    `- If REASON_FOR_CALL is provided, replace "something you requested" with REASON_FOR_CALL.`,
+    `- If NOTES is provided, add ONE short sentence using it.`,
+    `- Then ask ONE clear question to move the call forward.`,
   ].join("\n");
 
   const bases = {
@@ -290,6 +307,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Sound human and calm.`,
       `- Ask ONE question at a time.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
 
@@ -297,6 +315,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.`,
       `RULES:`,
       `- Ask ONE question at a time.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
 
@@ -304,6 +323,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the intake specialist for ${bizName}.`,
       `RULES:`,
       `- Ask ONE question at a time.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
 
@@ -312,6 +332,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `RULES:`,
       `- Stay calm. Move fast.`,
       `- Ask ONE question at a time.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
 
@@ -319,6 +340,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `ROLE: You are ${agentName}, the lead revival specialist for ${bizName}.`,
       `RULES:`,
       `- Your main job is to re-engage leads.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
 
@@ -328,6 +350,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Route by intent (schedule/intake/emergency) and handle full business operations.`,
       `- Ask ONE question at a time.`,
       `- Follow BUSINESS SETUP rules.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
   };
@@ -353,9 +376,7 @@ async function sleep(ms) {
 }
 
 function getSubmissionId(body) {
-  return String(
-    pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
-  ).trim();
+  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
 }
 
 async function getExistingProvision(idemKey) {
@@ -374,16 +395,7 @@ async function releaseLock(lockKey) {
   } catch {}
 }
 
-function normalizeProvisionRecord({
-  mode,
-  llmId,
-  agentId,
-  phoneNumber,
-  phoneNumberId,
-  numberTierFinal,
-  voiceKey,
-  roleKey,
-}) {
+function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
   return {
     mode,
     llm_id: llmId,
@@ -401,8 +413,7 @@ function normalizeProvisionRecord({
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   let lockKey = null;
 
@@ -434,8 +445,7 @@ module.exports = async (req, res) => {
       return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
 
-    const purchaseNumber =
-      String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
     const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only"))
       .toLowerCase()
       .trim();
@@ -464,12 +474,16 @@ module.exports = async (req, res) => {
 
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
+
+      // ✅ UPDATED outbound rules: no hard dependency on {{client_name}} templates
       const outboundRules = [
-        `OUTBOUND BEHAVIOR RULES:`,
-        `- If {{notes}} is provided, add ONE short sentence using it.`,
-        `- Fallback for blank name: say “Hi there,”`,
-        `- Fallback for blank reason: say “calling about something you requested.”`,
-        `- Ask ONE clear question to move the call forward.`,
+        `OUTBOUND BEHAVIOR RULES (apply ONLY when CALL_DIRECTION is "outbound"):`,
+        `- You initiate the conversation (you called them).`,
+        `- If CLIENT_NAME (or client_name) is blank: start with "Hi there".`,
+        `- If REASON_FOR_CALL (or reason_for_call) is blank: say "calling about something you requested."`,
+        `- If NOTES (or notes) is provided: add ONE short sentence using it.`,
+        `- Then ask ONE clear question to move the call forward.`,
+        `- NEVER ask "How can I help you?" as your first line on outbound.`,
       ].join("\n");
 
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
