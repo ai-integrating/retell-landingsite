@@ -278,29 +278,27 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
   // ✅ ENFORCED: Identity-first direction logic
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
-    `- You will receive CALL_DIRECTION = "outbound" or "inbound".`,
+    `- You will receive a variable: CALL_DIRECTION = "{{CALL_DIRECTION}}".`,
     `- If CALL_DIRECTION is "outbound": YOU are initiating the call.`,
     `  - Do NOT start with "How can I help you?"`,
     `  - You MUST use the OUTBOUND OPENER structure below.`,
     `- If CALL_DIRECTION is "inbound" OR missing: Assume this is an incoming call.`,
     `  - Use the INBOUND OPENER.`,
     ``,
-    `DYNAMIC VARIABLES (Lowercase names must match your incoming data):`,
-    `- client_name: Name of the person being called.`,
-    `- reason_for_call: The specific reason for the outbound call.`,
-    `- notes: Any extra context for the call.`,
+    `DYNAMIC VARIABLES:`,
+    `- client_name: {{client_name}}`,
+    `- reason_for_call: {{reason_for_call}}`,
+    `- notes: {{notes}}`,
     ``,
     `INBOUND OPENER:`,
     `"Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
     ``,
     `OUTBOUND OPENER (MANDATORY STEP-BY-STEP STRUCTURE):`,
-    `1. GREET: Say "Hi client_name" (or "Hi there" if blank).`,
+    `1. GREET: Say "Hi {{client_name}}" (or "Hi there" if blank).`,
     `2. IDENTIFY: Say "This is ${agentName} calling from ${bizName}."`,
-    `3. REASON: Say "I'm calling about reason_for_call" (or "something you requested" if blank).`,
-    `4. CONTEXT: If notes is provided, add it as ONE brief sentence.`,
+    `3. REASON: Say "I'm calling about {{reason_for_call}}" (or "something you requested" if blank).`,
+    `4. CONTEXT: If {{notes}} is provided, add it as ONE brief sentence.`,
     `5. ENGAGE: Ask one clear question to move the call forward.`,
-    ``,
-    `Example Outbound: "Hi Rose, this is ${agentName} calling from ${bizName}. I'm calling about the missed call we had earlier. Did you still need help with grooming today?"`,
   ].join("\n");
 
   const bases = {
@@ -482,7 +480,7 @@ module.exports = async (req, res) => {
         `- You initiated the call.`,
         `- Follow the 5-step MANDATORY structure above.`,
         `- Never forget to state you are from ${bizName}.`,
-        `- If client_name is blank, start with "Hi there".`,
+        `- If {{client_name}} is blank, start with "Hi there".`,
         `- NEVER ask "How can I help you?" as your first line.`,
       ].join("\n");
 
