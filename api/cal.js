@@ -1,5 +1,5 @@
 // /api/cal.js
-// Combined Cal.com endpoints: availability + booking (Hobby plan friendly)
+// Combines Cal.com availability + booking into ONE Vercel function.
 
 const axios = require("axios");
 
@@ -13,12 +13,14 @@ function setCors(res) {
   );
 }
 
+// -------------------- JSON RESPONSE --------------------
 function json(res, status, payload) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(payload));
 }
 
+// -------------------- BODY --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
@@ -42,10 +44,7 @@ async function readJsonBody(req) {
   });
 }
 
-function ymd(d) {
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
+// -------------------- HELPERS --------------------
 function asString(v, fallback = "") {
   if (v === undefined || v === null) return fallback;
   const s = String(v).trim();
@@ -56,11 +55,14 @@ function cleanPhone(phone) {
   if (!phone) return "";
   let p = String(phone).trim();
   const digits = p.replace(/[^\d]/g, "");
-
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
   if (p.startsWith("+")) return p;
   return digits ? `+${digits}` : "";
+}
+
+function ymd(d) {
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
 // -------------------- MAIN --------------------
@@ -74,10 +76,10 @@ module.exports = async (req, res) => {
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
 
-  // action can come from querystring OR body
+  // action can come from query string or body
   const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
 
-  // env vars
+  // env
   const CAL_API_KEY = process.env.CAL_API_KEY;
   const username = process.env.CAL_USERNAME || "ai-integrating";
   const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
@@ -87,8 +89,9 @@ module.exports = async (req, res) => {
 
   try {
     // -------------------- AVAILABILITY --------------------
+    // GET /api/cal?action=availability&days=7&limit=10
+    // OR POST /api/cal with { action: "availability", days: 7, limit: 10 }
     if (action === "availability" || action === "slots") {
-      // Optional controls
       const days = Number(req.query.days || body.days || 7);
       const limit = Number(req.query.limit || body.limit || 10);
 
@@ -136,20 +139,27 @@ module.exports = async (req, res) => {
       });
     }
 
-    // -------------------- BOOKING --------------------
+    // -------------------- BOOK --------------------
+    // POST /api/cal?action=book
+    // Body:
+    // {
+    //   "start": "2026-02-07T15:00:00Z",
+    //   "attendee": { "name": "...", "email": "...", "phoneNumber": "+1...", "timeZone": "America/New_York" },
+    //   "agent_id": "...", "client_id": "...", "retell_call_id": "...", "reason_for_call": "..."
+    // }
     if (action === "book" || action === "booking") {
       if (req.method !== "POST") {
         return json(res, 405, { ok: false, error: "Booking requires POST" });
       }
 
-      const start = asString(body.start, "");
-      if (!start) return json(res, 400, { ok: false, error: "Missing start (ISO time)" });
+      const startISO = asString(body.start, "");
+      if (!startISO) return json(res, 400, { ok: false, error: "Missing start (ISO time)" });
 
       const attendee = body.attendee || {};
       const attendeeName = asString(attendee.name, asString(body.name, ""));
       const attendeeEmail = asString(attendee.email, asString(body.email, ""));
       const attendeePhone = cleanPhone(attendee.phoneNumber || body.phone || body.phoneNumber);
-      const attendeeTimeZone = asString(attendee.timeZone, asString(body.timeZone, timeZone));
+      const attendeeTZ = asString(attendee.timeZone, asString(body.timeZone, timeZone));
 
       if (!attendeeName) return json(res, 400, { ok: false, error: "Missing attendee name" });
       if (!attendeeEmail) return json(res, 400, { ok: false, error: "Missing attendee email" });
@@ -160,14 +170,14 @@ module.exports = async (req, res) => {
         asString(body.idempotency_key, asString(body.request_id, ""));
 
       const payload = {
-        start,
+        start: startISO,
         eventTypeSlug,
         username,
         attendee: {
           name: attendeeName,
           email: attendeeEmail,
           phoneNumber: attendeePhone,
-          timeZone: attendeeTimeZone,
+          timeZone: attendeeTZ,
         },
         metadata: {
           agent_id: asString(body.agent_id, ""),
@@ -187,16 +197,20 @@ module.exports = async (req, res) => {
         timeout: 30000,
       });
 
-      return json(res, 200, { ok: true, action: "book", booking: resp.data });
+      return json(res, 200, {
+        ok: true,
+        action: "book",
+        booking: resp.data,
+      });
     }
 
-    // -------------------- HELP MESSAGE --------------------
+    // -------------------- HELP --------------------
     return json(res, 400, {
       ok: false,
       error: "Missing/unknown action. Use action=availability or action=book.",
       examples: {
         availability: "/api/cal?action=availability&days=7&limit=10",
-        book: "POST /api/cal?action=book (JSON body with start + attendee)",
+        book: "POST /api/cal?action=book with { start, attendee{...} }",
       },
     });
   } catch (err) {
