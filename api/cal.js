@@ -1,7 +1,8 @@
 // /api/cal.js
-// Combines Cal.com availability + booking into ONE Vercel function.
+// Combines Cal.com availability + booking + AUTO booking into ONE Vercel function.
 
 const axios = require("axios");
+const { kv } = require("@vercel/kv");
 
 // -------------------- CORS --------------------
 function setCors(res) {
@@ -65,6 +66,104 @@ function ymd(d) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
+function toMinutesLocalHHMM(isoString, timeZone) {
+  // Convert ISO -> localized "HH:MM" then to minutes since midnight
+  // Uses Intl.DateTimeFormat (no extra deps)
+  try {
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const parts = dtf.formatToParts(new Date(isoString));
+    const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+    return hh * 60 + mm;
+  } catch {
+    // fallback: treat as UTC if timezone parse fails
+    const d = new Date(isoString);
+    return d.getUTCHours() * 60 + d.getUTCMinutes();
+  }
+}
+
+function matchesWindow(isoStart, timeZone, timeWindow) {
+  const w = (timeWindow || "anytime").toLowerCase();
+  if (w === "anytime" || w === "any") return true;
+
+  const mins = toMinutesLocalHHMM(isoStart, timeZone);
+
+  // define windows in LOCAL TIME
+  // morning: 8:00–11:59
+  // afternoon: 12:00–16:59
+  // evening: 17:00–20:00
+  if (w === "morning") return mins >= 8 * 60 && mins < 12 * 60;
+  if (w === "afternoon") return mins >= 12 * 60 && mins < 17 * 60;
+  if (w === "evening") return mins >= 17 * 60 && mins <= 20 * 60;
+
+  return true;
+}
+
+function isSameYMDInTZ(isoStart, targetYmd, timeZone) {
+  if (!targetYmd) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetYmd)) return true;
+
+  try {
+    const dtf = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const ymdLocal = dtf.format(new Date(isoStart)); // "YYYY-MM-DD"
+    return ymdLocal === targetYmd;
+  } catch {
+    return true;
+  }
+}
+
+async function fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end }) {
+  const url =
+    `https://api.cal.com/v2/slots` +
+    `?eventTypeSlug=${encodeURIComponent(eventTypeSlug)}` +
+    `&username=${encodeURIComponent(username)}` +
+    `&start=${encodeURIComponent(start)}` +
+    `&end=${encodeURIComponent(end)}` +
+    `&timeZone=${encodeURIComponent(timeZone)}` +
+    `&format=time`;
+
+  const resp = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${CAL_API_KEY}`,
+      "cal-api-version": "2024-09-04",
+    },
+    timeout: 30000,
+  });
+
+  const byDate = resp?.data?.data || {};
+  const starts = [];
+  for (const day of Object.keys(byDate).sort()) {
+    const slots = byDate[day] || [];
+    for (const s of slots) {
+      if (s?.start) starts.push(s.start);
+    }
+  }
+  return starts;
+}
+
+async function createBooking({ CAL_API_KEY, payload }) {
+  const resp = await axios.post("https://api.cal.com/v2/bookings", payload, {
+    headers: {
+      Authorization: `Bearer ${CAL_API_KEY}`,
+      "Content-Type": "application/json",
+      "cal-api-version": "2024-08-13",
+    },
+    timeout: 30000,
+  });
+
+  return resp.data;
+}
+
 // -------------------- MAIN --------------------
 module.exports = async (req, res) => {
   setCors(res);
@@ -76,7 +175,6 @@ module.exports = async (req, res) => {
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
 
-  // action can come from query string or body
   const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
 
   // env
@@ -89,8 +187,6 @@ module.exports = async (req, res) => {
 
   try {
     // -------------------- AVAILABILITY --------------------
-    // GET /api/cal?action=availability&days=7&limit=10
-    // OR POST /api/cal with { action: "availability", days: 7, limit: 10 }
     if (action === "availability" || action === "slots") {
       const days = Number(req.query.days || body.days || 7);
       const limit = Number(req.query.limit || body.limit || 10);
@@ -99,32 +195,7 @@ module.exports = async (req, res) => {
       const start = ymd(now);
       const end = ymd(new Date(now.getTime() + days * 24 * 60 * 60 * 1000));
 
-      const url =
-        `https://api.cal.com/v2/slots` +
-        `?eventTypeSlug=${encodeURIComponent(eventTypeSlug)}` +
-        `&username=${encodeURIComponent(username)}` +
-        `&start=${encodeURIComponent(start)}` +
-        `&end=${encodeURIComponent(end)}` +
-        `&timeZone=${encodeURIComponent(timeZone)}` +
-        `&format=time`;
-
-      const resp = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${CAL_API_KEY}`,
-          "cal-api-version": "2024-09-04",
-        },
-        timeout: 30000,
-      });
-
-      const byDate = resp?.data?.data || {};
-      const starts = [];
-
-      for (const day of Object.keys(byDate).sort()) {
-        const slots = byDate[day] || [];
-        for (const s of slots) {
-          if (s?.start) starts.push(s.start);
-        }
-      }
+      const starts = await fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end });
 
       return json(res, 200, {
         ok: true,
@@ -140,17 +211,8 @@ module.exports = async (req, res) => {
     }
 
     // -------------------- BOOK --------------------
-    // POST /api/cal?action=book
-    // Body:
-    // {
-    //   "start": "2026-02-07T15:00:00Z",
-    //   "attendee": { "name": "...", "email": "...", "phoneNumber": "+1...", "timeZone": "America/New_York" },
-    //   "agent_id": "...", "client_id": "...", "retell_call_id": "...", "reason_for_call": "..."
-    // }
     if (action === "book" || action === "booking") {
-      if (req.method !== "POST") {
-        return json(res, 405, { ok: false, error: "Booking requires POST" });
-      }
+      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Booking requires POST" });
 
       const startISO = asString(body.start, "");
       if (!startISO) return json(res, 400, { ok: false, error: "Missing start (ISO time)" });
@@ -185,32 +247,128 @@ module.exports = async (req, res) => {
           retell_call_id: asString(body.retell_call_id, ""),
           idempotency_key: asString(idempotency_key, ""),
           reason_for_call: asString(body.reason_for_call, ""),
+          notes: asString(body.notes, ""),
         },
       };
 
-      const resp = await axios.post("https://api.cal.com/v2/bookings", payload, {
-        headers: {
-          Authorization: `Bearer ${CAL_API_KEY}`,
-          "Content-Type": "application/json",
-          "cal-api-version": "2024-08-13",
-        },
-        timeout: 30000,
+      const booking = await createBooking({ CAL_API_KEY, payload });
+
+      return json(res, 200, { ok: true, action: "book", booking });
+    }
+
+    // -------------------- AUTO --------------------
+    // POST /api/cal?action=auto
+    // Body:
+    // {
+    //   "name": "...", "email": "...", "phone": "+1...",
+    //   "time_window": "morning|afternoon|evening|anytime",
+    //   "preferred_day": "next_available" OR "YYYY-MM-DD",
+    //   "days": 7,
+    //   "agent_id": "...", "client_id": "...", "retell_call_id": "...",
+    //   "reason_for_call": "...", "notes": "..."
+    // }
+    if (action === "auto" || action === "autobook") {
+      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Auto booking requires POST" });
+
+      const attendeeName = asString(body.name, "");
+      const attendeeEmail = asString(body.email, "");
+      const attendeePhone = cleanPhone(body.phone || body.phoneNumber);
+      const attendeeTZ = asString(body.timeZone, timeZone);
+
+      if (!attendeeName) return json(res, 400, { ok: false, error: "Missing name" });
+      if (!attendeeEmail) return json(res, 400, { ok: false, error: "Missing email" });
+      if (!attendeePhone) return json(res, 400, { ok: false, error: "Missing phone" });
+
+      const days = Number(body.days || req.query.days || 7);
+      const time_window = asString(body.time_window, "anytime").toLowerCase();
+      const preferred_day_raw = asString(body.preferred_day, "next_available").toLowerCase();
+      const preferred_day = preferred_day_raw === "next_available" ? "" : preferred_day_raw;
+
+      // Strong idempotency: prefer caller provided key; otherwise derive from retell_call_id or email+window+day
+      const headerIdem = req.headers["x-idempotency-key"];
+      const providedIdem = asString(body.idempotency_key, asString(body.request_id, ""));
+      const retellCall = asString(body.retell_call_id, "");
+      const idem =
+        asString(headerIdem, "") ||
+        providedIdem ||
+        (retellCall ? `retell:${retellCall}` : `auto:${attendeeEmail}:${preferred_day || "next"}:${time_window}`);
+
+      const idemKey = `cal:auto:idem:${idem}`;
+
+      // if already booked, return same result
+      const existing = await kv.get(idemKey);
+      if (existing && existing.status === "booked") {
+        return json(res, 200, { ok: true, action: "auto", reused: true, ...existing });
+      }
+
+      // lock for 2 minutes to block retries/races
+      const lockKey = `cal:auto:lock:${idem}`;
+      const gotLock = await kv.set(lockKey, "1", { nx: true, ex: 120 });
+      if (!gotLock) {
+        // another request is in-flight; return soft response
+        return json(res, 202, { ok: true, action: "auto", status: "processing", idempotency_key: idem });
+      }
+
+      // mark processing (10 min TTL)
+      await kv.set(idemKey, { status: "processing", idempotency_key: idem }, { ex: 600 });
+
+      const now = new Date();
+      const start = ymd(now);
+      const end = ymd(new Date(now.getTime() + days * 24 * 60 * 60 * 1000));
+
+      const starts = await fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end });
+
+      // filter by preferred day + window
+      const filtered = starts.filter((s) => {
+        if (!isSameYMDInTZ(s, preferred_day, attendeeTZ)) return false;
+        return matchesWindow(s, attendeeTZ, time_window);
       });
 
-      return json(res, 200, {
-        ok: true,
-        action: "book",
-        booking: resp.data,
-      });
+      const chosen = filtered[0] || starts[0]; // fallback to first available if strict filter finds none
+      if (!chosen) {
+        await kv.set(idemKey, { status: "failed", error: "No available slots found", idempotency_key: idem }, { ex: 900 });
+        return json(res, 409, { ok: false, action: "auto", error: "No available slots found" });
+      }
+
+      const payload = {
+        start: chosen,
+        eventTypeSlug,
+        username,
+        attendee: {
+          name: attendeeName,
+          email: attendeeEmail,
+          phoneNumber: attendeePhone,
+          timeZone: attendeeTZ,
+        },
+        metadata: {
+          agent_id: asString(body.agent_id, ""),
+          client_id: asString(body.client_id, ""),
+          retell_call_id: retellCall,
+          idempotency_key: idem,
+          reason_for_call: asString(body.reason_for_call, ""),
+          notes: asString(body.notes, ""),
+          time_window,
+          preferred_day: preferred_day || "next_available",
+        },
+      };
+
+      const booking = await createBooking({ CAL_API_KEY, payload });
+
+      const saved = { status: "booked", idempotency_key: idem, chosen_start: chosen, booking };
+      await kv.set(idemKey, saved, { ex: 60 * 60 * 24 }); // keep for 24h
+      await kv.del(lockKey);
+
+      return json(res, 200, { ok: true, action: "auto", ...saved });
     }
 
     // -------------------- HELP --------------------
     return json(res, 400, {
       ok: false,
-      error: "Missing/unknown action. Use action=availability or action=book.",
+      error: "Missing/unknown action. Use action=availability, action=book, or action=auto.",
       examples: {
         availability: "/api/cal?action=availability&days=7&limit=10",
         book: "POST /api/cal?action=book with { start, attendee{...} }",
+        auto: "POST /api/cal?action=auto with { name,email,phone,time_window,preferred_day }",
       },
     });
   } catch (err) {
