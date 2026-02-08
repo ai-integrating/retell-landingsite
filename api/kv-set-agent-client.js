@@ -1,5 +1,5 @@
 // /api/kv-set-agent-client.js
-// Sets agent->client mapping (and optionally plan) in Vercel KV.
+// Sets agent->client mapping (and optionally plan + client cal config) in Vercel KV.
 // Designed to be IDEMPOTENT:
 // - If mapping already matches, returns 200 ok (no conflict).
 // - If mapping exists but differs, returns 409 with details.
@@ -46,15 +46,57 @@ function okJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+// -------------------- HELPERS --------------------
+function asString(v, fallback = "") {
+  if (v === undefined || v === null) return fallback;
+  const s = String(v).trim();
+  return s ? s : fallback;
+}
+
+// Accept cal config in multiple shapes:
+// - body.cal = { username, eventTypeSlug, timeZone }
+// - OR flat keys: cal_username, cal_event_slug, cal_eventTypeSlug, cal_timezone
+function extractCalConfig(body) {
+  const calObj = body?.cal && typeof body.cal === "object" ? body.cal : {};
+
+  const username = asString(
+    calObj.username,
+    asString(body?.cal_username, asString(body?.CAL_USERNAME, ""))
+  );
+
+  const eventTypeSlug = asString(
+    calObj.eventTypeSlug,
+    asString(
+      body?.cal_eventTypeSlug,
+      asString(body?.cal_event_slug, asString(body?.CAL_EVENT_SLUG, ""))
+    )
+  );
+
+  const timeZone = asString(
+    calObj.timeZone,
+    asString(body?.cal_timezone, asString(body?.CAL_TIMEZONE, ""))
+  );
+
+  // Only return a config object if at least one value was supplied
+  const hasAny = !!(username || eventTypeSlug || timeZone);
+  if (!hasAny) return null;
+
+  return {
+    username: username || undefined,
+    eventTypeSlug: eventTypeSlug || undefined,
+    timeZone: timeZone || undefined,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 // -------------------- AUTH --------------------
 function isAdmin(body) {
   const secret = process.env.KV_ADMIN_SECRET;
-
   // Safer default: if secret isn't set, DO NOT allow writes.
   if (!secret) return false;
 
-  const provided = String(body?.admin_secret || "").trim();
-  return provided === String(secret).trim();
+  const provided = asString(body?.admin_secret, "");
+  return provided === asString(secret, "");
 }
 
 module.exports = async function handler(req, res) {
@@ -72,14 +114,13 @@ module.exports = async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
 
-    // Auth check (no headers required)
     if (!isAdmin(body)) {
       return okJson(res, 401, { ok: false, error: "Unauthorized" });
     }
 
-    const agent_id = String(body?.agent_id || "").trim();
-    const client_id = String(body?.client_id || "").trim();
-    const plan = String(body?.plan || "").trim(); // optional: trial/basic/pro
+    const agent_id = asString(body?.agent_id, "");
+    const client_id = asString(body?.client_id, "");
+    const plan = asString(body?.plan, ""); // optional
 
     if (!agent_id || !client_id) {
       return okJson(res, 400, { ok: false, error: "Missing agent_id or client_id" });
@@ -88,19 +129,30 @@ module.exports = async function handler(req, res) {
     const mapKey = `agent:${agent_id}:client`;
     const existing = await kv.get(mapKey);
 
+    // Prepare optional cal config write
+    const calConfig = extractCalConfig(body);
+    const calKey = `client:${client_id}:cal`;
+
     // If already set to same client -> idempotent success
     if (existing && String(existing) === client_id) {
       if (plan) await kv.set(`plan:${agent_id}`, plan);
+      if (calConfig) {
+        // Merge on top of existing cal config (don't wipe missing fields)
+        const prev = (await kv.get(calKey)) || {};
+        await kv.set(calKey, { ...prev, ...calConfig });
+      }
+
       return okJson(res, 200, {
         ok: true,
         agent_id,
         client_id,
         already_set: true,
         plan_set: !!plan,
+        cal_set: !!calConfig,
       });
     }
 
-    // If set to DIFFERENT client -> conflict (prevents cross-client abuse)
+    // If set to DIFFERENT client -> conflict
     if (existing && String(existing) !== client_id) {
       return okJson(res, 409, {
         ok: false,
@@ -116,12 +168,19 @@ module.exports = async function handler(req, res) {
 
     if (plan) await kv.set(`plan:${agent_id}`, plan);
 
+    if (calConfig) {
+      const prev = (await kv.get(calKey)) || {};
+      await kv.set(calKey, { ...prev, ...calConfig });
+    }
+
     return okJson(res, 200, {
       ok: true,
       agent_id,
       client_id,
       set: true,
       plan_set: !!plan,
+      cal_set: !!calConfig,
+      cal_key: calConfig ? calKey : undefined,
     });
   } catch (err) {
     console.error("kv-set-agent-client: ERROR", err);
