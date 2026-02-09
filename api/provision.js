@@ -1,4 +1,7 @@
 // /api/provision.js
+// ✅ UPDATE: Inject "EMAIL REQUIRED TO BOOK" rules into scheduler/operations prompts (and optionally any role)
+// Keeps backend (/api/cal.js) + agent behavior aligned.
+
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
 
@@ -162,11 +165,9 @@ function extractWebsiteFromText(text) {
   if (!text) return "";
   const s = String(text);
 
-  // Prefer explicit http(s) URL
   const m1 = s.match(/website\s*[:=]\s*(https?:\/\/[^\s]+)/i);
   if (m1?.[1]) return m1[1].trim();
 
-  // Fallback: domain without protocol (e.g., www.example.com)
   const m2 = s.match(/website\s*[:=]\s*([a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
   if (m2?.[1]) return m2[1].trim();
 
@@ -177,7 +178,6 @@ async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
 
-  // Use the full secure URL and increase timeout for Jina Reader
   const scrapeUrl = `https://r.jina.ai/${u}`;
   try {
     const resp = await axios.get(scrapeUrl, {
@@ -275,7 +275,6 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ ENFORCED: Identity-first direction logic
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
     `- You will receive a variable: CALL_DIRECTION = "{{CALL_DIRECTION}}".`,
@@ -370,13 +369,34 @@ function buildBusinessContext(body) {
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
+// ✅ NEW: Booking email requirement block (injected into scheduler/operations prompts)
+function buildBookingEmailGateBlock({ bizName }) {
+  return [
+    `BOOKING REQUIREMENT (STRICT):`,
+    `- You are NOT allowed to book an appointment unless you have the caller’s email address.`,
+    `- Always ask for email BEFORE confirming a booking.`,
+    `- Ask exactly: "What’s the best email to send your appointment confirmation to?"`,
+    `- Confirm the email once: "Just to confirm, that’s <email>, correct?"`,
+    `- If the caller refuses/can’t provide email:`,
+    `  - Do NOT attempt to book.`,
+    `  - Say: "No problem — I can’t reserve a time without an email for confirmation, but I can have the team follow up."`,
+    `  - Collect their best callback number and preferred day/time window.`,
+    `  - End politely.`,
+    ``,
+    `IMPORTANT TOOL RULE:`,
+    `- Only call the booking tool/API after you have name + email + phone.`,
+  ].join("\n");
+}
+
 // -------------------- IDEMPOTENCY HELPERS --------------------
 async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 function getSubmissionId(body) {
-  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
+  return String(
+    pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
+  ).trim();
 }
 
 async function getExistingProvision(idemKey) {
@@ -395,7 +415,16 @@ async function releaseLock(lockKey) {
   } catch {}
 }
 
-function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
+function normalizeProvisionRecord({
+  mode,
+  llmId,
+  agentId,
+  phoneNumber,
+  phoneNumberId,
+  numberTierFinal,
+  voiceKey,
+  roleKey,
+}) {
   return {
     mode,
     llm_id: llmId,
@@ -489,12 +518,16 @@ module.exports = async (req, res) => {
         base = [base, outboundRules].join("\n\n");
       }
 
+      // ✅ NEW: Inject booking-email gate for scheduler + operations (anything that books)
+      const bookingRoles = new Set(["scheduler", "operations"]);
+      const bookingGate = bookingRoles.has(roleKey) ? buildBookingEmailGateBlock({ bizName }) : "";
+
       const ctx = buildBusinessContext(body);
       const websiteSection = scrape.ok
         ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
         : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
-      promptToUse = [base, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
+      promptToUse = [base, bookingGate, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
 
