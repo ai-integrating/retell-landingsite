@@ -7,15 +7,41 @@ function ok(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function ymdInTZ(date = new Date(), tz = "America/New_York") { /* same as above */ }
-function ymInTZ(date = new Date(), tz = "America/New_York") { /* same as above */ }
+// ---- TZ helpers (no deps) ----
+function ymdInTZ(date = new Date(), tz = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return `${y}-${m}-${d}`;
+}
+function ymInTZ(date = new Date(), tz = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  return `${y}-${m}`;
+}
 
 module.exports = async function handler(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const agent_id = url.searchParams.get("agent_id");
   if (!agent_id) return ok(res, 400, { ok: false, error: "agent_id required" });
 
-  const tz = process.env.DEFAULT_TZ || "America/New_York";
+  // ✅ per-agent timezone from KV first
+  const tz =
+    (await kv.get(`tz:${agent_id}`)) ||
+    process.env.DEFAULT_TZ ||
+    "America/New_York";
+
   const day = ymdInTZ(new Date(), tz);
   const month = ymInTZ(new Date(), tz);
 
