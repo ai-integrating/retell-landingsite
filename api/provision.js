@@ -1,6 +1,5 @@
 // /api/provision.js
-// ✅ UPDATE: Inject "EMAIL REQUIRED TO BOOK" rules into scheduler/operations prompts (and optionally any role)
-// Keeps backend (/api/cal.js) + agent behavior aligned.
+// ✅ UPDATE: Protect tiers (Receptionist does NOT book; Scheduler/Operations require email to book)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -160,7 +159,6 @@ function cleanScrapedText(raw) {
   return text.trim();
 }
 
-// ✅ NEW: Extract website from global setup text if website field missing
 function extractWebsiteFromText(text) {
   if (!text) return "";
   const s = String(text);
@@ -369,22 +367,33 @@ function buildBusinessContext(body) {
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
-// ✅ NEW: Booking email requirement block (injected into scheduler/operations prompts)
-function buildBookingEmailGateBlock({ bizName }) {
+// ✅ Tier protection blocks
+function buildSchedulerEmailGateBlock() {
   return [
     `BOOKING REQUIREMENT (STRICT):`,
-    `- You are NOT allowed to book an appointment unless you have the caller’s email address.`,
+    `- You are allowed to BOOK appointments.`,
+    `- You are NOT allowed to book unless you have the caller’s email address.`,
     `- Always ask for email BEFORE confirming a booking.`,
     `- Ask exactly: "What’s the best email to send your appointment confirmation to?"`,
-    `- Confirm the email once: "Just to confirm, that’s <email>, correct?"`,
-    `- If the caller refuses/can’t provide email:`,
-    `  - Do NOT attempt to book.`,
-    `  - Say: "No problem — I can’t reserve a time without an email for confirmation, but I can have the team follow up."`,
-    `  - Collect their best callback number and preferred day/time window.`,
-    `  - End politely.`,
-    ``,
-    `IMPORTANT TOOL RULE:`,
-    `- Only call the booking tool/API after you have name + email + phone.`,
+    `- Confirm once: "Just to confirm, that’s <email>, correct?"`,
+    `- If caller refuses/can’t provide email: do NOT book. Collect callback number + preferred day/time window and say the team will follow up.`,
+    `IMPORTANT TOOL RULE: Only call booking after you have name + email + phone.`,
+  ].join("\n");
+}
+
+function buildReceptionistNoBookingBlock() {
+  return [
+    `SCHEDULING LIMIT (PLAN-BASED):`,
+    `- You do NOT book appointments.`,
+    `- You do NOT reschedule or cancel appointments.`,
+    `- If a caller wants to book/reschedule/cancel:`,
+    `  1) Collect caller name`,
+    `  2) Collect callback number`,
+    `  3) Collect best email`,
+    `  4) Ask preferred day + time window (morning/afternoon/evening)`,
+    `  5) Say: "I’ll pass this to the scheduling team and they’ll confirm shortly."`,
+    `- Do NOT promise a reserved time. Do NOT call any booking tools/APIs.`,
+    `- If asked why: "I can take your details and have the team confirm—so we get it right."`,
   ].join("\n");
 }
 
@@ -487,7 +496,6 @@ module.exports = async (req, res) => {
 
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
 
-    // ✅ Build setup blocks
     const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
@@ -503,7 +511,6 @@ module.exports = async (req, res) => {
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
-      // ✅ ADDED strict outbound rules
       const outboundRules = [
         `OUTBOUND BEHAVIOR RULES (apply ONLY when CALL_DIRECTION is "outbound"):`,
         `- You initiated the call.`,
@@ -514,20 +521,24 @@ module.exports = async (req, res) => {
       ].join("\n");
 
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
-      if (outboundRoles.has(roleKey)) {
-        base = [base, outboundRules].join("\n\n");
-      }
+      if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
 
-      // ✅ NEW: Inject booking-email gate for scheduler + operations (anything that books)
-      const bookingRoles = new Set(["scheduler", "operations"]);
-      const bookingGate = bookingRoles.has(roleKey) ? buildBookingEmailGateBlock({ bizName }) : "";
+      // ✅ Tier protection injection:
+      // - Receptionist: explicitly NO booking
+      // - Scheduler/Operations: booking allowed BUT requires email
+      const tierProtection =
+        roleKey === "receptionist"
+          ? buildReceptionistNoBookingBlock()
+          : roleKey === "scheduler" || roleKey === "operations"
+          ? buildSchedulerEmailGateBlock()
+          : "";
 
       const ctx = buildBusinessContext(body);
       const websiteSection = scrape.ok
         ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
         : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
-      promptToUse = [base, bookingGate, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
+      promptToUse = [base, tierProtection, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
 
