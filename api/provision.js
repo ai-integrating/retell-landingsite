@@ -1,5 +1,6 @@
 // /api/provision.js
-// ✅ UPDATE: Protect tiers (Receptionist does NOT book; Scheduler/Operations require email to book)
+// ✅ UPDATE: Protect tiers (Receptionist does NOT book; Scheduler/Operations require email + service to book)
+// ✅ UPDATE: Prevent hallucinated availability, enforce intake order, and stop outbound bleed into inbound
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -66,12 +67,7 @@ function retellHeaders() {
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
-  if (
-    r.includes("full staff") ||
-    r.includes("full_staff") ||
-    r.includes("operations") ||
-    r.includes("operator")
-  )
+  if (r.includes("full staff") || r.includes("full_staff") || r.includes("operations") || r.includes("operator"))
     return "operations";
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
@@ -227,14 +223,12 @@ function buildGlobalSetupFromFields(body) {
     `Receptionist Instructions:`,
     `- Be warm, calm, and professional.`,
     `- Ask one question at a time.`,
-    `- Collect: caller name, callback number, and a brief hair-service goal.`,
+    `- Collect: caller name, callback number, and a brief service goal.`,
     `- Do NOT give exact pricing or guarantees; offer to have the team follow up.`,
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
 
-  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join(
-    "\n"
-  );
+  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join("\n");
 }
 
 function getRoleSetupBlock(body, roleKey) {
@@ -273,14 +267,16 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
+  // ✅ Strengthened: inbound is default unless explicitly outbound
   const directionLogic = [
     `CRITICAL CALL-START LOGIC:`,
     `- You will receive a variable: CALL_DIRECTION = "{{CALL_DIRECTION}}".`,
+    `- ABSOLUTE DEFAULT: Treat the call as INBOUND unless CALL_DIRECTION is exactly "outbound".`,
+    `- If CALL_DIRECTION is missing/blank/unknown: INBOUND.`,
     `- If CALL_DIRECTION is "outbound": YOU are initiating the call.`,
     `  - Do NOT start with "How can I help you?"`,
     `  - You MUST use the OUTBOUND OPENER structure below.`,
-    `- If CALL_DIRECTION is "inbound" OR missing: Assume this is an incoming call.`,
-    `  - Use the INBOUND OPENER.`,
+    `- Otherwise: Use the INBOUND OPENER.`,
     ``,
     `DYNAMIC VARIABLES:`,
     `- client_name: {{client_name}}`,
@@ -369,19 +365,52 @@ function buildBusinessContext(body) {
 
 // ✅ Tier protection blocks
 function buildSchedulerEmailGateBlock() {
+  // ✅ Fixed: strict order includes NAME + EMAIL + SERVICE + PREFERRED WINDOW
+  // ✅ Fixed: no hallucinated availability
+  // ✅ Fixed: email repeat-back confirmation loop
   return [
-    `BOOKING REQUIREMENT (STRICT):`,
-    `- You are allowed to BOOK appointments.`,
-    `- You are NOT allowed to book unless you have the caller’s email address.`,
-    `- Always ask for email BEFORE confirming a booking.`,
+    `SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
+    `1) Ask for caller name.`,
+    `2) Ask for caller email (required for confirmation).`,
+    `3) Ask what service they want to book.`,
+    `4) Ask preferred day and time window (morning/afternoon/evening).`,
+    ``,
+    `SCHEDULING REALITY RULE (CRITICAL):`,
+    `- You do NOT know actual availability unless it is returned by the scheduling system.`,
+    `- NEVER suggest specific times (e.g., "Monday at 2") unless the system has confirmed that exact slot.`,
+    `- If the caller asks for availability, ask for preferences only (day + time window).`,
+    `- Say: "I can collect your preferred times and send a confirmation once the schedule is checked."`,
+    ``,
+    `EMAIL REQUIRED TO BOOK (STRICT):`,
+    `- You may NOT book, confirm, or reserve an appointment unless you have the caller’s email address.`,
     `- Ask exactly: "What’s the best email to send your appointment confirmation to?"`,
-    `- Confirm once: "Just to confirm, that’s <email>, correct?"`,
+    `- If the caller provides an email:`,
+    `  1) Repeat it back exactly.`,
+    `  2) Ask: "Is that correct? Yes or no."`,
+    `  3) Do NOT proceed until confirmed "yes".`,
+    `- If the caller corrects it, repeat the confirmation process.`,
+    `- Do NOT guess or auto-correct email addresses.`,
     `- If caller refuses/can’t provide email: do NOT book. Collect callback number + preferred day/time window and say the team will follow up.`,
-    `IMPORTANT TOOL RULE: Only call booking after you have name + email + phone.`,
+    ``,
+    `SERVICE SELECTION (REQUIRED):`,
+    `- Before booking, you MUST determine the type of appointment/service.`,
+    `- Ask: "What service are you looking to book?"`,
+    `- Do NOT assume a service unless the caller explicitly states it.`,
+    `- If caller is vague (e.g., "hair appointment"), ask ONE clarifying question (e.g., "Is that for a haircut, color, or something else?").`,
+    ``,
+    `UPLOADED SERVICES USAGE RULE:`,
+    `- The business may upload a list of services and durations.`,
+    `- These define what the business offers, NOT what the caller has chosen.`,
+    `- Use uploaded services only to recognize/clarify valid options; do not read a long menu.`,
+    ``,
+    `TOOLING RULE (if booking tools exist):`,
+    `- Only proceed to booking after you have: name + phone + confirmed email + selected service + preferred day/time window.`,
+    `- Only confirm an appointment time if it is returned by the booking system.`,
   ].join("\n");
 }
 
 function buildReceptionistNoBookingBlock() {
+  // ✅ Still NO booking; collects enough info for a scheduler follow-up
   return [
     `SCHEDULING LIMIT (PLAN-BASED):`,
     `- You do NOT book appointments.`,
@@ -390,8 +419,9 @@ function buildReceptionistNoBookingBlock() {
     `  1) Collect caller name`,
     `  2) Collect callback number`,
     `  3) Collect best email`,
-    `  4) Ask preferred day + time window (morning/afternoon/evening)`,
-    `  5) Say: "I’ll pass this to the scheduling team and they’ll confirm shortly."`,
+    `  4) Ask what service they want (one service)`,
+    `  5) Ask preferred day + time window (morning/afternoon/evening)`,
+    `  6) Say: "I’ll pass this to the scheduling team and they’ll confirm shortly."`,
     `- Do NOT promise a reserved time. Do NOT call any booking tools/APIs.`,
     `- If asked why: "I can take your details and have the team confirm—so we get it right."`,
   ].join("\n");
@@ -403,9 +433,7 @@ async function sleep(ms) {
 }
 
 function getSubmissionId(body) {
-  return String(
-    pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
-  ).trim();
+  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
 }
 
 async function getExistingProvision(idemKey) {
@@ -424,16 +452,7 @@ async function releaseLock(lockKey) {
   } catch {}
 }
 
-function normalizeProvisionRecord({
-  mode,
-  llmId,
-  agentId,
-  phoneNumber,
-  phoneNumberId,
-  numberTierFinal,
-  voiceKey,
-  roleKey,
-}) {
+function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
   return {
     mode,
     llm_id: llmId,
@@ -525,7 +544,7 @@ module.exports = async (req, res) => {
 
       // ✅ Tier protection injection:
       // - Receptionist: explicitly NO booking
-      // - Scheduler/Operations: booking allowed BUT requires email
+      // - Scheduler/Operations: booking allowed BUT requires email + service + no hallucinated times
       const tierProtection =
         roleKey === "receptionist"
           ? buildReceptionistNoBookingBlock()
