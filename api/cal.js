@@ -1,5 +1,6 @@
 // /api/cal.js
 // Combines Cal.com availability + booking + AUTO booking into ONE Vercel function.
+// ✅ UPDATE: HARD REQUIRE EMAIL TO BOOK/AUTOBOOK (no fallback paths)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -67,8 +68,6 @@ function ymd(d) {
 }
 
 function toMinutesLocalHHMM(isoString, timeZone) {
-  // Convert ISO -> localized "HH:MM" then to minutes since midnight
-  // Uses Intl.DateTimeFormat (no extra deps)
   try {
     const dtf = new Intl.DateTimeFormat("en-US", {
       timeZone,
@@ -81,7 +80,6 @@ function toMinutesLocalHHMM(isoString, timeZone) {
     const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
     return hh * 60 + mm;
   } catch {
-    // fallback: treat as UTC if timezone parse fails
     const d = new Date(isoString);
     return d.getUTCHours() * 60 + d.getUTCMinutes();
   }
@@ -93,10 +91,6 @@ function matchesWindow(isoStart, timeZone, timeWindow) {
 
   const mins = toMinutesLocalHHMM(isoStart, timeZone);
 
-  // define windows in LOCAL TIME
-  // morning: 8:00–11:59
-  // afternoon: 12:00–16:59
-  // evening: 17:00–20:00
   if (w === "morning") return mins >= 8 * 60 && mins < 12 * 60;
   if (w === "afternoon") return mins >= 12 * 60 && mins < 17 * 60;
   if (w === "evening") return mins >= 17 * 60 && mins <= 20 * 60;
@@ -122,7 +116,31 @@ function isSameYMDInTZ(isoStart, targetYmd, timeZone) {
   }
 }
 
-async function fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end }) {
+// ✅ Strict email validation (simple + reliable)
+function isValidEmail(email) {
+  const e = asString(email, "");
+  if (!e) return false;
+  // basic sanity check; avoids garbage but not over-strict
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+
+// ✅ Unified "email required" response helper
+function emailRequired(res) {
+  return json(res, 400, {
+    ok: false,
+    error: "Email is required to book an appointment",
+    action_required: "request_email",
+  });
+}
+
+async function fetchStarts({
+  CAL_API_KEY,
+  username,
+  eventTypeSlug,
+  timeZone,
+  start,
+  end,
+}) {
   const url =
     `https://api.cal.com/v2/slots` +
     `?eventTypeSlug=${encodeURIComponent(eventTypeSlug)}` +
@@ -195,7 +213,14 @@ module.exports = async (req, res) => {
       const start = ymd(now);
       const end = ymd(new Date(now.getTime() + days * 24 * 60 * 60 * 1000));
 
-      const starts = await fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end });
+      const starts = await fetchStarts({
+        CAL_API_KEY,
+        username,
+        eventTypeSlug,
+        timeZone,
+        start,
+        end,
+      });
 
       return json(res, 200, {
         ok: true,
@@ -212,7 +237,8 @@ module.exports = async (req, res) => {
 
     // -------------------- BOOK --------------------
     if (action === "book" || action === "booking") {
-      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Booking requires POST" });
+      if (req.method !== "POST")
+        return json(res, 405, { ok: false, error: "Booking requires POST" });
 
       const startISO = asString(body.start, "");
       if (!startISO) return json(res, 400, { ok: false, error: "Missing start (ISO time)" });
@@ -224,8 +250,12 @@ module.exports = async (req, res) => {
       const attendeeTZ = asString(attendee.timeZone, asString(body.timeZone, timeZone));
 
       if (!attendeeName) return json(res, 400, { ok: false, error: "Missing attendee name" });
-      if (!attendeeEmail) return json(res, 400, { ok: false, error: "Missing attendee email" });
-      if (!attendeePhone) return json(res, 400, { ok: false, error: "Missing attendee phoneNumber" });
+
+      // ✅ HARD REQUIRE EMAIL (and validate)
+      if (!isValidEmail(attendeeEmail)) return emailRequired(res);
+
+      if (!attendeePhone)
+        return json(res, 400, { ok: false, error: "Missing attendee phoneNumber" });
 
       const idempotency_key =
         req.headers["x-idempotency-key"] ||
@@ -258,17 +288,9 @@ module.exports = async (req, res) => {
 
     // -------------------- AUTO --------------------
     // POST /api/cal?action=auto
-    // Body:
-    // {
-    //   "name": "...", "email": "...", "phone": "+1...",
-    //   "time_window": "morning|afternoon|evening|anytime",
-    //   "preferred_day": "next_available" OR "YYYY-MM-DD",
-    //   "days": 7,
-    //   "agent_id": "...", "client_id": "...", "retell_call_id": "...",
-    //   "reason_for_call": "...", "notes": "..."
-    // }
     if (action === "auto" || action === "autobook") {
-      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Auto booking requires POST" });
+      if (req.method !== "POST")
+        return json(res, 405, { ok: false, error: "Auto booking requires POST" });
 
       const attendeeName = asString(body.name, "");
       const attendeeEmail = asString(body.email, "");
@@ -276,7 +298,10 @@ module.exports = async (req, res) => {
       const attendeeTZ = asString(body.timeZone, timeZone);
 
       if (!attendeeName) return json(res, 400, { ok: false, error: "Missing name" });
-      if (!attendeeEmail) return json(res, 400, { ok: false, error: "Missing email" });
+
+      // ✅ HARD REQUIRE EMAIL (and validate)
+      if (!isValidEmail(attendeeEmail)) return emailRequired(res);
+
       if (!attendeePhone) return json(res, 400, { ok: false, error: "Missing phone" });
 
       const days = Number(body.days || req.query.days || 7);
@@ -291,7 +316,9 @@ module.exports = async (req, res) => {
       const idem =
         asString(headerIdem, "") ||
         providedIdem ||
-        (retellCall ? `retell:${retellCall}` : `auto:${attendeeEmail}:${preferred_day || "next"}:${time_window}`);
+        (retellCall
+          ? `retell:${retellCall}`
+          : `auto:${attendeeEmail}:${preferred_day || "next"}:${time_window}`);
 
       const idemKey = `cal:auto:idem:${idem}`;
 
@@ -305,7 +332,6 @@ module.exports = async (req, res) => {
       const lockKey = `cal:auto:lock:${idem}`;
       const gotLock = await kv.set(lockKey, "1", { nx: true, ex: 120 });
       if (!gotLock) {
-        // another request is in-flight; return soft response
         return json(res, 202, { ok: true, action: "auto", status: "processing", idempotency_key: idem });
       }
 
@@ -316,7 +342,14 @@ module.exports = async (req, res) => {
       const start = ymd(now);
       const end = ymd(new Date(now.getTime() + days * 24 * 60 * 60 * 1000));
 
-      const starts = await fetchStarts({ CAL_API_KEY, username, eventTypeSlug, timeZone, start, end });
+      const starts = await fetchStarts({
+        CAL_API_KEY,
+        username,
+        eventTypeSlug,
+        timeZone,
+        start,
+        end,
+      });
 
       // filter by preferred day + window
       const filtered = starts.filter((s) => {
@@ -324,9 +357,14 @@ module.exports = async (req, res) => {
         return matchesWindow(s, attendeeTZ, time_window);
       });
 
-      const chosen = filtered[0] || starts[0]; // fallback to first available if strict filter finds none
+      const chosen = filtered[0] || starts[0];
       if (!chosen) {
-        await kv.set(idemKey, { status: "failed", error: "No available slots found", idempotency_key: idem }, { ex: 900 });
+        await kv.set(
+          idemKey,
+          { status: "failed", error: "No available slots found", idempotency_key: idem },
+          { ex: 900 }
+        );
+        await kv.del(lockKey);
         return json(res, 409, { ok: false, action: "auto", error: "No available slots found" });
       }
 
@@ -355,7 +393,7 @@ module.exports = async (req, res) => {
       const booking = await createBooking({ CAL_API_KEY, payload });
 
       const saved = { status: "booked", idempotency_key: idem, chosen_start: chosen, booking };
-      await kv.set(idemKey, saved, { ex: 60 * 60 * 24 }); // keep for 24h
+      await kv.set(idemKey, saved, { ex: 60 * 60 * 24 }); // 24h
       await kv.del(lockKey);
 
       return json(res, 200, { ok: true, action: "auto", ...saved });
