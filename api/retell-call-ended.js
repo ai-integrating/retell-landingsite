@@ -1,5 +1,9 @@
 // /api/retell-call-ended.js
 // Retell webhook: on call end -> decrement active + write usage metrics + release reserved minutes.
+// ✅ UPDATED:
+// - Supports camelCase durationSeconds
+// - Computes day/month even when metadata is missing (uses tz:<agent_id> or DEFAULT_TZ)
+// - Increments totals + calls (so /api/usage works reliably)
 
 const { kv } = require("@vercel/kv");
 
@@ -40,13 +44,47 @@ function extractAgentId(body) {
   return body?.agent_id || body?.call?.agent_id || body?.data?.agent_id || body?.event?.agent_id;
 }
 function extractCallId(body) {
-  return body?.call_id || body?.call?.call_id || body?.call?.id || body?.data?.call_id || body?.data?.id || body?.event?.call_id || body?.event?.id;
+  return (
+    body?.call_id ||
+    body?.call?.call_id ||
+    body?.call?.id ||
+    body?.data?.call_id ||
+    body?.data?.id ||
+    body?.event?.call_id ||
+    body?.event?.id
+  );
 }
 
-// Duration: try common fields
+// ---- TZ helpers (no deps) ----
+function ymdInTZ(date = new Date(), tz = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return `${y}-${m}-${d}`;
+}
+function ymInTZ(date = new Date(), tz = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  return `${y}-${m}`;
+}
+
+// Duration: try common fields (✅ includes camelCase durationSeconds)
 function extractDurationSeconds(body) {
   const call = body?.call || body?.data || body?.event || {};
+
   const durSec =
+    call?.durationSeconds ?? // ✅ NEW
     call?.duration_seconds ??
     call?.duration ??
     call?.duration_sec ??
@@ -91,7 +129,7 @@ module.exports = async function handler(req, res) {
     console.log("CALL_ENDED incoming", {
       agent_id: agent_id || null,
       call_id: call_id || null,
-      durationSeconds: durationSeconds || null,
+      durationSeconds: durationSeconds ?? null,
       meta_keys: Object.keys(meta || {}),
       top_level_keys: Object.keys(body || {}),
     });
@@ -109,7 +147,7 @@ module.exports = async function handler(req, res) {
       await kv.set(seenKey, "1", { ex: 60 * 60 * 24 * 7 });
     }
 
-    // 1) Decrement active concurrent counter
+    // 1) Decrement active concurrent counter (outbound-only; safe clamp)
     const activeKey = `outbound:${agent_id}:active`;
     let activeNow = await kv.decr(activeKey);
     if (activeNow < 0) {
@@ -117,21 +155,59 @@ module.exports = async function handler(req, res) {
       activeNow = 0;
     }
 
-    // 2) Metrics: add minutes used (best effort)
-    // If durationSeconds missing, we still release reserved minutes.
+    // 2) Metrics: minutes + calls (works even if metadata missing)
     const reserved = Number(meta?.reserved_minutes || 0);
-    const day = meta?.usage_day ? String(meta.usage_day) : null;
-    const month = meta?.usage_month ? String(meta.usage_month) : null;
+
+    // ✅ Pick tz: prefer KV tz:<agent_id>, then meta.tz, then DEFAULT_TZ
+    const tz =
+      (await kv.get(`tz:${agent_id}`)) ||
+      (meta?.tz ? String(meta.tz) : "") ||
+      process.env.DEFAULT_TZ ||
+      "America/New_York";
+
+    // ✅ Day/month: use metadata if present, otherwise compute now (no more nulls)
+    const day = meta?.usage_day ? String(meta.usage_day) : ymdInTZ(new Date(), tz);
+    const month = meta?.usage_month ? String(meta.usage_month) : ymInTZ(new Date(), tz);
 
     let billedMinutes = null;
     if (durationSeconds != null) {
       billedMinutes = Math.max(1, Math.ceil(durationSeconds / 60)); // bill at least 1 minute
-      if (day) await kv.incrby(`metrics:${agent_id}:day:${day}:minutes`, billedMinutes);
-      if (month) await kv.incrby(`metrics:${agent_id}:month:${month}:minutes`, billedMinutes);
+
+      // minutes (day/month + total)
+      await kv.incrby(`metrics:${agent_id}:day:${day}:minutes`, billedMinutes);
+      await kv.incrby(`metrics:${agent_id}:month:${month}:minutes`, billedMinutes);
+      await kv.incrby(`metrics:${agent_id}:minutes_total`, billedMinutes);
+
+      // calls (day/month + total)
+      await kv.incr(`metrics:${agent_id}:day:${day}:calls`);
+      await kv.incr(`metrics:${agent_id}:month:${month}:calls`);
+      await kv.incr(`metrics:${agent_id}:calls_total`);
+
+      // last_call (optional but useful for debugging)
+      await kv.set(
+        `metrics:${agent_id}:last_call`,
+        JSON.stringify({
+          call_id: call_id || null,
+          durationSeconds,
+          billedMinutes,
+          usage_day: day,
+          usage_month: month,
+          tz,
+          ts: new Date().toISOString(),
+        }),
+        { ex: 60 * 60 * 24 * 14 }
+      );
+    } else {
+      console.warn("retell-call-ended: duration missing (minutes not billed)", {
+        agent_id,
+        call_id: call_id || null,
+        tz,
+        day,
+        month,
+      });
     }
 
     // 3) Release reserved minutes (so "reserve" doesn’t grow forever)
-    // We release exactly the reserved amount for this call.
     if (reserved && day) {
       await kv.incrby(`outbound:${agent_id}:day:${day}:reserved_minutes`, -reserved).catch(() => {});
     }
@@ -147,6 +223,7 @@ module.exports = async function handler(req, res) {
       billed_minutes: billedMinutes,
       day,
       month,
+      tz,
     });
 
     return okJson(res, 200, {
@@ -158,6 +235,7 @@ module.exports = async function handler(req, res) {
       billed_minutes: billedMinutes,
       usage_day: day,
       usage_month: month,
+      tz,
     });
   } catch (err) {
     console.error("retell-call-ended: ERROR", err);
