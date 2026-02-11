@@ -1,6 +1,7 @@
 // /api/provision.js
-// ✅ UPDATE: Protect tiers (Receptionist does NOT book; Scheduler/Operations require email + service to book)
-// ✅ UPDATE: Prevent hallucinated availability, enforce intake order, and stop outbound bleed into inbound
+// ✅ UPDATE: Use Retell system variable {{direction}} (inbound/outbound) instead of custom CALL_DIRECTION
+// ✅ UPDATE: Force FIRST LINE to be exactly the correct opener (prevents outbound bleed into inbound)
+// ✅ UPDATE: Keep tier protections (Receptionist no-booking; Scheduler/Operations email+service gate)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -267,31 +268,31 @@ function formatSetupBlock(setupText) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ Strengthened: inbound is default unless explicitly outbound
+  // ✅ KEY FIX: Use Retell's system variable {{direction}} (inbound/outbound)
+  // ✅ KEY FIX: Force FIRST spoken line to be exactly one of the two openers
   const directionLogic = [
-    `CRITICAL CALL-START LOGIC:`,
-    `- You will receive a variable: CALL_DIRECTION = "{{CALL_DIRECTION}}".`,
-    `- ABSOLUTE DEFAULT: Treat the call as INBOUND unless CALL_DIRECTION is exactly "outbound".`,
-    `- If CALL_DIRECTION is missing/blank/unknown: INBOUND.`,
-    `- If CALL_DIRECTION is "outbound": YOU are initiating the call.`,
-    `  - Do NOT start with "How can I help you?"`,
-    `  - You MUST use the OUTBOUND OPENER structure below.`,
-    `- Otherwise: Use the INBOUND OPENER.`,
+    `CRITICAL CALL-START LOGIC (NON-NEGOTIABLE):`,
+    `- Retell provides {{direction}} which is either "inbound" or "outbound".`,
+    `- If {{direction}} is exactly "outbound": you initiated the call -> use the OUTBOUND OPENER.`,
+    `- Otherwise (including if it shows literally as "{{direction}}"): treat as INBOUND -> use the INBOUND OPENER.`,
+    `- Your FIRST spoken line must be EXACTLY one of the openers below. Do not blend them.`,
+    `- If {{direction}} is inbound, you must NOT say "I'm calling about..." or imply you initiated the call.`,
     ``,
-    `DYNAMIC VARIABLES:`,
+    `DYNAMIC VARIABLES (optional):`,
     `- client_name: {{client_name}}`,
     `- reason_for_call: {{reason_for_call}}`,
     `- notes: {{notes}}`,
     ``,
-    `INBOUND OPENER:`,
+    `INBOUND OPENER (FIRST LINE, EXACT):`,
     `"Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
     ``,
-    `OUTBOUND OPENER (MANDATORY STEP-BY-STEP STRUCTURE):`,
-    `1. GREET: Say "Hi {{client_name}}" (or "Hi there" if blank).`,
-    `2. IDENTIFY: Say "This is ${agentName} calling from ${bizName}."`,
-    `3. REASON: Say "I'm calling about {{reason_for_call}}" (or "something you requested" if blank).`,
-    `4. CONTEXT: If {{notes}} is provided, add it as ONE brief sentence.`,
-    `5. ENGAGE: Ask one clear question to move the call forward.`,
+    `OUTBOUND OPENER (FIRST LINE, EXACT):`,
+    `"Hi {{client_name}} — this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
+    ``,
+    `OUTBOUND FLOW (only if {{direction}} is "outbound"):`,
+    `- If {{client_name}} is blank, say: "Hi there — this is ${agentName} calling from ${bizName}..."`,
+    `- If {{reason_for_call}} is blank, say: "...about something you requested."`,
+    `- If {{notes}} exists, add ONE short sentence after the opener, then ask ONE question.`,
   ].join("\n");
 
   const bases = {
@@ -365,9 +366,6 @@ function buildBusinessContext(body) {
 
 // ✅ Tier protection blocks
 function buildSchedulerEmailGateBlock() {
-  // ✅ Fixed: strict order includes NAME + EMAIL + SERVICE + PREFERRED WINDOW
-  // ✅ Fixed: no hallucinated availability
-  // ✅ Fixed: email repeat-back confirmation loop
   return [
     `SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
     `1) Ask for caller name.`,
@@ -410,7 +408,6 @@ function buildSchedulerEmailGateBlock() {
 }
 
 function buildReceptionistNoBookingBlock() {
-  // ✅ Still NO booking; collects enough info for a scheduler follow-up
   return [
     `SCHEDULING LIMIT (PLAN-BASED):`,
     `- You do NOT book appointments.`,
@@ -530,21 +527,19 @@ module.exports = async (req, res) => {
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
 
+      // ✅ OPTIONAL: Keep outbound "extra rules" but key them to {{direction}} now
       const outboundRules = [
-        `OUTBOUND BEHAVIOR RULES (apply ONLY when CALL_DIRECTION is "outbound"):`,
+        `OUTBOUND BEHAVIOR RULES (apply ONLY when {{direction}} is "outbound"):`,
         `- You initiated the call.`,
-        `- Follow the 5-step MANDATORY structure above.`,
+        `- Follow the OUTBOUND OPENER + Outbound Flow above.`,
         `- Never forget to state you are from ${bizName}.`,
-        `- If {{client_name}} is blank, start with "Hi there".`,
-        `- NEVER ask "How can I help you?" as your first line.`,
+        `- Never ask "How can I help you?" as your first line on outbound.`,
       ].join("\n");
 
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
 
       // ✅ Tier protection injection:
-      // - Receptionist: explicitly NO booking
-      // - Scheduler/Operations: booking allowed BUT requires email + service + no hallucinated times
       const tierProtection =
         roleKey === "receptionist"
           ? buildReceptionistNoBookingBlock()
