@@ -10,14 +10,22 @@ function setCors(res) {
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -53,7 +61,9 @@ function formatPrettyPhone(number) {
 }
 
 function inferAreaCode(body) {
-  const preferred = digitsOnly(pick(body, ["preferred_area_code", "area_code"], "")).slice(0, 3);
+  const preferred = digitsOnly(
+    pick(body, ["preferred_area_code", "area_code"], "")
+  ).slice(0, 3);
   if (preferred.length === 3) return preferred;
 
   const bizPhone = pick(body, ["business_phone", "phone", "company_phone"], "");
@@ -118,10 +128,69 @@ async function tryDetectAlreadyBoundNumber() {
   return null; // keep simple for now
 }
 
+/**
+ * ✅ Inventory-safe helpers (fallback area codes)
+ */
+function isNoInventoryError(err) {
+  const d = err?.response?.data;
+  const msg =
+    (typeof d === "string" ? d : d?.error || d?.message || "") +
+    " " +
+    (err?.message || "");
+  return /no phone numbers of this area code/i.test(msg);
+}
+
+function unique3(list) {
+  const seen = new Set();
+  const out = [];
+  for (const x of list) {
+    const s = String(x || "").trim();
+    if (/^\d{3}$/.test(s) && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+// You can control this via env:
+// FALLBACK_AREA_CODES="508,617,857,774,339,781"
+function getFallbackAreaCodes(primaryAreaCode) {
+  const envList = String(process.env.FALLBACK_AREA_CODES || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // sensible MA-ish defaults (edit if you want)
+  const defaultList = ["508", "774", "617", "857", "781", "339"];
+
+  return unique3([primaryAreaCode, ...envList, ...defaultList]);
+}
+
+async function createPhoneNumberWithFallback({ areaCode, nickname }) {
+  const candidates = getFallbackAreaCodes(areaCode);
+  let lastErr = null;
+
+  for (const ac of candidates) {
+    try {
+      const data = await createPhoneNumber({ areaCode: ac, nickname });
+      return { phoneData: data, usedAreaCode: ac };
+    } catch (err) {
+      lastErr = err;
+      // Only retry if it’s the specific “no inventory” case
+      if (!isNoInventoryError(err)) throw err;
+      // else continue to next area code
+    }
+  }
+
+  throw lastErr || new Error("No available phone numbers in any fallback area codes.");
+}
+
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
     const body = await readJsonBody(req);
@@ -137,13 +206,19 @@ module.exports = async (req, res) => {
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Client Business");
 
     // ✅ Tier support (accept from provision, normalize)
-    const numberTierRaw = String(pick(body, ["number_tier", "tier"], "standard")).toLowerCase().trim();
+    const numberTierRaw = String(pick(body, ["number_tier", "tier"], "standard"))
+      .toLowerCase()
+      .trim();
     const numberTier = numberTierRaw === "premium" ? "premium" : "standard";
 
     // If caller already has number recorded in sheet, they should NOT call this endpoint.
     // But just in case, we can accept an existing number and no-op.
     const existingNumber = pick(body, ["retell_phone_number", "phone_number"], "");
-    if (existingNumber && String(existingNumber).trim() && String(existingNumber) !== "(not purchased)") {
+    if (
+      existingNumber &&
+      String(existingNumber).trim() &&
+      String(existingNumber) !== "(not purchased)"
+    ) {
       return res.status(200).json({
         ok: true,
         agent_id: agentId,
@@ -156,7 +231,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Area code preference
+    // Area code preference (requested)
     const areaCode = inferAreaCode(body);
 
     // Optional: very lightweight "already bound" detection (placeholder)
@@ -174,11 +249,14 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ✅ Buy + bind in one transaction-like flow
-    const phoneData = await createPhoneNumber({
+    // ✅ Buy + bind with fallback area codes
+    const nickname = `${bizName} - Main Line [${numberTier}]${
+      idempotencyKey ? ` (${idempotencyKey})` : ""
+    }`;
+
+    const { phoneData, usedAreaCode } = await createPhoneNumberWithFallback({
       areaCode,
-      // ✅ include tier in nickname so you can audit in Retell
-      nickname: `${bizName} - Main Line [${numberTier}]${idempotencyKey ? ` (${idempotencyKey})` : ""}`,
+      nickname,
     });
 
     const bound = await bindPhoneNumberToAgent({ phoneData, agentId });
@@ -191,16 +269,21 @@ module.exports = async (req, res) => {
       pretty_phone_number: formatPrettyPhone(bound.phone_number),
 
       phone_number_id: bound.phone_number_id || phoneData.phone_number_id || phoneData.id || null,
-      area_code: areaCode,
+
+      requested_area_code: areaCode,
+      area_code: usedAreaCode, // ✅ actual one used
       number_tier: numberTier,
       idempotency_key: idempotencyKey || null,
     });
-
   } catch (err) {
     console.error("buy-number failed:", err?.response?.data || err?.message || err);
+
+    const noInventory = isNoInventoryError(err);
+
     return res.status(500).json({
       ok: false,
       error: "Buy Number Failed",
+      reason: noInventory ? "NO_NUMBER_INVENTORY" : "UNKNOWN",
       details: err?.response?.data || err?.message,
     });
   }
