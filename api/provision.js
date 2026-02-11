@@ -2,6 +2,7 @@
 // ✅ UPDATE: Use Retell system variable {{direction}} (inbound/outbound) instead of custom CALL_DIRECTION
 // ✅ UPDATE: Force FIRST LINE to be exactly the correct opener (prevents outbound bleed into inbound)
 // ✅ UPDATE: Keep tier protections (Receptionist no-booking; Scheduler/Operations email+service gate)
+// ✅ UPDATE: Add CODED URGENCY FALLBACKS (works even when client did NOT buy Emergency Dispatch)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -264,6 +265,53 @@ function buildSetupForRole(body, roleKey) {
 function formatSetupBlock(setupText) {
   if (!setupText) return "";
   return `BUSINESS SETUP (owner answers from onboarding form — internal rules):\n${setupText}\n\nIMPORTANT:\n- Do NOT ask the caller these onboarding questions.\n- Use these answers as your operating instructions.`;
+}
+
+// -------------------- URGENCY FALLBACKS (CODED) --------------------
+function buildUrgencyFallbackBlock(roleKey) {
+  // This block forces consistent “urgent” labeling even without Emergency Dispatch setup.
+  // Your Zap/AI step should then reliably extract: urgency_level=urgent and callback_needed=true.
+  const common = [
+    `URGENCY & EMERGENCY CLASSIFICATION (ALWAYS ON — even without Emergency Dispatch):`,
+    `- "Urgent" means: caller says they need a call back ASAP / immediately / right away, or describes time-sensitive risk or safety concerns.`,
+    `- "Emergency" means: immediate danger to life, severe injury, active fire, gas leak, ongoing crime, or anything requiring 911.`,
+    ``,
+    `URGENCY TRIGGERS (treat as URGENT if any are present):`,
+    `- Caller explicitly says: "urgent", "emergency", "ASAP", "right away", "immediately", "call me back now", "I need someone today".`,
+    `- Safety/property risk language: "flooding", "sparking", "smoke", "leak", "no heat", "no water", "break-in", "unsafe", "locked out" (depends on business).`,
+    `- Deadline language: "today", "before close", "missed deadline", "court", "inspection", "insurance".`,
+    ``,
+    `CRITICAL RESPONSE RULES WHEN URGENT/EMERGENCY IS DETECTED:`,
+    `1) Stay calm. Acknowledge: "Okay — I understand this is urgent."`,
+    `2) IMMEDIATELY collect (one question at a time):`,
+    `   - Caller name`,
+    `   - Best callback number (repeat it back to confirm)`,
+    `   - Short issue summary in 1 sentence`,
+    `   - Location/address ONLY if relevant to the business (e.g., service call)`,
+    `3) Ask this exact question: "Is anyone in immediate danger right now? Yes or no."`,
+    `   - If YES: advise calling 911 immediately (do not debate).`,
+    `4) Promise language (IMPORTANT):`,
+    `   - You MAY say: "I’m flagging this as urgent for the team."`,
+    `   - You MUST NOT guarantee response times unless the business setup explicitly promises it.`,
+    ``,
+    `LOGGING REQUIREMENTS (non-negotiable):`,
+    `- Ensure the call summary clearly includes:`,
+    `  - urgency_level: urgent (or emergency if 911-level)`,
+    `  - callback_needed: yes`,
+    `  - a short "urgent_reason" phrase (e.g., "requested immediate callback" / "leak reported")`,
+  ];
+
+  const dispatchOnly = [
+    ``,
+    `EMERGENCY DISPATCH UPGRADE BEHAVIOR (only if your BUSINESS SETUP includes dispatch rules/contacts):`,
+    `- If dispatch contacts/rules exist in BUSINESS SETUP, follow them precisely.`,
+    `- If no dispatch contact is available, still follow the fallback above and flag as URGENT.`,
+  ];
+
+  if (roleKey === "emergency" || roleKey === "operations") {
+    return common.concat(dispatchOnly).join("\n");
+  }
+  return common.join("\n");
 }
 
 // -------------------- PROMPT BASES --------------------
@@ -539,6 +587,9 @@ module.exports = async (req, res) => {
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
 
+      // ✅ URGENCY FALLBACK injection (works even if client didn’t buy Dispatch)
+      const urgencyFallback = buildUrgencyFallbackBlock(roleKey);
+
       // ✅ Tier protection injection:
       const tierProtection =
         roleKey === "receptionist"
@@ -552,7 +603,8 @@ module.exports = async (req, res) => {
         ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
         : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
-      promptToUse = [base, tierProtection, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
+      // NOTE: Order matters — urgency block BEFORE tier rules so urgency always applies.
+      promptToUse = [base, urgencyFallback, tierProtection, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
 
