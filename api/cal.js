@@ -131,16 +131,13 @@ async function getHeaders(email) {
 // -------------------- OAUTH (START + CALLBACK) --------------------
 async function handleOAuthStart(req, res) {
   const email = asString(req.query.email);
-  if (!isValidEmail(email))
-    return json(res, 400, { error: "Valid email param required" });
+  if (!isValidEmail(email)) return json(res, 400, { error: "Valid email param required" });
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = process.env.CAL_OAUTH_REDIRECT_URI;
 
   if (!clientId || !redirectUri) {
-    return json(res, 500, {
-      error: "Missing CAL_CLIENT_ID or CAL_OAUTH_REDIRECT_URI",
-    });
+    return json(res, 500, { error: "Missing CAL_CLIENT_ID or CAL_OAUTH_REDIRECT_URI" });
   }
 
   // CSRF nonce stored server-side for 10 minutes
@@ -161,22 +158,21 @@ async function handleOAuthStart(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, state, error, error_description } = req.query || {};
 
+  // ✅ UPDATED: NO REDIRECTS (prevents 404). Always return JSON.
   if (error) {
     // User denied or other OAuth error
-    // ✅ CHANGED: redirect to your Vercel app (not aiintegrating.com)
-    const loc =
-      `https://retell-landingsite-iota.vercel.app/?cal_connected=0` +
-      `&error=${encodeURIComponent(asString(error))}` +
-      `&desc=${encodeURIComponent(asString(error_description))}`;
-    res.writeHead(302, { Location: loc });
-    return res.end();
+    return json(res, 200, {
+      ok: false,
+      cal_connected: 0,
+      error: asString(error),
+      desc: asString(error_description),
+    });
   }
 
   if (!code || !state) return json(res, 400, { error: "Missing code/state" });
 
   const stateRecord = await kv.get(`cal:oauth:state:${asString(state)}`);
-  if (!stateRecord?.email)
-    return json(res, 400, { error: "Invalid or expired state" });
+  if (!stateRecord?.email) return json(res, 400, { error: "Invalid or expired state" });
 
   // one-time use
   await kv.del(`cal:oauth:state:${asString(state)}`);
@@ -210,11 +206,8 @@ async function handleOAuthCallback(req, res) {
       expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
     });
 
-    // ✅ CHANGED: redirect to your Vercel app (not aiintegrating.com/success)
-    res.writeHead(302, {
-      Location: "https://retell-landingsite-iota.vercel.app/?cal_connected=1",
-    });
-    res.end();
+    // ✅ Success JSON
+    return json(res, 200, { ok: true, cal_connected: 1, email: emailLower });
   } catch (err) {
     return json(res, 500, {
       error: "OAuth Exchange Failed",
@@ -224,9 +217,6 @@ async function handleOAuthCallback(req, res) {
 }
 
 // -------------------- CAL ACTIONS (AVAILABILITY / BOOK / AUTO) --------------------
-// These are clean defaults. If your existing book/auto logic is more advanced,
-// you can replace these bodies but KEEP the `const headers = await getHeaders(email);`
-
 async function handleAvailability(req, res, body) {
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders(email);
@@ -237,7 +227,6 @@ async function handleAvailability(req, res, body) {
   const start = asString(body.start_date, ymd(Date.now()));
   const end = asString(body.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
-  // Slots endpoint
   const url =
     `https://api.cal.com/v2/slots` +
     `?username=${encodeURIComponent(username)}` +
@@ -256,8 +245,7 @@ async function handleBook(req, res, body) {
   const username = process.env.CAL_USERNAME || "ai-integrating";
   const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
 
-  // Required booking fields (keep it simple)
-  const start = asString(body.start); // ISO string expected
+  const start = asString(body.start);
   const attendeeName = asString(body.attendee_name);
   const attendeeEmail = asString(body.attendee_email);
   const attendeePhone = asString(body.attendee_phone);
@@ -266,16 +254,12 @@ async function handleBook(req, res, body) {
   if (!attendeeName) return json(res, 400, { error: "Missing attendee_name" });
   if (!attendeeEmail) return json(res, 400, { error: "Missing attendee_email" });
 
-  // Optional idempotency key support (strongly recommended)
-  const idKey =
-    asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
+  const idKey = asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
 
   if (idKey) {
     const dedupeKey = `cal:book:dedupe:${eventTypeSlug}:${idKey}`;
     const existing = await kv.get(dedupeKey);
     if (existing) return json(res, 200, { ok: true, deduped: true, booking: existing });
-
-    // store a short lock so retries don't double-book
     await kv.set(dedupeKey, { locking: true }, { ex: 60 });
   }
 
@@ -339,8 +323,7 @@ async function handleAuto(req, res, body) {
     .filter(Boolean)
     .sort()[0];
 
-  if (!earliest)
-    return json(res, 200, { ok: true, booked: false, reason: "No available slots" });
+  if (!earliest) return json(res, 200, { ok: true, booked: false, reason: "No available slots" });
 
   const attendeeName = asString(body.attendee_name);
   const attendeeEmail = asString(body.attendee_email);
@@ -388,12 +371,9 @@ module.exports = async (req, res) => {
   const action = asString(req.query.action || body.action).toLowerCase();
 
   try {
-    // OAuth routes (GET)
     if (req.method === "GET" && action === "oauth_start") return await handleOAuthStart(req, res);
-    if (req.method === "GET" && action === "oauth_callback")
-      return await handleOAuthCallback(req, res);
+    if (req.method === "GET" && action === "oauth_callback") return await handleOAuthCallback(req, res);
 
-    // Calendar actions (POST)
     if (req.method === "POST" && (action === "availability" || action === "slots")) {
       return await handleAvailability(req, res, body);
     }
