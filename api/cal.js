@@ -196,14 +196,14 @@ async function handleOAuthStart(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, state, error, error_description } = req.query || {};
 
-  // No redirects; always return JSON
+  // ✅ UPDATED: Redirect on error (instead of JSON)
   if (error) {
-    return json(res, 200, {
-      ok: false,
-      cal_connected: 0,
-      error: asString(error),
-      desc: asString(error_description),
-    });
+    const loc =
+      "https://retell-landingsite-iota.vercel.app/cal-error" +
+      `?error=${encodeURIComponent(asString(error))}` +
+      `&desc=${encodeURIComponent(asString(error_description))}`;
+    res.writeHead(302, { Location: loc });
+    return res.end();
   }
 
   if (!code || !state) return json(res, 400, { error: "Missing code/state" });
@@ -254,12 +254,9 @@ async function handleOAuthCallback(req, res) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    return json(res, 200, {
-      ok: true,
-      cal_connected: 1,
-      agent_id,
-      email: emailLower || undefined,
-    });
+    // ✅ UPDATED: Redirect success into Cal so they can create Event Types
+    res.writeHead(302, { Location: "https://app.cal.com/event-types" });
+    return res.end();
   } catch (err) {
     return json(res, 500, {
       error: "OAuth Exchange Failed",
@@ -288,7 +285,11 @@ async function handleAvailability(req, res, body) {
     `&end=${encodeURIComponent(end)}`;
 
   const resp = await axios.get(url, { headers });
-  return json(res, 200, { ok: true, slots: resp.data?.data || resp.data, agent_id: agent_id || undefined });
+  return json(res, 200, {
+    ok: true,
+    slots: resp.data?.data || resp.data,
+    agent_id: agent_id || undefined,
+  });
 }
 
 async function handleBook(req, res, body) {
@@ -308,7 +309,8 @@ async function handleBook(req, res, body) {
   if (!attendeeName) return json(res, 400, { error: "Missing attendee_name" });
   if (!attendeeEmail) return json(res, 400, { error: "Missing attendee_email" });
 
-  const idKey = asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
+  const idKey =
+    asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
 
   if (idKey) {
     const dedupeKey = `cal:book:dedupe:${eventTypeSlug}:${idKey}`;
@@ -414,7 +416,13 @@ async function handleAuto(req, res, body) {
   const booking = bookResp.data?.data || bookResp.data;
 
   await kv.set(dedupeKey, booking, { ex: 24 * 60 * 60 });
-  return json(res, 200, { ok: true, booked: true, booking, picked_start: earliest, agent_id: agent_id || undefined });
+  return json(res, 200, {
+    ok: true,
+    booked: true,
+    booking,
+    picked_start: earliest,
+    agent_id: agent_id || undefined,
+  });
 }
 
 // -------------------- MAIN HANDLER --------------------
