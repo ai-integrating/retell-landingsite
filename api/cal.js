@@ -1,14 +1,15 @@
 // /api/cal.js
 // ONE file that supports:
-// - OAuth connect:  GET  /api/cal?action=oauth_start&email=...
+// - OAuth connect:  GET  /api/cal?action=oauth_start&agent_id=...&email=... (email optional)
 // - OAuth callback: GET  /api/cal?action=oauth_callback&code=...&state=...
-// - Availability:   POST /api/cal?action=availability   (or action=slots)
-// - Book:           POST /api/cal?action=book
-// - Auto-book:      POST /api/cal?action=auto          (or action=autobook)
+// - Availability:   POST /api/cal?action=availability   (or action=slots)   (agent_id preferred)
+// - Book:           POST /api/cal?action=book          (agent_id preferred)
+// - Auto-book:      POST /api/cal?action=auto          (or action=autobook) (agent_id preferred)
 //
 // NOTES:
 // - Uses OAuth access token from KV when connected; otherwise falls back to CAL_API_KEY.
-// - Stores tokens in KV under: cal:tokens:<emailLower>
+// - Stores tokens in KV under: cal:tokens:agent:<agent_id>
+// - Keeps backward-compatible email token keys: cal:tokens:<emailLower> (fallback only)
 // - Uses env var CAL_OAUTH_REDIRECT_URI (must EXACTLY match what you set in Cal.com OAuth client).
 
 const axios = require("axios");
@@ -67,9 +68,26 @@ function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
+function tokenKeyForAgent(agentId) {
+  const a = asString(agentId);
+  return a ? `cal:tokens:agent:${a}` : "";
+}
+
+function tokenKeyForEmail(email) {
+  const e = asString(email).toLowerCase();
+  return e ? `cal:tokens:${e}` : "";
+}
+
 // -------------------- OAuth TOKEN STORAGE + REFRESH --------------------
-async function handleRefresh(emailLower) {
-  const record = await kv.get(`cal:tokens:${emailLower}`);
+// Refresh by agent_id (preferred). Falls back to email if needed.
+async function handleRefresh({ agent_id, email }) {
+  const agentKey = tokenKeyForAgent(agent_id);
+  const emailKey = tokenKeyForEmail(email);
+
+  const record =
+    (agentKey ? await kv.get(agentKey) : null) ||
+    (emailKey ? await kv.get(emailKey) : null);
+
   if (!record?.refresh_token) return null;
 
   const resp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
@@ -93,22 +111,32 @@ async function handleRefresh(emailLower) {
     expires_at: expires_in ? Date.now() + expires_in * 1000 : 0,
   };
 
-  await kv.set(`cal:tokens:${emailLower}`, updated);
+  // Save back to the same place we found it, preferring agent key if present
+  if (agentKey) {
+    await kv.set(agentKey, updated);
+  } else if (emailKey) {
+    await kv.set(emailKey, updated);
+  }
+
   return updated;
 }
 
 // Returns headers using OAuth token if connected; else uses CAL_API_KEY
-async function getHeaders(email) {
+// Prefers agent_id token store; falls back to email token store.
+async function getHeaders({ agent_id, email }) {
   const base = { "cal-api-version": "2024-09-04" };
   const fallback = {
     ...base,
     Authorization: `Bearer ${process.env.CAL_API_KEY}`,
   };
 
-  const e = asString(email).toLowerCase();
-  if (!e) return fallback;
+  const agentKey = tokenKeyForAgent(agent_id);
+  const emailKey = tokenKeyForEmail(email);
 
-  const tokens = await kv.get(`cal:tokens:${e}`);
+  const tokens =
+    (agentKey ? await kv.get(agentKey) : null) ||
+    (emailKey ? await kv.get(emailKey) : null);
+
   if (!tokens?.access_token) return fallback;
 
   const expiresAt = Number(tokens.expires_at || 0);
@@ -119,19 +147,25 @@ async function getHeaders(email) {
   }
 
   // Expired -> refresh
-  const refreshed = await handleRefresh(e);
+  const refreshed = await handleRefresh({ agent_id, email });
   if (refreshed?.access_token) {
     return { ...base, Authorization: `Bearer ${refreshed.access_token}` };
   }
 
-  // Refresh failed -> fallback to global key
   return fallback;
 }
 
 // -------------------- OAUTH (START + CALLBACK) --------------------
 async function handleOAuthStart(req, res) {
-  const email = asString(req.query.email);
-  if (!isValidEmail(email)) return json(res, 400, { error: "Valid email param required" });
+  const agent_id = asString(req.query.agent_id);
+  const email = asString(req.query.email); // optional
+
+  if (!agent_id) {
+    return json(res, 400, { error: "agent_id param required" });
+  }
+  if (email && !isValidEmail(email)) {
+    return json(res, 400, { error: "If provided, email must be valid" });
+  }
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = process.env.CAL_OAUTH_REDIRECT_URI;
@@ -142,7 +176,11 @@ async function handleOAuthStart(req, res) {
 
   // CSRF nonce stored server-side for 10 minutes
   const nonce = crypto.randomBytes(16).toString("hex");
-  await kv.set(`cal:oauth:state:${nonce}`, { email }, { ex: 600 });
+  await kv.set(
+    `cal:oauth:state:${nonce}`,
+    { agent_id, email: email || "" },
+    { ex: 600 }
+  );
 
   // Cal authorize endpoint
   const authUrl =
@@ -158,9 +196,8 @@ async function handleOAuthStart(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, state, error, error_description } = req.query || {};
 
-  // ✅ UPDATED: NO REDIRECTS (prevents 404). Always return JSON.
+  // No redirects; always return JSON
   if (error) {
-    // User denied or other OAuth error
     return json(res, 200, {
       ok: false,
       cal_connected: 0,
@@ -172,7 +209,9 @@ async function handleOAuthCallback(req, res) {
   if (!code || !state) return json(res, 400, { error: "Missing code/state" });
 
   const stateRecord = await kv.get(`cal:oauth:state:${asString(state)}`);
-  if (!stateRecord?.email) return json(res, 400, { error: "Invalid or expired state" });
+  if (!stateRecord?.agent_id) {
+    return json(res, 400, { error: "Invalid or expired state" });
+  }
 
   // one-time use
   await kv.del(`cal:oauth:state:${asString(state)}`);
@@ -197,17 +236,30 @@ async function handleOAuthCallback(req, res) {
     });
 
     const data = tokenResp.data || {};
+    const agent_id = asString(stateRecord.agent_id);
     const emailLower = asString(stateRecord.email).toLowerCase();
 
-    await kv.set(`cal:tokens:${emailLower}`, {
+    const tokenPayload = {
       access_token: data.access_token,
       refresh_token: data.refresh_token || "",
       token_type: data.token_type || "bearer",
       expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
-    });
+    };
 
-    // ✅ Success JSON
-    return json(res, 200, { ok: true, cal_connected: 1, email: emailLower });
+    // ✅ Primary: store by agent_id
+    await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
+
+    // ✅ Optional fallback: if email exists, ALSO store under email to avoid breaking older calls
+    if (emailLower && isValidEmail(emailLower)) {
+      await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
+    }
+
+    return json(res, 200, {
+      ok: true,
+      cal_connected: 1,
+      agent_id,
+      email: emailLower || undefined,
+    });
   } catch (err) {
     return json(res, 500, {
       error: "OAuth Exchange Failed",
@@ -218,8 +270,9 @@ async function handleOAuthCallback(req, res) {
 
 // -------------------- CAL ACTIONS (AVAILABILITY / BOOK / AUTO) --------------------
 async function handleAvailability(req, res, body) {
+  const agent_id = asString(req.query.agent_id || body.agent_id);
   const email = asString(req.query.email || body.email);
-  const headers = await getHeaders(email);
+  const headers = await getHeaders({ agent_id, email });
 
   const username = process.env.CAL_USERNAME || "ai-integrating";
   const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
@@ -235,12 +288,13 @@ async function handleAvailability(req, res, body) {
     `&end=${encodeURIComponent(end)}`;
 
   const resp = await axios.get(url, { headers });
-  return json(res, 200, { ok: true, slots: resp.data?.data || resp.data });
+  return json(res, 200, { ok: true, slots: resp.data?.data || resp.data, agent_id: agent_id || undefined });
 }
 
 async function handleBook(req, res, body) {
+  const agent_id = asString(req.query.agent_id || body.agent_id);
   const email = asString(req.query.email || body.email);
-  const headers = await getHeaders(email);
+  const headers = await getHeaders({ agent_id, email });
 
   const username = process.env.CAL_USERNAME || "ai-integrating";
   const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
@@ -283,12 +337,13 @@ async function handleBook(req, res, body) {
     await kv.set(dedupeKey, booking, { ex: 24 * 60 * 60 });
   }
 
-  return json(res, 200, { ok: true, booking });
+  return json(res, 200, { ok: true, booking, agent_id: agent_id || undefined });
 }
 
 async function handleAuto(req, res, body) {
+  const agent_id = asString(req.query.agent_id || body.agent_id);
   const email = asString(req.query.email || body.email);
-  const headers = await getHeaders(email);
+  const headers = await getHeaders({ agent_id, email });
 
   const username = process.env.CAL_USERNAME || "ai-integrating";
   const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
@@ -359,7 +414,7 @@ async function handleAuto(req, res, body) {
   const booking = bookResp.data?.data || bookResp.data;
 
   await kv.set(dedupeKey, booking, { ex: 24 * 60 * 60 });
-  return json(res, 200, { ok: true, booked: true, booking, picked_start: earliest });
+  return json(res, 200, { ok: true, booked: true, booking, picked_start: earliest, agent_id: agent_id || undefined });
 }
 
 // -------------------- MAIN HANDLER --------------------
