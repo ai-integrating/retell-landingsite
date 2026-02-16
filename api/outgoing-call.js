@@ -116,21 +116,9 @@ function hourInTZ(date = new Date(), tz = "America/New_York") {
 
 // ---- Plans (fallbacks) ----
 const PLAN_LIMITS = {
-  trial: {
-    daily_minutes_cap: 30,
-    monthly_minutes_cap: 200,
-    reserve_minutes_per_call: 1,
-  },
-  basic: {
-    daily_minutes_cap: 120,
-    monthly_minutes_cap: 1000,
-    reserve_minutes_per_call: 1,
-  },
-  pro: {
-    daily_minutes_cap: 500,
-    monthly_minutes_cap: 5000,
-    reserve_minutes_per_call: 2,
-  },
+  trial: { daily_minutes_cap: 30, monthly_minutes_cap: 200, reserve_minutes_per_call: 1 },
+  basic: { daily_minutes_cap: 120, monthly_minutes_cap: 1000, reserve_minutes_per_call: 1 },
+  pro: { daily_minutes_cap: 500, monthly_minutes_cap: 5000, reserve_minutes_per_call: 2 },
 };
 
 // Normalize limits object from KV (if any)
@@ -148,10 +136,7 @@ function normalizeLimits(obj) {
     concurrent_limit: toNumOrNull(obj.concurrent_limit),
     outbound_hours:
       obj.outbound_hours && typeof obj.outbound_hours === "object"
-        ? {
-            start: toNumOrNull(obj.outbound_hours.start),
-            end: toNumOrNull(obj.outbound_hours.end),
-          }
+        ? { start: toNumOrNull(obj.outbound_hours.start), end: toNumOrNull(obj.outbound_hours.end) }
         : null,
   };
 }
@@ -165,7 +150,6 @@ async function computeEffectiveLimits(agent_id) {
 
   const plan = (typeof planRaw === "string" ? planRaw : "") || "trial";
   const planDefaults = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
-
   const overrides = normalizeLimits(limitsRaw);
 
   const tz =
@@ -176,14 +160,9 @@ async function computeEffectiveLimits(agent_id) {
   return {
     plan,
     tz,
-    // minutes caps (prefer overrides, else plan defaults)
-    daily_minutes_cap:
-      overrides.daily_minutes_cap ?? planDefaults.daily_minutes_cap,
-    monthly_minutes_cap:
-      overrides.monthly_minutes_cap ?? planDefaults.monthly_minutes_cap,
-    reserve_minutes_per_call:
-      overrides.reserve_minutes_per_call ?? planDefaults.reserve_minutes_per_call,
-    // optional caps (only enforce if set)
+    daily_minutes_cap: overrides.daily_minutes_cap ?? planDefaults.daily_minutes_cap,
+    monthly_minutes_cap: overrides.monthly_minutes_cap ?? planDefaults.monthly_minutes_cap,
+    reserve_minutes_per_call: overrides.reserve_minutes_per_call ?? planDefaults.reserve_minutes_per_call,
     daily_call_limit: overrides.daily_call_limit ?? null,
     concurrent_limit: overrides.concurrent_limit ?? null,
     outbound_hours: overrides.outbound_hours ?? null,
@@ -194,37 +173,27 @@ async function enforceHardCutoffs(agent_id) {
   const limits = await computeEffectiveLimits(agent_id);
   const now = new Date();
 
-  // ✅ Declare once
   const day = ymdInTZ(now, limits.tz);
   const month = ymInTZ(now, limits.tz);
 
-  // Current usage
   const dayCallsKey = `metrics:${agent_id}:day:${day}:calls`;
   const dayMinutesKey = `metrics:${agent_id}:day:${day}:minutes`;
   const monthMinutesKey = `metrics:${agent_id}:month:${month}:minutes`;
 
-  // Reserved pools (optional; if you’re not using reserves, it will just be 0)
   const dayReservedKey = `outbound:${agent_id}:day:${day}:reserved_minutes`;
   const monthReservedKey = `outbound:${agent_id}:month:${month}:reserved_minutes`;
 
-  // Concurrency
   const activeKey = `outbound:${agent_id}:active`;
 
-  const [
-    dayCalls,
-    dayMinutes,
-    monthMinutes,
-    dayReserved,
-    monthReserved,
-    activeNow,
-  ] = await Promise.all([
-    kv.get(dayCallsKey),
-    kv.get(dayMinutesKey),
-    kv.get(monthMinutesKey),
-    kv.get(dayReservedKey),
-    kv.get(monthReservedKey),
-    kv.get(activeKey),
-  ]);
+  const [dayCalls, dayMinutes, monthMinutes, dayReserved, monthReserved, activeNow] =
+    await Promise.all([
+      kv.get(dayCallsKey),
+      kv.get(dayMinutesKey),
+      kv.get(monthMinutesKey),
+      kv.get(dayReservedKey),
+      kv.get(monthReservedKey),
+      kv.get(activeKey),
+    ]);
 
   const callsToday = Number(dayCalls || 0);
   const minutesToday = Number(dayMinutes || 0);
@@ -233,15 +202,10 @@ async function enforceHardCutoffs(agent_id) {
   const reservedMonth = Number(monthReserved || 0);
   const active = Number(activeNow || 0);
 
-  // Hours cutoff (optional)
-  if (
-    limits.outbound_hours?.start != null &&
-    limits.outbound_hours?.end != null
-  ) {
+  if (limits.outbound_hours?.start != null && limits.outbound_hours?.end != null) {
     const h = hourInTZ(now, limits.tz);
     const start = limits.outbound_hours.start;
     const end = limits.outbound_hours.end;
-    // treat end as exclusive (e.g., start=9 end=18 allows 09:00-17:59)
     const allowed = h >= start && h < end;
     if (!allowed) {
       return {
@@ -254,7 +218,6 @@ async function enforceHardCutoffs(agent_id) {
     }
   }
 
-  // Concurrency cutoff (optional)
   if (limits.concurrent_limit != null && active >= limits.concurrent_limit) {
     return {
       ok: false,
@@ -264,7 +227,6 @@ async function enforceHardCutoffs(agent_id) {
     };
   }
 
-  // Call limit cutoff (optional)
   if (limits.daily_call_limit != null && callsToday >= limits.daily_call_limit) {
     return {
       ok: false,
@@ -274,8 +236,6 @@ async function enforceHardCutoffs(agent_id) {
     };
   }
 
-  // Minutes cap cutoffs (hard)
-  // We enforce based on: used + currently_reserved + reserve_for_new_call <= cap
   const reserveForThisCall = Number(limits.reserve_minutes_per_call || 1);
 
   if (limits.daily_minutes_cap != null) {
@@ -304,21 +264,9 @@ async function enforceHardCutoffs(agent_id) {
     }
   }
 
-  // If allowed, reserve minutes for this call (prevents races)
-  // ✅ FIXED: re-use day/month, do NOT redeclare
   await Promise.all([
-    kv
-      .incrby(
-        `outbound:${agent_id}:day:${day}:reserved_minutes`,
-        reserveForThisCall
-      )
-      .catch(() => {}),
-    kv
-      .incrby(
-        `outbound:${agent_id}:month:${month}:reserved_minutes`,
-        reserveForThisCall
-      )
-      .catch(() => {}),
+    kv.incrby(`outbound:${agent_id}:day:${day}:reserved_minutes`, reserveForThisCall).catch(() => {}),
+    kv.incrby(`outbound:${agent_id}:month:${month}:reserved_minutes`, reserveForThisCall).catch(() => {}),
   ]);
 
   return {
@@ -336,25 +284,13 @@ module.exports = async (req, res) => {
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST")
-    return json(res, 405, { ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
 
   const body = await readJsonBody(req);
 
-  const agent_id = pick(body, ["agent_id", "agentId"]); // required for limits
-  const to_number_raw = pick(body, [
-    "to_number",
-    "to",
-    "phone_number",
-    "phone",
-    "client_phone",
-  ]);
-  const from_number_raw = pick(body, [
-    "from_number",
-    "from",
-    "retell_phone",
-    "outbound_from_number",
-  ]);
+  const agent_id = pick(body, ["agent_id", "agentId"]);
+  const to_number_raw = pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]);
+  const from_number_raw = pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]);
 
   const client_name = pick(body, ["client_name", "clientName", "name"]);
   const reason_for_call = pick(body, ["reason_for_call", "reason", "call_reason"]);
@@ -362,22 +298,12 @@ module.exports = async (req, res) => {
 
   const idempotency_key =
     req.headers["x-idempotency-key"] ||
-    pick(body, [
-      "idempotency_key",
-      "request_id",
-      "call_request_id",
-      "submission_id",
-      "retell_call_id",
-    ]);
+    pick(body, ["idempotency_key", "request_id", "call_request_id", "submission_id", "retell_call_id"]);
 
   const to_number = cleanPhone(to_number_raw);
   const from_number = cleanPhone(from_number_raw);
 
-  if (!agent_id)
-    return json(res, 400, {
-      ok: false,
-      error: "Missing agent_id (required for limits)",
-    });
+  if (!agent_id) return json(res, 400, { ok: false, error: "Missing agent_id (required for limits)" });
   if (!to_number) return json(res, 400, { ok: false, error: "Missing to_number" });
   if (!from_number) return json(res, 400, { ok: false, error: "Missing from_number" });
 
@@ -386,11 +312,9 @@ module.exports = async (req, res) => {
     const idemKey = `outbound:idem:${idempotency_key}`;
     const existing = await kv.get(idemKey);
     if (existing && existing.status !== "processing") return json(res, 200, existing);
-
     await kv.set(idemKey, { ok: true, status: "processing" }, { ex: 60 * 10 });
   }
 
-  // ✅ HARD CUTOFFS (before creating call)
   const gate = await enforceHardCutoffs(agent_id);
   if (!gate.ok) {
     const result = {
@@ -401,22 +325,19 @@ module.exports = async (req, res) => {
       usage: gate.usage,
       message: "Outbound call blocked: usage limits reached.",
     };
-
-    if (idempotency_key) {
-      await kv.set(`outbound:idem:${idempotency_key}`, result, { ex: 60 * 15 });
-    }
+    if (idempotency_key) await kv.set(`outbound:idem:${idempotency_key}`, result, { ex: 60 * 15 });
     return json(res, 429, result);
   }
 
   try {
-    const RETELL_API_KEY =
-      process.env.OUTBOUND_RETELL_API_KEY || process.env.RETELL_API_KEY;
+    const RETELL_API_KEY = process.env.OUTBOUND_RETELL_API_KEY || process.env.RETELL_API_KEY;
     if (!RETELL_API_KEY) throw new Error("Missing RETELL API key env var");
 
     const url = "https://api.retellai.com/v2/create-phone-call";
 
-    // ✅ FIX: Retell dynamic vars must be key/value strings
+    // ✅ KEY FIX: force {{direction}} to "outbound" without changing provisioning
     const dynVars = {
+      direction: "outbound",
       CALL_DIRECTION: "outbound",
       client_name: String(asString(client_name, "")),
       reason_for_call: String(asString(reason_for_call, "")),
@@ -431,6 +352,8 @@ module.exports = async (req, res) => {
     const payload = {
       from_number,
       to_number,
+      // ✅ compatibility: some schemas expect agent_id; keep override_agent_id too
+      agent_id: agent_id,
       override_agent_id: agent_id,
       retell_llm_dynamic_variables: dynVars,
       metadata: {
@@ -451,49 +374,33 @@ module.exports = async (req, res) => {
       timeout: 30000,
     });
 
-    // ✅ Concurrency: mark active AFTER successful create
     const activeKey = `outbound:${agent_id}:active`;
     await kv.incr(activeKey);
-    await kv.expire(activeKey, 60 * 20); // safety TTL
+    await kv.expire(activeKey, 60 * 20);
 
     const result = { ok: true, status: "created", retell: resp.data };
 
     if (idempotency_key) {
-      await kv.set(`outbound:idem:${idempotency_key}`, result, {
-        ex: 60 * 60 * 24,
-      });
+      await kv.set(`outbound:idem:${idempotency_key}`, result, { ex: 60 * 60 * 24 });
     }
 
     return json(res, 200, result);
   } catch (err) {
     const msg = err?.response?.data || err?.message || "Unknown error";
 
-    // If call creation fails, release the reserved minutes we pre-reserved.
-    // (call-ended webhook won't fire on failure)
     try {
-      const tz =
-        (await kv.get(`tz:${agent_id}`)) ||
-        process.env.DEFAULT_TZ ||
-        "America/New_York";
+      const tz = (await kv.get(`tz:${agent_id}`)) || process.env.DEFAULT_TZ || "America/New_York";
       const day = ymdInTZ(new Date(), tz);
       const month = ymInTZ(new Date(), tz);
       const reserve = Number(gate.reserveForThisCall || 0);
       if (reserve) {
-        await kv
-          .incrby(`outbound:${agent_id}:day:${day}:reserved_minutes`, -reserve)
-          .catch(() => {});
-        await kv
-          .incrby(`outbound:${agent_id}:month:${month}:reserved_minutes`, -reserve)
-          .catch(() => {});
+        await kv.incrby(`outbound:${agent_id}:day:${day}:reserved_minutes`, -reserve).catch(() => {});
+        await kv.incrby(`outbound:${agent_id}:month:${month}:reserved_minutes`, -reserve).catch(() => {});
       }
     } catch {}
 
     if (idempotency_key) {
-      await kv.set(
-        `outbound:idem:${idempotency_key}`,
-        { ok: false, status: "failed", error: msg },
-        { ex: 60 * 15 }
-      );
+      await kv.set(`outbound:idem:${idempotency_key}`, { ok: false, status: "failed", error: msg }, { ex: 60 * 15 });
     }
 
     return json(res, 500, { ok: false, error: msg });
