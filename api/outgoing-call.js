@@ -1,70 +1,124 @@
 // /api/outgoing-call.js
 // Place an outbound call via Retell Call (V2) endpoint.
-// UPDATED: writes usage_day/usage_month into call metadata (tz-aware) so call-ended can increment minutes/calls.
 // ✅ UPDATED: Hard cutoffs when limits are hit (minutes/calls/concurrency/hours)
+// ✅ UPDATED: writes usage_day/usage_month into metadata (tz-aware)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
-@@ -44,14 +44,13 @@ function cleanPhone(phone) {
-if (!phone) return "";
-let p = String(phone).trim();
-const digits = p.replace(/[^\d]/g, "");
 
-if (digits.length === 10) return `+1${digits}`;
-if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-if (p.startsWith("+")) return p;
-return digits ? `+${digits}` : "";
+// -------------------- CORS --------------------
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Idempotency-Key"
+  );
 }
 
-// ✅ Better pick(): ignores "", whitespace, null-ish strings, Zapier {output:"..."}
+// -------------------- BODY --------------------
+async function readJsonBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  if (req.body && typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
+  }
+  return await new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+// -------------------- HELPERS --------------------
+function cleanPhone(phone) {
+  if (!phone) return "";
+  let p = String(phone).trim();
+  const digits = p.replace(/[^\d]/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (p.startsWith("+")) return p;
+  return digits ? `+${digits}` : "";
+}
+
 // ignores "", whitespace, null-ish strings, Zapier {output:"..."}
 function pick(obj, keys, fallback = undefined) {
-for (const k of keys) {
-let v = obj?.[k];
-@@ -60,6 +59,8 @@ function pick(obj, keys, fallback = undefined) {
-if (typeof v === "string") {
-const s = v.trim();
-if (!s) continue;
+  for (const k of keys) {
+    let v = obj?.[k];
+    if (v && typeof v === "object" && "output" in v) v = v.output;
+    if (v === undefined || v === null) continue;
+
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (!s) continue;
       if (s.toLowerCase() === "null") continue;
       if (s.toLowerCase() === "undefined") continue;
-return s;
-}
-return v;
-@@ -80,6 +81,355 @@ function json(res, status, payload) {
-res.end(JSON.stringify(payload));
+      return s;
+    }
+    return v;
+  }
+  return fallback;
 }
 
-// ---- TZ helpers (no deps) ----
+function asString(v, fallback = "") {
+  if (v === undefined || v === null) return fallback;
+  if (typeof v === "object" && "output" in v) v = v.output;
+  const s = String(v).trim();
+  return s ? s : fallback;
+}
+
+function json(res, status, payload) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(payload));
+}
+
 // ---- TZ helpers ----
 function ymdInTZ(date = new Date(), tz = "America/New_York") {
-  const parts = new Intl.DateTimeFormat("en-
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(date);
+
   const y = parts.find((p) => p.type === "year")?.value;
   const m = parts.find((p) => p.type === "month")?.value;
   const d = parts.find((p) => p.type === "day")?.value;
-  return `${y}-${m}-${d}`;
+
+  return `${y}-${m}-${d}`; // YYYY-MM-DD
 }
+
 function ymInTZ(date = new Date(), tz = "America/New_York") {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
   }).formatToParts(date);
+
   const y = parts.find((p) => p.type === "year")?.value;
   const m = parts.find((p) => p.type === "month")?.value;
-  return `${y}-${m}`;
+
+  return `${y}-${m}`; // YYYY-MM
 }
+
 function hourInTZ(date = new Date(), tz = "America/New_York") {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     hour: "2-digit",
     hour12: false,
   }).formatToParts(date);
+
   const h = parts.find((p) => p.type === "hour")?.value;
   return Number(h);
 }
@@ -81,6 +135,7 @@ function toNumOrNull(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+
 function normalizeLimits(obj) {
   if (!obj || typeof obj !== "object") return {};
   return {
@@ -89,12 +144,13 @@ function normalizeLimits(obj) {
     reserve_minutes_per_call: toNumOrNull(obj.reserve_minutes_per_call),
     daily_call_limit: toNumOrNull(obj.daily_call_limit),
     concurrent_limit: toNumOrNull(obj.concurrent_limit),
-    outbound_hours: obj.outbound_hours && typeof obj.outbound_hours === "object"
-      ? {
-          start: toNumOrNull(obj.outbound_hours.start),
-          end: toNumOrNull(obj.outbound_hours.end),
-        }
-      : null,
+    outbound_hours:
+      obj.outbound_hours && typeof obj.outbound_hours === "object"
+        ? {
+            start: toNumOrNull(obj.outbound_hours.start),
+            end: toNumOrNull(obj.outbound_hours.end),
+          }
+        : null,
   };
 }
 
@@ -107,19 +163,19 @@ async function computeEffectiveLimits(agent_id) {
 
   const plan = (typeof planRaw === "string" ? planRaw : "") || "trial";
   const planDefaults = PLAN_LIMITS[plan] || PLAN_LIMITS.trial;
-
   const overrides = normalizeLimits(limitsRaw);
 
-  const tz = (typeof tzRaw === "string" ? tzRaw : "") || process.env.DEFAULT_TZ || "America/New_York";
+  const tz =
+    (typeof tzRaw === "string" ? tzRaw : "") ||
+    process.env.DEFAULT_TZ ||
+    "America/New_York";
 
   return {
     plan,
     tz,
-    // minutes caps (prefer overrides, else plan defaults)
     daily_minutes_cap: overrides.daily_minutes_cap ?? planDefaults.daily_minutes_cap,
     monthly_minutes_cap: overrides.monthly_minutes_cap ?? planDefaults.monthly_minutes_cap,
     reserve_minutes_per_call: overrides.reserve_minutes_per_call ?? planDefaults.reserve_minutes_per_call,
-    // optional caps (only enforce if set)
     daily_call_limit: overrides.daily_call_limit ?? null,
     concurrent_limit: overrides.concurrent_limit ?? null,
     outbound_hours: overrides.outbound_hours ?? null,
@@ -133,33 +189,24 @@ async function enforceHardCutoffs(agent_id) {
   const day = ymdInTZ(now, limits.tz);
   const month = ymInTZ(now, limits.tz);
 
-  // Current usage
   const dayCallsKey = `metrics:${agent_id}:day:${day}:calls`;
   const dayMinutesKey = `metrics:${agent_id}:day:${day}:minutes`;
   const monthMinutesKey = `metrics:${agent_id}:month:${month}:minutes`;
 
-  // Reserved pools (optional; if you’re not using reserves, it will just be 0)
   const dayReservedKey = `outbound:${agent_id}:day:${day}:reserved_minutes`;
   const monthReservedKey = `outbound:${agent_id}:month:${month}:reserved_minutes`;
 
-  // Concurrency
   const activeKey = `outbound:${agent_id}:active`;
 
-  const [
-    dayCalls,
-    dayMinutes,
-    monthMinutes,
-    dayReserved,
-    monthReserved,
-    activeNow,
-  ] = await Promise.all([
-    kv.get(dayCallsKey),
-    kv.get(dayMinutesKey),
-    kv.get(monthMinutesKey),
-    kv.get(dayReservedKey),
-    kv.get(monthReservedKey),
-    kv.get(activeKey),
-  ]);
+  const [dayCalls, dayMinutes, monthMinutes, dayReserved, monthReserved, activeNow] =
+    await Promise.all([
+      kv.get(dayCallsKey),
+      kv.get(dayMinutesKey),
+      kv.get(monthMinutesKey),
+      kv.get(dayReservedKey),
+      kv.get(monthReservedKey),
+      kv.get(activeKey),
+    ]);
 
   const callsToday = Number(dayCalls || 0);
   const minutesToday = Number(dayMinutes || 0);
@@ -173,7 +220,6 @@ async function enforceHardCutoffs(agent_id) {
     const h = hourInTZ(now, limits.tz);
     const start = limits.outbound_hours.start;
     const end = limits.outbound_hours.end;
-    // treat end as exclusive (e.g., start=9 end=18 allows 09:00-17:59)
     const allowed = h >= start && h < end;
     if (!allowed) {
       return {
@@ -207,7 +253,6 @@ async function enforceHardCutoffs(agent_id) {
   }
 
   // Minutes cap cutoffs (hard)
-  // We enforce based on: used + currently_reserved + reserve_for_new_call <= cap
   const reserveForThisCall = Number(limits.reserve_minutes_per_call || 1);
 
   if (limits.daily_minutes_cap != null) {
@@ -236,13 +281,10 @@ async function enforceHardCutoffs(agent_id) {
     }
   }
 
-  // If allowed, optionally reserve minutes for this call (prevents races)
-  // This makes the cap HARD under concurrency.
-  const day = ymdInTZ(now, limits.tz);
-  const month = ymInTZ(now, limits.tz);
+  // Reserve minutes (race-safe)
   await Promise.all([
-    kv.incrby(`outbound:${agent_id}:day:${day}:reserved_minutes`, reserveForThisCall).catch(() => {}),
-    kv.incrby(`outbound:${agent_id}:month:${month}:reserved_minutes`, reserveForThisCall).catch(() => {}),
+    kv.incrby(dayReservedKey, reserveForThisCall).catch(() => {}),
+    kv.incrby(monthReservedKey, reserveForThisCall).catch(() => {}),
   ]);
 
   return {
@@ -264,7 +306,7 @@ module.exports = async (req, res) => {
 
   const body = await readJsonBody(req);
 
-  const agent_id = pick(body, ["agent_id", "agentId"]); // required for limits
+  const agent_id = pick(body, ["agent_id", "agentId"]);
   const to_number_raw = pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]);
   const from_number_raw = pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]);
 
@@ -279,7 +321,7 @@ module.exports = async (req, res) => {
   const to_number = cleanPhone(to_number_raw);
   const from_number = cleanPhone(from_number_raw);
 
-  if (!agent_id) return json(res, 400, { ok: false, error: "Missing agent_id (required for limits)" });
+  if (!agent_id) return json(res, 400, { ok: false, error: "Missing agent_id" });
   if (!to_number) return json(res, 400, { ok: false, error: "Missing to_number" });
   if (!from_number) return json(res, 400, { ok: false, error: "Missing from_number" });
 
@@ -288,11 +330,9 @@ module.exports = async (req, res) => {
     const idemKey = `outbound:idem:${idempotency_key}`;
     const existing = await kv.get(idemKey);
     if (existing && existing.status !== "processing") return json(res, 200, existing);
-
     await kv.set(idemKey, { ok: true, status: "processing" }, { ex: 60 * 10 });
   }
 
-  // ✅ HARD CUTOFFS (before creating call)
   const gate = await enforceHardCutoffs(agent_id);
   if (!gate.ok) {
     const result = {
@@ -303,7 +343,6 @@ module.exports = async (req, res) => {
       usage: gate.usage,
       message: "Outbound call blocked: usage limits reached.",
     };
-
     if (idempotency_key) {
       await kv.set(`outbound:idem:${idempotency_key}`, result, { ex: 60 * 15 });
     }
@@ -316,21 +355,23 @@ module.exports = async (req, res) => {
 
     const url = "https://api.retellai.com/v2/create-phone-call";
 
+    // ✅ Retell requires key/value PAIRS OF STRINGS
+    const dynVars = {
+      client_name: String(asString(client_name, "")),
+      reason_for_call: String(asString(reason_for_call, "")),
+      notes: String(asString(notes, "")),
+      usage_day: String(gate.usage_day || ""),
+      usage_month: String(gate.usage_month || ""),
+      tz: String(gate.limits?.tz || "America/New_York"),
+      reserved_minutes: String(gate.reserveForThisCall || 0),
+      plan: String(gate.limits?.plan || ""),
+    };
+
     const payload = {
       from_number,
       to_number,
       override_agent_id: agent_id,
-      retell_llm_dynamic_variables: {
-        CALL_DIRECTION: "outbound",
-        client_name: asString(client_name, ""),
-        reason_for_call: asString(reason_for_call, ""),
-        notes: asString(notes, ""),
-        // helpful if you want it in prompt/tooling later:
-        usage_day: gate.usage_day,
-        usage_month: gate.usage_month,
-        tz: gate.limits.tz,
-        reserved_minutes: gate.reserveForThisCall,
-      },
+      retell_llm_dynamic_variables: dynVars,
       metadata: {
         idempotency_key: asString(idempotency_key, ""),
         usage_day: gate.usage_day,
@@ -349,10 +390,10 @@ module.exports = async (req, res) => {
       timeout: 30000,
     });
 
-    // ✅ Concurrency: mark active AFTER successful create
+    // Mark active AFTER successful create
     const activeKey = `outbound:${agent_id}:active`;
     await kv.incr(activeKey);
-    await kv.expire(activeKey, 60 * 20); // safety TTL
+    await kv.expire(activeKey, 60 * 20);
 
     const result = { ok: true, status: "created", retell: resp.data };
 
@@ -364,8 +405,7 @@ module.exports = async (req, res) => {
   } catch (err) {
     const msg = err?.response?.data || err?.message || "Unknown error";
 
-    // If call creation fails, release the reserved minutes we pre-reserved.
-    // (call-ended webhook won't fire on failure)
+    // Release reserved minutes on failure
     try {
       const tz = (await kv.get(`tz:${agent_id}`)) || process.env.DEFAULT_TZ || "America/New_York";
       const day = ymdInTZ(new Date(), tz);
