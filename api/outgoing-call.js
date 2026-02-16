@@ -177,8 +177,10 @@ async function computeEffectiveLimits(agent_id) {
     plan,
     tz,
     // minutes caps (prefer overrides, else plan defaults)
-    daily_minutes_cap: overrides.daily_minutes_cap ?? planDefaults.daily_minutes_cap,
-    monthly_minutes_cap: overrides.monthly_minutes_cap ?? planDefaults.monthly_minutes_cap,
+    daily_minutes_cap:
+      overrides.daily_minutes_cap ?? planDefaults.daily_minutes_cap,
+    monthly_minutes_cap:
+      overrides.monthly_minutes_cap ?? planDefaults.monthly_minutes_cap,
     reserve_minutes_per_call:
       overrides.reserve_minutes_per_call ?? planDefaults.reserve_minutes_per_call,
     // optional caps (only enforce if set)
@@ -372,7 +374,10 @@ module.exports = async (req, res) => {
   const from_number = cleanPhone(from_number_raw);
 
   if (!agent_id)
-    return json(res, 400, { ok: false, error: "Missing agent_id (required for limits)" });
+    return json(res, 400, {
+      ok: false,
+      error: "Missing agent_id (required for limits)",
+    });
   if (!to_number) return json(res, 400, { ok: false, error: "Missing to_number" });
   if (!from_number) return json(res, 400, { ok: false, error: "Missing from_number" });
 
@@ -410,21 +415,24 @@ module.exports = async (req, res) => {
 
     const url = "https://api.retellai.com/v2/create-phone-call";
 
+    // ✅ FIX: Retell dynamic vars must be key/value strings
+    const dynVars = {
+      CALL_DIRECTION: "outbound",
+      client_name: String(asString(client_name, "")),
+      reason_for_call: String(asString(reason_for_call, "")),
+      notes: String(asString(notes, "")),
+      usage_day: String(gate.usage_day || ""),
+      usage_month: String(gate.usage_month || ""),
+      tz: String(gate.limits?.tz || "America/New_York"),
+      reserved_minutes: String(gate.reserveForThisCall || 0),
+      plan: String(gate.limits?.plan || ""),
+    };
+
     const payload = {
       from_number,
       to_number,
       override_agent_id: agent_id,
-      retell_llm_dynamic_variables: {
-        CALL_DIRECTION: "outbound",
-        client_name: asString(client_name, ""),
-        reason_for_call: asString(reason_for_call, ""),
-        notes: asString(notes, ""),
-        // helpful if you want it in prompt/tooling later:
-        usage_day: gate.usage_day,
-        usage_month: gate.usage_month,
-        tz: gate.limits.tz,
-        reserved_minutes: gate.reserveForThisCall,
-      },
+      retell_llm_dynamic_variables: dynVars,
       metadata: {
         idempotency_key: asString(idempotency_key, ""),
         usage_day: gate.usage_day,
