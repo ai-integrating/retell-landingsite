@@ -77,15 +77,6 @@ function asString(v, fallback = "") {
   return s ? s : fallback;
 }
 
-// ✅ NEW: treat Zapier "No data" as empty
-function normalizeZapierNoData(v) {
-  const s = asString(v, "");
-  if (!s) return "";
-  if (s.toLowerCase() === "no data") return "";
-  if (s.toLowerCase() === "n/a") return "";
-  return s;
-}
-
 function json(res, status, payload) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -319,30 +310,9 @@ module.exports = async (req, res) => {
   const to_number_raw = pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]);
   const from_number_raw = pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]);
 
-  // ✅ UPDATED: include Zapier "Answers ..." aliases you showed in the screenshot
-  const client_name = pick(body, [
-    "client_name",
-    "clientName",
-    "name",
-    "Answers Client Name Name Of The Person Being Called",
-    "Answers Client Name",
-  ]);
-
-  const reason_for_call = pick(body, [
-    "reason_for_call",
-    "reason",
-    "call_reason",
-    "Answers Reason For This Call",
-    "Answers Reason",
-  ]);
-
-  const notes = pick(body, [
-    "notes",
-    "note",
-    "Answers Notes Or Context For The Agent Anything Helpful The Agent Should Know Before Calling",
-    "Answers Notes Or Context For The Agent",
-    "Answers Notes",
-  ]);
+  const client_name = pick(body, ["client_name", "clientName", "name"]);
+  const reason_for_call = pick(body, ["reason_for_call", "reason", "call_reason"]);
+  const notes = pick(body, ["notes", "note"]);
 
   const idempotency_key =
     req.headers["x-idempotency-key"] ||
@@ -387,11 +357,12 @@ module.exports = async (req, res) => {
 
     // ✅ Retell requires key/value PAIRS OF STRINGS
     const dynVars = {
-      // ✅ UPDATED: normalize "No data" => ""
-      client_name: String(normalizeZapierNoData(client_name)),
-      reason_for_call: String(normalizeZapierNoData(reason_for_call)),
-      notes: String(normalizeZapierNoData(notes)),
+      // ✅ OUTBOUND OVERRIDE (so prompt can trust this even if {{direction}} is missing)
+      call_direction: "outbound",
 
+      client_name: String(asString(client_name, "")),
+      reason_for_call: String(asString(reason_for_call, "")),
+      notes: String(asString(notes, "")),
       usage_day: String(gate.usage_day || ""),
       usage_month: String(gate.usage_month || ""),
       tz: String(gate.limits?.tz || "America/New_York"),
@@ -405,6 +376,9 @@ module.exports = async (req, res) => {
       override_agent_id: agent_id,
       retell_llm_dynamic_variables: dynVars,
       metadata: {
+        // ✅ OUTBOUND OVERRIDE (optional but helpful for debugging)
+        call_direction: "outbound",
+
         idempotency_key: asString(idempotency_key, ""),
         usage_day: gate.usage_day,
         usage_month: gate.usage_month,
