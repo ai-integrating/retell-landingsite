@@ -306,13 +306,31 @@ module.exports = async (req, res) => {
 
   const body = await readJsonBody(req);
 
-  const agent_id = pick(body, ["agent_id", "agentId"]);
-  const to_number_raw = pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]);
-  const from_number_raw = pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]);
+  // ✅ NEW: allow Zapier/Jotform to pass vars nested (but keep top-level working)
+  const dynSource =
+    (body && typeof body === "object" && (body.retell_llm_dynamic_variables || body.dynamic_variables || body.retell_dynamic_variables)) ||
+    {};
 
-  const client_name = pick(body, ["client_name", "clientName", "name"]);
-  const reason_for_call = pick(body, ["reason_for_call", "reason", "call_reason"]);
-  const notes = pick(body, ["notes", "note"]);
+  const agent_id = pick(body, ["agent_id", "agentId"]);
+
+  // Allow numbers from either top-level or dynSource (harmless fallback)
+  const to_number_raw =
+    pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]) ??
+    pick(dynSource, ["to_number", "to", "phone_number", "phone", "client_phone"]);
+  const from_number_raw =
+    pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]) ??
+    pick(dynSource, ["from_number", "from", "retell_phone", "outbound_from_number"]);
+
+  // ✅ Pull JotForm fields from nested dynSource FIRST, then top-level
+  const client_name =
+    pick(dynSource, ["client_name", "clientName", "name"]) ??
+    pick(body, ["client_name", "clientName", "name"]);
+  const reason_for_call =
+    pick(dynSource, ["reason_for_call", "reason", "call_reason"]) ??
+    pick(body, ["reason_for_call", "reason", "call_reason"]);
+  const notes =
+    pick(dynSource, ["notes", "note"]) ??
+    pick(body, ["notes", "note"]);
 
   const idempotency_key =
     req.headers["x-idempotency-key"] ||
