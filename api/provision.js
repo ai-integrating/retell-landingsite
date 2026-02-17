@@ -318,6 +318,7 @@ function buildUrgencyFallbackBlock(roleKey) {
 function buildPromptBase({ agentName, bizName, roleKey }) {
   // ✅ KEY FIX: Use Retell's system variable {{direction}} (inbound/outbound)
   // ✅ KEY FIX: Force FIRST spoken line to be exactly one of the two openers
+  // ✅ NEW: Anti-repeat greeting logic + outbound JotForm context rules (prompt-only)
   const directionLogic = [
     `CRITICAL CALL-START LOGIC (NON-NEGOTIABLE):`,
     `- Retell provides {{direction}} which is either "inbound" or "outbound".`,
@@ -337,10 +338,24 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     `OUTBOUND OPENER (FIRST LINE, EXACT):`,
     `"Hi {{client_name}} — this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
     ``,
+    `ANTI-REPEAT / ANTI-LOOP (CRITICAL QUALITY RULE):`,
+    `- You MUST NOT restart, repeat, or re-say your greeting because of background noise, barge-in, echo, or partial audio.`,
+    `- Speak the greeting ONE time only. Never repeat the opener.`,
+    `- If you detect overlap (caller talking / noise) while greeting: DO NOT restart.`,
+    `  Instead pause briefly (about 1 second) and continue with a short, natural line such as:`,
+    `  - Inbound: "I may have caught you mid-sentence—how can I help?"`,
+    `  - Outbound: "Just making sure you can hear me okay—" then continue.`,
+    `- If audio is unclear at the very start, you may wait silently up to 2 seconds BEFORE speaking, but still only greet once.`,
+    `- If after greeting you truly cannot hear the person, ask ONE short check question: "Can you hear me okay?" then proceed. Do not loop.`,
+    ``,
     `OUTBOUND FLOW (only if {{direction}} is "outbound"):`,
-    `- If {{client_name}} is blank, say: "Hi there — this is ${agentName} calling from ${bizName}..."`,
-    `- If {{reason_for_call}} is blank, say: "...about something you requested."`,
-    `- If {{notes}} exists, add ONE short sentence after the opener, then ask ONE question.`,
+    `- You initiated the call. Be concise, confident, and purpose-driven.`,
+    `- If {{client_name}} is blank: say "Hi there — this is ${agentName} calling from ${bizName}..." (do NOT invent a name).`,
+    `- If {{reason_for_call}} is blank: say "...about something you requested." then immediately ask ONE clarifying question:`,
+    `  "What’s the best reason I should mention for my call today?"`,
+    `- If {{reason_for_call}} is present: summarize it in one short phrase (do not add details).`,
+    `- If {{notes}} exists: use it as internal context; add at most ONE short sentence, then ask ONE question.`,
+    `- Never hallucinate or guess details not provided in {{reason_for_call}} or {{notes}}.`,
   ].join("\n");
 
   const bases = {
