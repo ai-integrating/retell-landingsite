@@ -1,9 +1,4 @@
 // /api/provision.js
-// ✅ UPDATE: Use Retell system variable {{direction}} (inbound/outbound) instead of custom CALL_DIRECTION
-// ✅ UPDATE: Force FIRST LINE to be exactly the correct opener (prevents outbound bleed into inbound)
-// ✅ UPDATE: Keep tier protections (Receptionist no-booking; Scheduler/Operations email+service gate)
-// ✅ UPDATE: Add CODED URGENCY FALLBACKS (works even when client did NOT buy Emergency Dispatch)
-
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
 
@@ -160,20 +155,16 @@ function cleanScrapedText(raw) {
 function extractWebsiteFromText(text) {
   if (!text) return "";
   const s = String(text);
-
   const m1 = s.match(/website\s*[:=]\s*(https?:\/\/[^\s]+)/i);
   if (m1?.[1]) return m1[1].trim();
-
   const m2 = s.match(/website\s*[:=]\s*([a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
   if (m2?.[1]) return m2[1].trim();
-
   return "";
 }
 
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
-
   const scrapeUrl = `https://r.jina.ai/${u}`;
   try {
     const resp = await axios.get(scrapeUrl, {
@@ -269,8 +260,6 @@ function formatSetupBlock(setupText) {
 
 // -------------------- URGENCY FALLBACKS (CODED) --------------------
 function buildUrgencyFallbackBlock(roleKey) {
-  // This block forces consistent “urgent” labeling even without Emergency Dispatch setup.
-  // Your Zap/AI step should then reliably extract: urgency_level=urgent and callback_needed=true.
   const common = [
     `URGENCY & EMERGENCY CLASSIFICATION (ALWAYS ON — even without Emergency Dispatch):`,
     `- "Urgent" means: caller says they need a call back ASAP / immediately / right away, or describes time-sensitive risk or safety concerns.`,
@@ -284,15 +273,15 @@ function buildUrgencyFallbackBlock(roleKey) {
     `CRITICAL RESPONSE RULES WHEN URGENT/EMERGENCY IS DETECTED:`,
     `1) Stay calm. Acknowledge: "Okay — I understand this is urgent."`,
     `2) IMMEDIATELY collect (one question at a time):`,
-    `   - Caller name`,
-    `   - Best callback number (repeat it back to confirm)`,
-    `   - Short issue summary in 1 sentence`,
-    `   - Location/address ONLY if relevant to the business (e.g., service call)`,
+    `    - Caller name`,
+    `    - Best callback number (repeat it back to confirm)`,
+    `    - Short issue summary in 1 sentence`,
+    `    - Location/address ONLY if relevant to the business (e.g., service call)`,
     `3) Ask this exact question: "Is anyone in immediate danger right now? Yes or no."`,
-    `   - If YES: advise calling 911 immediately (do not debate).`,
+    `    - If YES: advise calling 911 immediately (do not debate).`,
     `4) Promise language (IMPORTANT):`,
-    `   - You MAY say: "I’m flagging this as urgent for the team."`,
-    `   - You MUST NOT guarantee response times unless the business setup explicitly promises it.`,
+    `    - You MAY say: "I’m flagging this as urgent for the team."`,
+    `    - You MUST NOT guarantee response times unless the business setup explicitly promises it.`,
     ``,
     `LOGGING REQUIREMENTS (non-negotiable):`,
     `- Ensure the call summary clearly includes:`,
@@ -300,62 +289,40 @@ function buildUrgencyFallbackBlock(roleKey) {
     `  - callback_needed: yes`,
     `  - a short "urgent_reason" phrase (e.g., "requested immediate callback" / "leak reported")`,
   ];
-
   const dispatchOnly = [
     ``,
     `EMERGENCY DISPATCH UPGRADE BEHAVIOR (only if your BUSINESS SETUP includes dispatch rules/contacts):`,
     `- If dispatch contacts/rules exist in BUSINESS SETUP, follow them precisely.`,
     `- If no dispatch contact is available, still follow the fallback above and flag as URGENT.`,
   ];
-
-  if (roleKey === "emergency" || roleKey === "operations") {
-    return common.concat(dispatchOnly).join("\n");
-  }
+  if (roleKey === "emergency" || roleKey === "operations") return common.concat(dispatchOnly).join("\n");
   return common.join("\n");
 }
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ KEY FIX: Use Retell's system variable {{direction}} (inbound/outbound)
-  // ✅ KEY FIX: Force FIRST spoken line to be exactly one of the two openers
-  // ✅ NEW: Anti-repeat greeting logic + outbound JotForm context rules (prompt-only)
+  // ✅ STABILITY UPDATE: Added Barge-in Shield and Anti-Loop logic
+  const stabilityLogic = [
+    `# ANTI-REPEAT / BARGE-IN RULES (CRITICAL STABILITY)`,
+    `- You MUST NOT restart, repeat, or re-say your greeting because of background noise, phone line "clunks", or early talk-over.`,
+    `- If you hear noise while speaking your OPENER, DO NOT FLINCH. Continue your sentence to the end.`,
+    `- If the caller interrupts you during the first 5 seconds, finish your current sentence before pausing.`,
+    `- NEVER repeat the phrase "Hello, this is ${agentName}..." or "Hi {{client_name}}..." more than once per call.`,
+    `- If the audio is unclear at the start, wait 1 second for the line to stabilize BEFORE speaking the opener.`,
+  ].join("\n");
+
   const directionLogic = [
-    `CRITICAL CALL-START LOGIC (NON-NEGOTIABLE):`,
-    `- Retell provides {{direction}} which is either "inbound" or "outbound".`,
-    `- If {{direction}} is exactly "outbound": you initiated the call -> use the OUTBOUND OPENER.`,
-    `- Otherwise (including if it shows literally as "{{direction}}"): treat as INBOUND -> use the INBOUND OPENER.`,
-    `- Your FIRST spoken line must be EXACTLY one of the openers below. Do not blend them.`,
-    `- If {{direction}} is inbound, you must NOT say "I'm calling about..." or imply you initiated the call.`,
+    `# CRITICAL OPENER LOGIC (MANDATORY)`,
+    `1. CHECK FIRST_LINE: If {{first_line}} is NOT blank, you MUST speak ONLY this exact phrase as your first line: "{{first_line}}"`,
+    `2. FALLBACK OUTBOUND: If {{first_line}} is blank BUT {{client_name}} exists, say: "Hi {{client_name}} — this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
+    `3. INBOUND DEFAULT: If both of the above are blank, say: "Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
     ``,
-    `DYNAMIC VARIABLES (optional):`,
-    `- client_name: {{client_name}}`,
-    `- reason_for_call: {{reason_for_call}}`,
-    `- notes: {{notes}}`,
+    `# GENERAL RULES`,
+    `- Speak the opener ONCE. Do NOT repeat, restart, or blend openers.`,
+    `- After the opener, ask ONE clear question to move the call forward.`,
+    `- Use {{notes}} as internal context to guide your answers.`,
     ``,
-    `INBOUND OPENER (FIRST LINE, EXACT):`,
-    `"Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
-    ``,
-    `OUTBOUND OPENER (FIRST LINE, EXACT):`,
-    `"Hi {{client_name}} — this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
-    ``,
-    `ANTI-REPEAT / ANTI-LOOP (CRITICAL QUALITY RULE):`,
-    `- You MUST NOT restart, repeat, or re-say your greeting because of background noise, barge-in, echo, or partial audio.`,
-    `- Speak the greeting ONE time only. Never repeat the opener.`,
-    `- If you detect overlap (caller talking / noise) while greeting: DO NOT restart.`,
-    `  Instead pause briefly (about 1 second) and continue with a short, natural line such as:`,
-    `  - Inbound: "I may have caught you mid-sentence—how can I help?"`,
-    `  - Outbound: "Just making sure you can hear me okay—" then continue.`,
-    `- If audio is unclear at the very start, you may wait silently up to 2 seconds BEFORE speaking, but still only greet once.`,
-    `- If after greeting you truly cannot hear the person, ask ONE short check question: "Can you hear me okay?" then proceed. Do not loop.`,
-    ``,
-    `OUTBOUND FLOW (only if {{direction}} is "outbound"):`,
-    `- You initiated the call. Be concise, confident, and purpose-driven.`,
-    `- If {{client_name}} is blank: say "Hi there — this is ${agentName} calling from ${bizName}..." (do NOT invent a name).`,
-    `- If {{reason_for_call}} is blank: say "...about something you requested." then immediately ask ONE clarifying question:`,
-    `  "What’s the best reason I should mention for my call today?"`,
-    `- If {{reason_for_call}} is present: summarize it in one short phrase (do not add details).`,
-    `- If {{notes}} exists: use it as internal context; add at most ONE short sentence, then ask ONE question.`,
-    `- Never hallucinate or guess details not provided in {{reason_for_call}} or {{notes}}.`,
+    stabilityLogic,
   ].join("\n");
 
   const bases = {
@@ -367,7 +334,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
-
     scheduler: [
       `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.`,
       `RULES:`,
@@ -375,7 +341,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
-
     intake: [
       `ROLE: You are ${agentName}, the intake specialist for ${bizName}.`,
       `RULES:`,
@@ -383,7 +348,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
-
     emergency: [
       `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.`,
       `RULES:`,
@@ -392,7 +356,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
-
     lead_revival: [
       `ROLE: You are ${agentName}, the lead revival specialist for ${bizName}.`,
       `RULES:`,
@@ -400,7 +363,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
-
     operations: [
       `ROLE: You are ${agentName}, the operations assistant for ${bizName}.`,
       `RULES:`,
@@ -411,7 +373,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       directionLogic,
     ].join("\n"),
   };
-
   return bases[roleKey] || bases.receptionist;
 }
 
@@ -488,30 +449,15 @@ function buildReceptionistNoBookingBlock() {
 }
 
 // -------------------- IDEMPOTENCY HELPERS --------------------
-async function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function getSubmissionId(body) {
-  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
-}
-
+async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function getSubmissionId(body) { return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim(); }
 async function getExistingProvision(idemKey) {
   const existing = await kv.get(idemKey);
   if (existing && typeof existing === "object" && existing.agent_id) return existing;
   return null;
 }
-
-async function acquireLock(lockKey, ttlSeconds = 120) {
-  return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds });
-}
-
-async function releaseLock(lockKey) {
-  try {
-    await kv.del(lockKey);
-  } catch {}
-}
-
+async function acquireLock(lockKey, ttlSeconds = 120) { return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds }); }
+async function releaseLock(lockKey) { try { await kv.del(lockKey); } catch {} }
 function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
   return {
     mode,
@@ -531,27 +477,17 @@ module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
-
   let lockKey = null;
-
   try {
     const body = await readJsonBody(req);
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
-    if (debug) {
-      return res.status(200).json({ ok: true, debug: true, received: body });
-    }
-
+    if (debug) return res.status(200).json({ ok: true, debug: true, received: body });
     const submissionId = getSubmissionId(body);
-    if (!submissionId) {
-      return res.status(400).json({ ok: false, error: "Missing submission ID." });
-    }
-
+    if (!submissionId) return res.status(400).json({ ok: false, error: "Missing submission ID." });
     const idemKey = `prov:${submissionId}`;
     lockKey = `provlock:${submissionId}`;
-
     const existing = await getExistingProvision(idemKey);
     if (existing) return res.status(200).json({ ok: true, idempotent: true, ...existing });
-
     const locked = await acquireLock(lockKey, 120);
     if (!locked) {
       for (let i = 0; i < 8; i++) {
@@ -561,147 +497,56 @@ module.exports = async (req, res) => {
       }
       return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
-
     const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
-    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only"))
-      .toLowerCase()
-      .trim();
-
+    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
-
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
     const { voiceKey, voiceId } = resolveVoice(body);
-
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
-
     const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
-
     let website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     if (!website) website = extractWebsiteFromText(globalSetup);
-
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
-
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
-
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
-
-      // ✅ OPTIONAL: Keep outbound "extra rules" but key them to {{direction}} now
       const outboundRules = [
-        `OUTBOUND BEHAVIOR RULES (apply ONLY when {{direction}} is "outbound"):`,
+        `OUTBOUND BEHAVIOR RULES (apply ONLY when {{first_line}} is NOT blank):`,
         `- You initiated the call.`,
-        `- Follow the OUTBOUND OPENER + Outbound Flow above.`,
+        `- Use the first_line opener precisely.`,
         `- Never forget to state you are from ${bizName}.`,
         `- Never ask "How can I help you?" as your first line on outbound.`,
       ].join("\n");
-
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
-
-      // ✅ URGENCY FALLBACK injection (works even if client didn’t buy Dispatch)
       const urgencyFallback = buildUrgencyFallbackBlock(roleKey);
-
-      // ✅ Tier protection injection:
-      const tierProtection =
-        roleKey === "receptionist"
-          ? buildReceptionistNoBookingBlock()
-          : roleKey === "scheduler" || roleKey === "operations"
-          ? buildSchedulerEmailGateBlock()
-          : "";
-
+      const tierProtection = roleKey === "receptionist" ? buildReceptionistNoBookingBlock() : roleKey === "scheduler" || roleKey === "operations" ? buildSchedulerEmailGateBlock() : "";
       const ctx = buildBusinessContext(body);
-      const websiteSection = scrape.ok
-        ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
-        : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
-
-      // NOTE: Order matters — urgency block BEFORE tier rules so urgency always applies.
+      const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
       promptToUse = [base, urgencyFallback, tierProtection, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
       promptSource = "built_prompt";
     }
-
-    const llmResp = await axios.post(
-      `${RETELL_BASE}/create-retell-llm`,
-      { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") },
-      { headers: retellHeaders(), timeout: 20000 }
-    );
+    const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") }, { headers: retellHeaders(), timeout: 20000 });
     const llmId = llmResp.data.llm_id || llmResp.data.id;
-
-    const agentResp = await axios.post(
-      `${RETELL_BASE}/create-agent`,
-      {
-        agent_name: `${bizName} - ${agentName} (${roleKey})`,
-        voice_id: voiceId,
-        response_engine: { type: "retell-llm", llm_id: llmId },
-        metadata: { business_name: bizName, agent_role: roleKey, submission_id: submissionId },
-      },
-      { headers: retellHeaders(), timeout: 20000 }
-    );
+    const agentResp = await axios.post(`${RETELL_BASE}/create-agent`, { agent_name: `${bizName} - ${agentName} (${roleKey})`, voice_id: voiceId, response_engine: { type: "retell-llm", llm_id: llmId }, metadata: { business_name: bizName, agent_role: roleKey, submission_id: submissionId }, }, { headers: retellHeaders(), timeout: 20000 });
     const agentId = agentResp.data.agent_id || agentResp.data.id;
-
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
     const numberTierFinal = tierForRole(roleKey);
-
-    await kv.set(
-      idemKey,
-      normalizeProvisionRecord({
-        mode,
-        llmId,
-        agentId,
-        phoneNumber,
-        phoneNumberId,
-        numberTierFinal,
-        voiceKey,
-        roleKey,
-      }),
-      { ex: 60 * 60 * 24 * 30 }
-    );
-
+    await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
-      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, {
-        agent_id: agentId,
-        business_name: bizName,
-        idempotency_key: submissionId,
-        number_tier: numberTierFinal,
-      });
-
+      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, { agent_id: agentId, business_name: bizName, idempotency_key: submissionId, number_tier: numberTierFinal });
       if (buyResp?.data?.ok) {
         phoneNumber = buyResp.data.phone_number;
         phoneNumberId = buyResp.data.phone_number_id;
-        await kv.set(
-          idemKey,
-          normalizeProvisionRecord({
-            mode,
-            llmId,
-            agentId,
-            phoneNumber,
-            phoneNumberId,
-            numberTierFinal,
-            voiceKey,
-            roleKey,
-          }),
-          { ex: 60 * 60 * 24 * 30 }
-        );
+        await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
       }
     }
-
-    return res.status(200).json({
-      ok: true,
-      agent_id: agentId,
-      phone_number: phoneNumber,
-      role: roleKey,
-      prompt_source: promptSource,
-      website_used: website ? normalizeUrl(website) : "",
-      website_scrape_reason: scrape.reason,
-    });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
-  } finally {
-    if (lockKey) await releaseLock(lockKey);
-  }
+    return res.status(200).json({ ok: true, agent_id: agentId, phone_number: phoneNumber, role: roleKey, prompt_source: promptSource, website_used: website ? normalizeUrl(website) : "", website_scrape_reason: scrape.reason, });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); } finally { if (lockKey) await releaseLock(lockKey); }
 };
