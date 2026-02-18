@@ -102,7 +102,6 @@ function tierForRole(roleKey) {
 function getBaseUrl(req) {
   const envBase = process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || "";
   if (envBase) return String(envBase).replace(/\/+$/, "");
-
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
@@ -301,20 +300,20 @@ function buildUrgencyFallbackBlock(roleKey) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ STABILITY UPDATE: Added Barge-in Shield and Anti-Loop logic
+  // ✅ STABILITY Logic
   const stabilityLogic = [
     `# ANTI-REPEAT / BARGE-IN RULES (CRITICAL STABILITY)`,
     `- You MUST NOT restart, repeat, or re-say your greeting because of background noise, phone line "clunks", or early talk-over.`,
     `- If you hear noise while speaking your OPENER, DO NOT FLINCH. Continue your sentence to the end.`,
     `- If the caller interrupts you during the first 5 seconds, finish your current sentence before pausing.`,
-    `- NEVER repeat the phrase "Hello, this is ${agentName}..." or "Hi {{client_name}}..." more than once per call.`,
+    `- NEVER repeat the phrase "I'm calling from..." more than once per call.`,
     `- If the audio is unclear at the start, wait 1 second for the line to stabilize BEFORE speaking the opener.`,
   ].join("\n");
 
   const directionLogic = [
     `# CRITICAL OPENER LOGIC (MANDATORY)`,
     `1. CHECK FIRST_LINE: If {{first_line}} is NOT blank, you MUST speak ONLY this exact phrase as your first line: "{{first_line}}"`,
-    `2. FALLBACK OUTBOUND: If {{first_line}} is blank BUT {{client_name}} exists, say: "Hi {{client_name}} — this is ${agentName} calling from ${bizName} about {{reason_for_call}}."`,
+    `2. FALLBACK OUTBOUND: If {{first_line}} is blank BUT {{client_name}} exists, say: "I'm calling from ${bizName} to speak with {{client_name}} about {{reason_for_call}}."`,
     `3. INBOUND DEFAULT: If both of the above are blank, say: "Hello, this is ${agentName} at ${bizName}. How can I help you today?"`,
     ``,
     `# GENERAL RULES`,
