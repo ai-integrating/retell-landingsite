@@ -4,6 +4,7 @@
 // ✅ UPDATED: writes usage_day/usage_month into metadata (tz-aware)
 // ✅ NEW: Injects first_line to FORCE outbound opener
 // ✅ NEW: Returns sent_dynVars for debugging
+// ✅ NEW: Sends CALL_DIRECTION="outbound" (old working pattern)
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -118,13 +119,18 @@ module.exports = async (req, res) => {
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
+  if (req.method !== "POST")
+    return json(res, 405, { ok: false, error: "Method not allowed" });
 
   const body = await readJsonBody(req);
 
   const agent_id = pick(body, ["agent_id", "agentId"]);
-  const to_number = cleanPhone(pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"]));
-  const from_number = cleanPhone(pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"]));
+  const to_number = cleanPhone(
+    pick(body, ["to_number", "to", "phone_number", "phone", "client_phone"])
+  );
+  const from_number = cleanPhone(
+    pick(body, ["from_number", "from", "retell_phone", "outbound_from_number"])
+  );
 
   const client_name = pick(body, ["client_name", "clientName", "name"]);
   const reason_for_call = pick(body, ["reason_for_call", "reason", "call_reason"]);
@@ -135,20 +141,29 @@ module.exports = async (req, res) => {
   if (!from_number) return json(res, 400, { ok: false, error: "Missing from_number" });
 
   try {
-    const RETELL_API_KEY = process.env.OUTBOUND_RETELL_API_KEY || process.env.RETELL_API_KEY;
+    const RETELL_API_KEY =
+      process.env.OUTBOUND_RETELL_API_KEY || process.env.RETELL_API_KEY;
     if (!RETELL_API_KEY) throw new Error("Missing RETELL API key env var");
 
     const url = "https://api.retellai.com/v2/create-phone-call";
 
-    // 🔥 FORCE OUTBOUND OPENER
-    const firstLine =
-      `Hi ${asString(client_name, "there")} — ` +
-      `this is Julian calling from Mcduffy and son about ` +
-      `${asString(reason_for_call, "something you requested")}.`;
+    // 🔥 FORCE OUTBOUND OPENER (kept as-is, but safer casing + escaping)
+    const safeName = asString(client_name, "there");
+    const safeReason = asString(reason_for_call, "something you requested");
+
+    const firstLine = `Hi ${safeName} — this is Julian calling from Mcduffy and son about ${safeReason}.`;
 
     const dynVars = {
+      // ✅ old working pattern (prompt can check {{CALL_DIRECTION}})
+      CALL_DIRECTION: "outbound",
+
+      // ✅ keep your lowercase too (prompt can check {{call_direction}} if you prefer)
       call_direction: "outbound",
-      first_line: firstLine,
+
+      // ✅ force a specific opener if your prompt supports {{first_line}}
+      first_line: String(firstLine),
+
+      // ✅ your original vars
       client_name: String(asString(client_name, "")),
       reason_for_call: String(asString(reason_for_call, "")),
       notes: String(asString(notes, "")),
@@ -160,6 +175,7 @@ module.exports = async (req, res) => {
       override_agent_id: agent_id,
       retell_llm_dynamic_variables: dynVars,
       metadata: {
+        CALL_DIRECTION: "outbound",
         call_direction: "outbound",
       },
     };
@@ -175,10 +191,9 @@ module.exports = async (req, res) => {
     return json(res, 200, {
       ok: true,
       status: "created",
-      sent_dynVars: dynVars,   // ✅ DEBUG
+      sent_dynVars: dynVars, // ✅ DEBUG
       retell: resp.data,
     });
-
   } catch (err) {
     const msg = err?.response?.data || err?.message || "Unknown error";
     return json(res, 500, { ok: false, error: msg });
