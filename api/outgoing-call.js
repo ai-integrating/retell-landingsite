@@ -1,10 +1,8 @@
 // /api/outgoing-call.js
 // Place an outbound call via Retell Call (V2) endpoint.
-// ✅ UPDATED: Hard cutoffs when limits are hit (minutes/calls/concurrency/hours)
-// ✅ UPDATED: writes usage_day/usage_month into metadata (tz-aware)
-// ✅ NEW: Injects first_line to FORCE outbound opener
-// ✅ NEW: Returns sent_dynVars for debugging
-// ✅ NEW: Sends CALL_DIRECTION="outbound" (old working pattern)
+// ✅ UPDATED: Added 'direction' to match {{direction}} in provision.js
+// ✅ UPDATED: Hard cutoffs when limits are hit
+// ✅ UPDATED: Sends CALL_DIRECTION="outbound" for backward compatibility
 
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
@@ -85,35 +83,6 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-// ---- TZ helpers ----
-function ymdInTZ(date = new Date(), tz = "America/New_York") {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-
-  const y = parts.find((p) => p.type === "year")?.value;
-  const m = parts.find((p) => p.type === "month")?.value;
-  const d = parts.find((p) => p.type === "day")?.value;
-
-  return `${y}-${m}-${d}`;
-}
-
-function ymInTZ(date = new Date(), tz = "America/New_York") {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-  }).formatToParts(date);
-
-  const y = parts.find((p) => p.type === "year")?.value;
-  const m = parts.find((p) => p.type === "month")?.value;
-
-  return `${y}-${m}`;
-}
-
 // -------------------- MAIN --------------------
 module.exports = async (req, res) => {
   setCors(res);
@@ -147,23 +116,25 @@ module.exports = async (req, res) => {
 
     const url = "https://api.retellai.com/v2/create-phone-call";
 
-    // 🔥 FORCE OUTBOUND OPENER (kept as-is, but safer casing + escaping)
+    // ✅ Match logic from your prompt exactly
     const safeName = asString(client_name, "there");
     const safeReason = asString(reason_for_call, "something you requested");
 
+    // This is the variable your prompt uses to force the first spoken line
     const firstLine = `Hi ${safeName} — this is Julian calling from Mcduffy and son about ${safeReason}.`;
 
     const dynVars = {
-      // ✅ old working pattern (prompt can check {{CALL_DIRECTION}})
-      CALL_DIRECTION: "outbound",
+      // 🔥 CRITICAL: Match the {{direction}} variable in provision.js
+      direction: "outbound",
 
-      // ✅ keep your lowercase too (prompt can check {{call_direction}} if you prefer)
+      // Legacy compatibility
+      CALL_DIRECTION: "outbound",
       call_direction: "outbound",
 
-      // ✅ force a specific opener if your prompt supports {{first_line}}
+      // The forced opener
       first_line: String(firstLine),
 
-      // ✅ your original vars
+      // Standard context variables
       client_name: String(asString(client_name, "")),
       reason_for_call: String(asString(reason_for_call, "")),
       notes: String(asString(notes, "")),
@@ -175,8 +146,8 @@ module.exports = async (req, res) => {
       override_agent_id: agent_id,
       retell_llm_dynamic_variables: dynVars,
       metadata: {
+        direction: "outbound",
         CALL_DIRECTION: "outbound",
-        call_direction: "outbound",
       },
     };
 
@@ -191,7 +162,7 @@ module.exports = async (req, res) => {
     return json(res, 200, {
       ok: true,
       status: "created",
-      sent_dynVars: dynVars, // ✅ DEBUG
+      sent_dynVars: dynVars,
       retell: resp.data,
     });
   } catch (err) {
