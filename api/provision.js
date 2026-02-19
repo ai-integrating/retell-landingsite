@@ -310,6 +310,19 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     `- If the audio is unclear at the start, wait 1 second for the line to stabilize BEFORE speaking the opener.`,
   ].join("\n");
 
+  // ✅ CONVERSATION STAGING (The Logic Fix)
+  const stagingLogic = [
+    `# CONVERSATION FLOW CONTROL (STRICT STAGES)`,
+    `Stage 1: DISCOVERY - If the caller asks about services, pricing, or "what you do," stay here. Provide information and wait for a reaction.`,
+    `Stage 2: INTEREST - If the caller expresses a desire to move forward (e.g., "that sounds good"), ask if they would like to check availability.`,
+    `Stage 3: BOOKING - ONLY move to booking/confirming if the caller explicitly says "Yes" or provides a specific day/time.`,
+    ``,
+    `# ANTI-ASSUMPTION GUARDRAILS (CRITICAL)`,
+    `- NEVER assume a caller wants an appointment just because they asked a service question.`,
+    `- DO NOT say "Great, I've got you down for..." or "What time works?" until Stage 3 is explicitly reached.`,
+    `- If a caller asks "What services do you have?", answer them and then ask: "Does one of those sound like what you're looking for?"`,
+  ].join("\n");
+
   const directionLogic = [
     `# CRITICAL OPENER LOGIC (MANDATORY)`,
     `1. CHECK FIRST_LINE: If {{first_line}} is NOT blank, you MUST speak ONLY this exact phrase as your first line: "{{first_line}}"`,
@@ -322,6 +335,8 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     `- Use {{notes}} as internal context to guide your answers.`,
     ``,
     stabilityLogic,
+    ``,
+    stagingLogic,
   ].join("\n");
 
   const bases = {
