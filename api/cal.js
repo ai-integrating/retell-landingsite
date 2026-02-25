@@ -11,6 +11,15 @@
 // - Stores tokens in KV under: cal:tokens:agent:<agent_id>
 // - Keeps backward-compatible email token keys: cal:tokens:<emailLower> (fallback only)
 // - Uses env var CAL_OAUTH_REDIRECT_URI (must EXACTLY match what you set in Cal.com OAuth client).
+//
+// ✅ UPDATED in this version:
+// - Reads per-client Cal config from KV:
+//     agent:<agent_id>:client  -> client_id
+//     client:<client_id>:cal   -> { username, eventTypeSlug, eventTypeSlugs, timeZone }
+// - Availability returns a normalized list: options[], first_two[], count
+// - Availability can filter by time_window: "morning"|"afternoon"|"evening" (optional)
+// - Availability can pick slug via service_key (optional) using eventTypeSlugs map
+// - OAuth start includes response_type=code (more standard)
 
 const axios = require("axios");
 const crypto = require("crypto");
@@ -76,6 +85,133 @@ function tokenKeyForAgent(agentId) {
 function tokenKeyForEmail(email) {
   const e = asString(email).toLowerCase();
   return e ? `cal:tokens:${e}` : "";
+}
+
+function normalizeServiceKey(v) {
+  const s = asString(v, "").toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .trim();
+}
+
+// Extract starts from Cal slots response no matter the shape.
+// Returns ISO strings, sorted.
+function extractStartTimes(raw) {
+  const candidate = raw?.slots ?? raw;
+
+  let starts = [];
+
+  if (Array.isArray(candidate)) {
+    starts = candidate
+      .map((s) => (typeof s === "string" ? s : s?.start || s?.time || null))
+      .filter(Boolean);
+  } else if (candidate && typeof candidate === "object") {
+    // object keyed by date
+    for (const k of Object.keys(candidate)) {
+      const v = candidate[k];
+      if (!Array.isArray(v)) continue;
+      for (const item of v) {
+        const st = typeof item === "string" ? item : item?.start || item?.time || null;
+        if (st) starts.push(st);
+      }
+    }
+  }
+
+  return starts.sort();
+}
+
+function hourOfIso(iso) {
+  // Works for ISO with timezone offsets. If it lacks offset, Date() treats as UTC.
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.getHours();
+}
+
+function filterByTimeWindow(starts, time_window) {
+  const w = normalizeServiceKey(time_window); // reuse normalizer
+  if (!w) return starts;
+
+  // define windows (local to the ISO timezone as interpreted by Date)
+  // morning: < 12
+  // afternoon: 12-16
+  // evening: >= 16
+  return starts.filter((iso) => {
+    const h = hourOfIso(iso);
+    if (h === null) return false;
+    if (w === "morning") return h >= 8 && h < 12;
+    if (w === "afternoon") return h >= 12 && h < 16;
+    if (w === "evening") return h >= 16 && h < 20;
+    return true;
+  });
+}
+
+// -------------------- CLIENT CAL CONFIG (KV) --------------------
+// Reads:
+//  agent:<agent_id>:client -> client_id
+//  client:<client_id>:cal  -> config
+async function getClientCalConfig(agent_id) {
+  const aid = asString(agent_id, "");
+  if (!aid) return null;
+
+  const client_id = await kv.get(`agent:${aid}:client`);
+  if (!client_id) return null;
+
+  const cfg = await kv.get(`client:${client_id}:cal`);
+  if (!cfg || typeof cfg !== "object") {
+    return { client_id: String(client_id) };
+  }
+
+  return { client_id: String(client_id), ...cfg };
+}
+
+// Pick username/eventTypeSlug based on (1) body overrides, (2) KV client config, (3) env defaults.
+async function resolveCalContext({ agent_id, body }) {
+  const clientCfg = await getClientCalConfig(agent_id);
+
+  const username = asString(
+    body?.username,
+    asString(clientCfg?.username, process.env.CAL_USERNAME || "ai-integrating")
+  );
+
+  const service_key = normalizeServiceKey(body?.service_key || body?.service || body?.serviceKey);
+
+  // KV may store a map: eventTypeSlugs: { haircut: "haircut-30", ... }
+  const map = clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
+    ? clientCfg.eventTypeSlugs
+    : null;
+
+  // Preferred slug:
+  // 1) explicit eventTypeSlug passed in request body
+  // 2) if service_key & map has it
+  // 3) KV default eventTypeSlug
+  // 4) env default
+  const mappedSlug =
+    service_key && map && map[service_key] ? asString(map[service_key], "") : "";
+
+  const eventTypeSlug = asString(
+    body?.eventTypeSlug,
+    asString(
+      mappedSlug,
+      asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "ai-intake-call-test")
+    )
+  );
+
+  const timeZone = asString(
+    body?.timeZone,
+    asString(clientCfg?.timeZone, process.env.CAL_TIMEZONE || "America/New_York")
+  );
+
+  return {
+    client_id: clientCfg?.client_id,
+    username,
+    eventTypeSlug,
+    timeZone,
+    service_key: service_key || undefined,
+    used_mapped_slug: !!mappedSlug,
+  };
 }
 
 // -------------------- OAuth TOKEN STORAGE + REFRESH --------------------
@@ -183,9 +319,12 @@ async function handleOAuthStart(req, res) {
   );
 
   // Cal authorize endpoint
+  // ✅ Added response_type=code (standard OAuth2)
+  // If you need scope for your Cal OAuth client, add: &scope=...
   const authUrl =
     `https://app.cal.com/auth/oauth2/authorize` +
-    `?client_id=${encodeURIComponent(clientId)}` +
+    `?response_type=code` +
+    `&client_id=${encodeURIComponent(clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&state=${encodeURIComponent(nonce)}`;
 
@@ -196,7 +335,7 @@ async function handleOAuthStart(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, state, error, error_description } = req.query || {};
 
-  // ✅ UPDATED: Redirect on error (instead of JSON)
+  // Redirect on error (instead of JSON)
   if (error) {
     const loc =
       "https://retell-landingsite-iota.vercel.app/cal-error" +
@@ -246,15 +385,15 @@ async function handleOAuthCallback(req, res) {
       expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
     };
 
-    // ✅ Primary: store by agent_id
+    // Primary: store by agent_id
     await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
 
-    // ✅ Optional fallback: if email exists, ALSO store under email to avoid breaking older calls
+    // Optional fallback: if email exists, ALSO store under email to avoid breaking older calls
     if (emailLower && isValidEmail(emailLower)) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    // ✅ UPDATED: Redirect success into Cal so they can create Event Types
+    // Redirect success into Cal so they can create Event Types
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
     return res.end();
   } catch (err) {
@@ -271,24 +410,48 @@ async function handleAvailability(req, res, body) {
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
-  const username = process.env.CAL_USERNAME || "ai-integrating";
-  const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
+  const ctx = await resolveCalContext({ agent_id, body });
 
   const start = asString(body.start_date, ymd(Date.now()));
   const end = asString(body.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
   const url =
     `https://api.cal.com/v2/slots` +
-    `?username=${encodeURIComponent(username)}` +
-    `&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}` +
+    `?username=${encodeURIComponent(ctx.username)}` +
+    `&eventTypeSlug=${encodeURIComponent(ctx.eventTypeSlug)}` +
     `&start=${encodeURIComponent(start)}` +
     `&end=${encodeURIComponent(end)}`;
 
   const resp = await axios.get(url, { headers });
+  const raw = resp.data?.data || resp.data;
+
+  let starts = extractStartTimes(raw);
+
+  // Optional: filter by a caller requested time window
+  // Accepts: body.time_window or body.timeWindow: "morning"|"afternoon"|"evening"
+  const time_window = asString(body.time_window || body.timeWindow, "");
+  if (time_window) {
+    const filtered = filterByTimeWindow(starts, time_window);
+    // if filtering wipes everything, fall back to unfiltered so we still return something useful
+    if (filtered.length) starts = filtered;
+  }
+
   return json(res, 200, {
     ok: true,
-    slots: resp.data?.data || resp.data,
     agent_id: agent_id || undefined,
+    client_id: ctx.client_id,
+    username: ctx.username,
+    eventTypeSlug: ctx.eventTypeSlug,
+    service_key: ctx.service_key,
+    used_mapped_slug: ctx.used_mapped_slug,
+    start_date: start,
+    end_date: end,
+    time_window: time_window || undefined,
+    options: starts,              // ✅ flat list
+    first_two: starts.slice(0, 2),// ✅ easy "two options"
+    count: starts.length,
+    // Keep raw too (optional) in case you still want it for debugging:
+    // raw,
   });
 }
 
@@ -297,8 +460,7 @@ async function handleBook(req, res, body) {
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
-  const username = process.env.CAL_USERNAME || "ai-integrating";
-  const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
+  const ctx = await resolveCalContext({ agent_id, body });
 
   const start = asString(body.start);
   const attendeeName = asString(body.attendee_name);
@@ -313,15 +475,15 @@ async function handleBook(req, res, body) {
     asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
 
   if (idKey) {
-    const dedupeKey = `cal:book:dedupe:${eventTypeSlug}:${idKey}`;
+    const dedupeKey = `cal:book:dedupe:${ctx.eventTypeSlug}:${idKey}`;
     const existing = await kv.get(dedupeKey);
     if (existing) return json(res, 200, { ok: true, deduped: true, booking: existing });
     await kv.set(dedupeKey, { locking: true }, { ex: 60 });
   }
 
   const payload = {
-    username,
-    eventTypeSlug,
+    username: ctx.username,
+    eventTypeSlug: ctx.eventTypeSlug,
     start,
     attendee: {
       name: attendeeName,
@@ -335,11 +497,19 @@ async function handleBook(req, res, body) {
   const booking = resp.data?.data || resp.data;
 
   if (idKey) {
-    const dedupeKey = `cal:book:dedupe:${eventTypeSlug}:${idKey}`;
+    const dedupeKey = `cal:book:dedupe:${ctx.eventTypeSlug}:${idKey}`;
     await kv.set(dedupeKey, booking, { ex: 24 * 60 * 60 });
   }
 
-  return json(res, 200, { ok: true, booking, agent_id: agent_id || undefined });
+  return json(res, 200, {
+    ok: true,
+    booking,
+    agent_id: agent_id || undefined,
+    client_id: ctx.client_id,
+    eventTypeSlug: ctx.eventTypeSlug,
+    service_key: ctx.service_key,
+    used_mapped_slug: ctx.used_mapped_slug,
+  });
 }
 
 async function handleAuto(req, res, body) {
@@ -347,40 +517,43 @@ async function handleAuto(req, res, body) {
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
-  const username = process.env.CAL_USERNAME || "ai-integrating";
-  const eventTypeSlug = process.env.CAL_EVENT_SLUG || "ai-intake-call-test";
+  const ctx = await resolveCalContext({ agent_id, body });
 
   const startDate = asString(body.start_date, ymd(Date.now()));
   const endDate = asString(body.end_date, ymd(Date.now() + 14 * 24 * 60 * 60 * 1000));
 
   const slotsUrl =
     `https://api.cal.com/v2/slots` +
-    `?username=${encodeURIComponent(username)}` +
-    `&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}` +
+    `?username=${encodeURIComponent(ctx.username)}` +
+    `&eventTypeSlug=${encodeURIComponent(ctx.eventTypeSlug)}` +
     `&start=${encodeURIComponent(startDate)}` +
     `&end=${encodeURIComponent(endDate)}`;
 
   const slotsResp = await axios.get(slotsUrl, { headers });
-  const slotsData = slotsResp.data?.data || slotsResp.data;
+  const raw = slotsResp.data?.data || slotsResp.data;
 
-  let allStarts = [];
-  if (Array.isArray(slotsData)) {
-    allStarts = slotsData;
-  } else if (slotsData?.slots && Array.isArray(slotsData.slots)) {
-    allStarts = slotsData.slots;
-  } else if (typeof slotsData === "object" && slotsData) {
-    for (const k of Object.keys(slotsData)) {
-      const v = slotsData[k];
-      if (Array.isArray(v)) allStarts.push(...v);
-    }
+  let starts = extractStartTimes(raw);
+
+  const time_window = asString(body.time_window || body.timeWindow, "");
+  if (time_window) {
+    const filtered = filterByTimeWindow(starts, time_window);
+    if (filtered.length) starts = filtered;
   }
 
-  const earliest = allStarts
-    .map((s) => (typeof s === "string" ? s : s?.start || s?.time || null))
-    .filter(Boolean)
-    .sort()[0];
+  const earliest = starts[0];
 
-  if (!earliest) return json(res, 200, { ok: true, booked: false, reason: "No available slots" });
+  if (!earliest) {
+    return json(res, 200, {
+      ok: true,
+      booked: false,
+      reason: "No available slots",
+      agent_id: agent_id || undefined,
+      client_id: ctx.client_id,
+      eventTypeSlug: ctx.eventTypeSlug,
+      service_key: ctx.service_key,
+      used_mapped_slug: ctx.used_mapped_slug,
+    });
+  }
 
   const attendeeName = asString(body.attendee_name);
   const attendeeEmail = asString(body.attendee_email);
@@ -392,17 +565,17 @@ async function handleAuto(req, res, body) {
   const idKey =
     asString(req.headers["x-idempotency-key"]) ||
     asString(body.idempotency_key) ||
-    `auto:${attendeeEmail}:${earliest}`;
+    `auto:${ctx.eventTypeSlug}:${attendeeEmail}:${earliest}`;
 
-  const dedupeKey = `cal:auto:dedupe:${eventTypeSlug}:${idKey}`;
+  const dedupeKey = `cal:auto:dedupe:${ctx.eventTypeSlug}:${idKey}`;
   const existing = await kv.get(dedupeKey);
   if (existing) return json(res, 200, { ok: true, deduped: true, booking: existing });
 
   await kv.set(dedupeKey, { locking: true }, { ex: 60 });
 
   const payload = {
-    username,
-    eventTypeSlug,
+    username: ctx.username,
+    eventTypeSlug: ctx.eventTypeSlug,
     start: earliest,
     attendee: {
       name: attendeeName,
@@ -416,12 +589,18 @@ async function handleAuto(req, res, body) {
   const booking = bookResp.data?.data || bookResp.data;
 
   await kv.set(dedupeKey, booking, { ex: 24 * 60 * 60 });
+
   return json(res, 200, {
     ok: true,
     booked: true,
     booking,
     picked_start: earliest,
     agent_id: agent_id || undefined,
+    client_id: ctx.client_id,
+    eventTypeSlug: ctx.eventTypeSlug,
+    service_key: ctx.service_key,
+    used_mapped_slug: ctx.used_mapped_slug,
+    time_window: time_window || undefined,
   });
 }
 
