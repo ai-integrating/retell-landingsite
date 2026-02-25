@@ -53,9 +53,27 @@ function asString(v, fallback = "") {
   return s ? s : fallback;
 }
 
+// Shallow-clean an object map:
+// - Only keep string values
+// - Trim
+// - Drop empty values
+function cleanStringMap(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const out = {};
+  for (const k of Object.keys(obj)) {
+    const key = asString(k, "");
+    if (!key) continue;
+    const val = asString(obj[k], "");
+    if (!val) continue;
+    out[key] = val;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Accept cal config in multiple shapes:
-// - body.cal = { username, eventTypeSlug, timeZone }
+// - body.cal = { username, eventTypeSlug, eventTypeSlugs, timeZone }
 // - OR flat keys: cal_username, cal_event_slug, cal_eventTypeSlug, cal_timezone
+// - OR mapping at body.cal_eventTypeSlugs (object)
 function extractCalConfig(body) {
   const calObj = body?.cal && typeof body.cal === "object" ? body.cal : {};
 
@@ -64,6 +82,7 @@ function extractCalConfig(body) {
     asString(body?.cal_username, asString(body?.CAL_USERNAME, ""))
   );
 
+  // Legacy: single event type slug
   const eventTypeSlug = asString(
     calObj.eventTypeSlug,
     asString(
@@ -77,13 +96,35 @@ function extractCalConfig(body) {
     asString(body?.cal_timezone, asString(body?.CAL_TIMEZONE, ""))
   );
 
+  // New: per-service slugs mapping (recommended for salons)
+  // Accept either:
+  // - cal.eventTypeSlugs = { haircut: "haircut-30", color: "color-60", ... }
+  // - body.cal_eventTypeSlugs = { ... }
+  const eventTypeSlugsRaw =
+    (calObj.eventTypeSlugs && typeof calObj.eventTypeSlugs === "object"
+      ? calObj.eventTypeSlugs
+      : null) ||
+    (body?.cal_eventTypeSlugs && typeof body.cal_eventTypeSlugs === "object"
+      ? body.cal_eventTypeSlugs
+      : null);
+
+  const eventTypeSlugs = cleanStringMap(eventTypeSlugsRaw);
+
   // Only return a config object if at least one value was supplied
-  const hasAny = !!(username || eventTypeSlug || timeZone);
+  const hasAny = !!(username || eventTypeSlug || eventTypeSlugs || timeZone);
   if (!hasAny) return null;
 
   return {
     username: username || undefined,
+
+    // Keep legacy single-slug support (useful as a fallback default slug)
     eventTypeSlug: eventTypeSlug || undefined,
+
+    // New mapping support (serviceKey -> eventTypeSlug)
+    // Example:
+    // eventTypeSlugs: { haircut: "haircut-30", color: "color-60" }
+    eventTypeSlugs: eventTypeSlugs || undefined,
+
     timeZone: timeZone || undefined,
     updated_at: new Date().toISOString(),
   };
@@ -136,6 +177,7 @@ module.exports = async function handler(req, res) {
     // If already set to same client -> idempotent success
     if (existing && String(existing) === client_id) {
       if (plan) await kv.set(`plan:${agent_id}`, plan);
+
       if (calConfig) {
         // Merge on top of existing cal config (don't wipe missing fields)
         const prev = (await kv.get(calKey)) || {};
@@ -149,6 +191,7 @@ module.exports = async function handler(req, res) {
         already_set: true,
         plan_set: !!plan,
         cal_set: !!calConfig,
+        cal_key: calConfig ? calKey : undefined,
       });
     }
 
@@ -181,6 +224,15 @@ module.exports = async function handler(req, res) {
       plan_set: !!plan,
       cal_set: !!calConfig,
       cal_key: calConfig ? calKey : undefined,
+      // helpful debug: what fields were accepted
+      cal_fields: calConfig
+        ? {
+            username: !!calConfig.username,
+            eventTypeSlug: !!calConfig.eventTypeSlug,
+            eventTypeSlugs: !!calConfig.eventTypeSlugs,
+            timeZone: !!calConfig.timeZone,
+          }
+        : undefined,
     });
   } catch (err) {
     console.error("kv-set-agent-client: ERROR", err);
