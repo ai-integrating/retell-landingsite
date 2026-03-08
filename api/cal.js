@@ -13,13 +13,8 @@
 // - Uses env var CAL_OAUTH_REDIRECT_URI (must EXACTLY match what you set in Cal.com OAuth client).
 //
 // ✅ UPDATED in this version:
-// - Reads per-client Cal config from KV:
-//     agent:<agent_id>:client  -> client_id
-//     client:<client_id>:cal   -> { username, eventTypeSlug, eventTypeSlugs, timeZone }
-// - Availability returns a normalized list: options[], first_two[], count
-// - Availability can filter by time_window: "morning"|"afternoon"|"evening" (optional)
-// - Availability can pick slug via service_key (optional) using eventTypeSlugs map
-// - OAuth start includes response_type=code (more standard)
+// - Robust query parsing for Vercel serverless (req.query may be undefined otherwise)
+// - Availability returns available_slots (so Retell prompts can rely on {{available_slots}})
 
 const axios = require("axios");
 const crypto = require("crypto");
@@ -39,6 +34,16 @@ function json(res, status, payload) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(payload));
+}
+
+// -------------------- QUERY PARSING (IMPORTANT ON VERCEL) --------------------
+function getQuery(req) {
+  // In some Vercel/Node serverless environments, req.query is not provided.
+  // Parse it from the URL reliably.
+  const u = new URL(req.url, "http://localhost");
+  const q = {};
+  for (const [k, v] of u.searchParams.entries()) q[k] = v;
+  return q;
 }
 
 // -------------------- HELPERS --------------------
@@ -134,10 +139,9 @@ function filterByTimeWindow(starts, time_window) {
   const w = normalizeServiceKey(time_window); // reuse normalizer
   if (!w) return starts;
 
-  // define windows (local to the ISO timezone as interpreted by Date)
-  // morning: < 12
+  // morning: 8-12
   // afternoon: 12-16
-  // evening: >= 16
+  // evening: 16-20
   return starts.filter((iso) => {
     const h = hourOfIso(iso);
     if (h === null) return false;
@@ -179,15 +183,11 @@ async function resolveCalContext({ agent_id, body }) {
   const service_key = normalizeServiceKey(body?.service_key || body?.service || body?.serviceKey);
 
   // KV may store a map: eventTypeSlugs: { haircut: "haircut-30", ... }
-  const map = clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
-    ? clientCfg.eventTypeSlugs
-    : null;
+  const map =
+    clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
+      ? clientCfg.eventTypeSlugs
+      : null;
 
-  // Preferred slug:
-  // 1) explicit eventTypeSlug passed in request body
-  // 2) if service_key & map has it
-  // 3) KV default eventTypeSlug
-  // 4) env default
   const mappedSlug =
     service_key && map && map[service_key] ? asString(map[service_key], "") : "";
 
@@ -247,7 +247,6 @@ async function handleRefresh({ agent_id, email }) {
     expires_at: expires_in ? Date.now() + expires_in * 1000 : 0,
   };
 
-  // Save back to the same place we found it, preferring agent key if present
   if (agentKey) {
     await kv.set(agentKey, updated);
   } else if (emailKey) {
@@ -282,7 +281,6 @@ async function getHeaders({ agent_id, email }) {
     return { ...base, Authorization: `Bearer ${tokens.access_token}` };
   }
 
-  // Expired -> refresh
   const refreshed = await handleRefresh({ agent_id, email });
   if (refreshed?.access_token) {
     return { ...base, Authorization: `Bearer ${refreshed.access_token}` };
@@ -296,12 +294,8 @@ async function handleOAuthStart(req, res) {
   const agent_id = asString(req.query.agent_id);
   const email = asString(req.query.email); // optional
 
-  if (!agent_id) {
-    return json(res, 400, { error: "agent_id param required" });
-  }
-  if (email && !isValidEmail(email)) {
-    return json(res, 400, { error: "If provided, email must be valid" });
-  }
+  if (!agent_id) return json(res, 400, { error: "agent_id param required" });
+  if (email && !isValidEmail(email)) return json(res, 400, { error: "If provided, email must be valid" });
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = process.env.CAL_OAUTH_REDIRECT_URI;
@@ -310,7 +304,6 @@ async function handleOAuthStart(req, res) {
     return json(res, 500, { error: "Missing CAL_CLIENT_ID or CAL_OAUTH_REDIRECT_URI" });
   }
 
-  // CSRF nonce stored server-side for 10 minutes
   const nonce = crypto.randomBytes(16).toString("hex");
   await kv.set(
     `cal:oauth:state:${nonce}`,
@@ -318,9 +311,6 @@ async function handleOAuthStart(req, res) {
     { ex: 600 }
   );
 
-  // Cal authorize endpoint
-  // ✅ Added response_type=code (standard OAuth2)
-  // If you need scope for your Cal OAuth client, add: &scope=...
   const authUrl =
     `https://app.cal.com/auth/oauth2/authorize` +
     `?response_type=code` +
@@ -335,7 +325,6 @@ async function handleOAuthStart(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, state, error, error_description } = req.query || {};
 
-  // Redirect on error (instead of JSON)
   if (error) {
     const loc =
       "https://retell-landingsite-iota.vercel.app/cal-error" +
@@ -352,7 +341,6 @@ async function handleOAuthCallback(req, res) {
     return json(res, 400, { error: "Invalid or expired state" });
   }
 
-  // one-time use
   await kv.del(`cal:oauth:state:${asString(state)}`);
 
   const clientId = process.env.CAL_CLIENT_ID;
@@ -385,15 +373,12 @@ async function handleOAuthCallback(req, res) {
       expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
     };
 
-    // Primary: store by agent_id
     await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
 
-    // Optional fallback: if email exists, ALSO store under email to avoid breaking older calls
     if (emailLower && isValidEmail(emailLower)) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    // Redirect success into Cal so they can create Event Types
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
     return res.end();
   } catch (err) {
@@ -427,12 +412,9 @@ async function handleAvailability(req, res, body) {
 
   let starts = extractStartTimes(raw);
 
-  // Optional: filter by a caller requested time window
-  // Accepts: body.time_window or body.timeWindow: "morning"|"afternoon"|"evening"
   const time_window = asString(body.time_window || body.timeWindow, "");
   if (time_window) {
     const filtered = filterByTimeWindow(starts, time_window);
-    // if filtering wipes everything, fall back to unfiltered so we still return something useful
     if (filtered.length) starts = filtered;
   }
 
@@ -447,11 +429,17 @@ async function handleAvailability(req, res, body) {
     start_date: start,
     end_date: end,
     time_window: time_window || undefined,
-    options: starts,              // ✅ flat list
-    first_two: starts.slice(0, 2),// ✅ easy "two options"
+
+    // ✅ IMPORTANT: what your prompt expects
+    available_slots: starts,
+
+    // keep your prior fields too
+    options: starts,
+    first_two: starts.slice(0, 2),
     count: starts.length,
-    // Keep raw too (optional) in case you still want it for debugging:
-    // raw,
+
+    // optional debug
+    // debug: { received_action: req.query.action, body_action: body.action }
   });
 }
 
@@ -606,11 +594,16 @@ async function handleAuto(req, res, body) {
 
 // -------------------- MAIN HANDLER --------------------
 module.exports = async (req, res) => {
+  // ✅ Ensure req.query exists in Vercel serverless
+  req.query = req.query && typeof req.query === "object" ? req.query : getQuery(req);
+
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
-  const action = asString(req.query.action || body.action).toLowerCase();
+
+  // ✅ Safe action extraction
+  const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
 
   try {
     if (req.method === "GET" && action === "oauth_start") return await handleOAuthStart(req, res);
