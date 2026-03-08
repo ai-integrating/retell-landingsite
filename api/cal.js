@@ -15,6 +15,7 @@
 // ✅ UPDATED in this version:
 // - Robust query parsing for Vercel serverless (req.query may be undefined otherwise)
 // - Availability returns available_slots (so Retell prompts can rely on {{available_slots}})
+// - Added debug logging for availability + catch block
 
 const axios = require("axios");
 const crypto = require("crypto");
@@ -38,8 +39,6 @@ function json(res, status, payload) {
 
 // -------------------- QUERY PARSING (IMPORTANT ON VERCEL) --------------------
 function getQuery(req) {
-  // In some Vercel/Node serverless environments, req.query is not provided.
-  // Parse it from the URL reliably.
   const u = new URL(req.url, "http://localhost");
   const q = {};
   for (const [k, v] of u.searchParams.entries()) q[k] = v;
@@ -114,7 +113,6 @@ function extractStartTimes(raw) {
       .map((s) => (typeof s === "string" ? s : s?.start || s?.time || null))
       .filter(Boolean);
   } else if (candidate && typeof candidate === "object") {
-    // object keyed by date
     for (const k of Object.keys(candidate)) {
       const v = candidate[k];
       if (!Array.isArray(v)) continue;
@@ -129,19 +127,15 @@ function extractStartTimes(raw) {
 }
 
 function hourOfIso(iso) {
-  // Works for ISO with timezone offsets. If it lacks offset, Date() treats as UTC.
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
   return d.getHours();
 }
 
 function filterByTimeWindow(starts, time_window) {
-  const w = normalizeServiceKey(time_window); // reuse normalizer
+  const w = normalizeServiceKey(time_window);
   if (!w) return starts;
 
-  // morning: 8-12
-  // afternoon: 12-16
-  // evening: 16-20
   return starts.filter((iso) => {
     const h = hourOfIso(iso);
     if (h === null) return false;
@@ -153,9 +147,6 @@ function filterByTimeWindow(starts, time_window) {
 }
 
 // -------------------- CLIENT CAL CONFIG (KV) --------------------
-// Reads:
-//  agent:<agent_id>:client -> client_id
-//  client:<client_id>:cal  -> config
 async function getClientCalConfig(agent_id) {
   const aid = asString(agent_id, "");
   if (!aid) return null;
@@ -171,7 +162,6 @@ async function getClientCalConfig(agent_id) {
   return { client_id: String(client_id), ...cfg };
 }
 
-// Pick username/eventTypeSlug based on (1) body overrides, (2) KV client config, (3) env defaults.
 async function resolveCalContext({ agent_id, body }) {
   const clientCfg = await getClientCalConfig(agent_id);
 
@@ -182,7 +172,6 @@ async function resolveCalContext({ agent_id, body }) {
 
   const service_key = normalizeServiceKey(body?.service_key || body?.service || body?.serviceKey);
 
-  // KV may store a map: eventTypeSlugs: { haircut: "haircut-30", ... }
   const map =
     clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
       ? clientCfg.eventTypeSlugs
@@ -215,7 +204,6 @@ async function resolveCalContext({ agent_id, body }) {
 }
 
 // -------------------- OAuth TOKEN STORAGE + REFRESH --------------------
-// Refresh by agent_id (preferred). Falls back to email if needed.
 async function handleRefresh({ agent_id, email }) {
   const agentKey = tokenKeyForAgent(agent_id);
   const emailKey = tokenKeyForEmail(email);
@@ -256,8 +244,6 @@ async function handleRefresh({ agent_id, email }) {
   return updated;
 }
 
-// Returns headers using OAuth token if connected; else uses CAL_API_KEY
-// Prefers agent_id token store; falls back to email token store.
 async function getHeaders({ agent_id, email }) {
   const base = { "cal-api-version": "2024-09-04" };
   const fallback = {
@@ -275,7 +261,7 @@ async function getHeaders({ agent_id, email }) {
   if (!tokens?.access_token) return fallback;
 
   const expiresAt = Number(tokens.expires_at || 0);
-  const stillValid = !expiresAt || expiresAt > Date.now() + 60_000; // 60s buffer
+  const stillValid = !expiresAt || expiresAt > Date.now() + 60_000;
 
   if (stillValid) {
     return { ...base, Authorization: `Bearer ${tokens.access_token}` };
@@ -292,10 +278,12 @@ async function getHeaders({ agent_id, email }) {
 // -------------------- OAUTH (START + CALLBACK) --------------------
 async function handleOAuthStart(req, res) {
   const agent_id = asString(req.query.agent_id);
-  const email = asString(req.query.email); // optional
+  const email = asString(req.query.email);
 
   if (!agent_id) return json(res, 400, { error: "agent_id param required" });
-  if (email && !isValidEmail(email)) return json(res, 400, { error: "If provided, email must be valid" });
+  if (email && !isValidEmail(email)) {
+    return json(res, 400, { error: "If provided, email must be valid" });
+  }
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = process.env.CAL_OAUTH_REDIRECT_URI;
@@ -391,11 +379,23 @@ async function handleOAuthCallback(req, res) {
 
 // -------------------- CAL ACTIONS (AVAILABILITY / BOOK / AUTO) --------------------
 async function handleAvailability(req, res, body) {
+  console.log("handleAvailability incoming", {
+    query: req.query,
+    body,
+    headers: req.headers,
+  });
+
   const agent_id = asString(req.query.agent_id || body.agent_id);
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
   const ctx = await resolveCalContext({ agent_id, body });
+
+  console.log("resolved cal context", {
+    agent_id,
+    email,
+    ctx,
+  });
 
   const start = asString(body.start_date, ymd(Date.now()));
   const end = asString(body.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
@@ -407,8 +407,17 @@ async function handleAvailability(req, res, body) {
     `&start=${encodeURIComponent(start)}` +
     `&end=${encodeURIComponent(end)}`;
 
+  console.log("cal slots request", {
+    url,
+    headers,
+  });
+
   const resp = await axios.get(url, { headers });
   const raw = resp.data?.data || resp.data;
+
+  console.log("cal slots raw response", {
+    data: resp.data,
+  });
 
   let starts = extractStartTimes(raw);
 
@@ -429,17 +438,10 @@ async function handleAvailability(req, res, body) {
     start_date: start,
     end_date: end,
     time_window: time_window || undefined,
-
-    // ✅ IMPORTANT: what your prompt expects
     available_slots: starts,
-
-    // keep your prior fields too
     options: starts,
     first_two: starts.slice(0, 2),
     count: starts.length,
-
-    // optional debug
-    // debug: { received_action: req.query.action, body_action: body.action }
   });
 }
 
@@ -594,15 +596,12 @@ async function handleAuto(req, res, body) {
 
 // -------------------- MAIN HANDLER --------------------
 module.exports = async (req, res) => {
-  // ✅ Ensure req.query exists in Vercel serverless
   req.query = req.query && typeof req.query === "object" ? req.query : getQuery(req);
 
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
-
-  // ✅ Safe action extraction
   const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
 
   try {
@@ -621,10 +620,22 @@ module.exports = async (req, res) => {
 
     return json(res, 400, { error: "Unknown action or method", action, method: req.method });
   } catch (err) {
+    console.error("CAL ERROR:", {
+      message: err.message,
+      stack: err.stack,
+      responseData: err.response?.data,
+      responseStatus: err.response?.status,
+      url: req.url,
+      method: req.method,
+      query: req.query,
+      body,
+    });
+
     return json(res, 500, {
       error: "Server error",
       message: err.message,
       detail: err.response?.data,
+      status: err.response?.status,
     });
   }
 };
