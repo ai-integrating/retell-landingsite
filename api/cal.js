@@ -16,6 +16,8 @@
 // - Robust query parsing for Vercel serverless (req.query may be undefined otherwise)
 // - Availability returns available_slots (so Retell prompts can rely on {{available_slots}})
 // - Added debug logging for availability + catch block
+// - Rejects invalid/template agent_id values like "{{agent_id}}"
+// - Fails clearly when eventTypeSlug is missing instead of calling Cal with a blank slug
 
 const axios = require("axios");
 const crypto = require("crypto");
@@ -101,6 +103,11 @@ function normalizeServiceKey(v) {
     .trim();
 }
 
+function isTemplateLike(value) {
+  const s = asString(value);
+  return !s || s.includes("{{") || s.includes("}}") || s.includes("{") || s.includes("}");
+}
+
 // Extract starts from Cal slots response no matter the shape.
 // Returns ISO strings, sorted.
 function extractStartTimes(raw) {
@@ -170,7 +177,9 @@ async function resolveCalContext({ agent_id, body }) {
     asString(clientCfg?.username, process.env.CAL_USERNAME || "ai-integrating")
   );
 
-  const service_key = normalizeServiceKey(body?.service_key || body?.service || body?.serviceKey);
+  const service_key = normalizeServiceKey(
+    body?.service_key || body?.service || body?.serviceKey
+  );
 
   const map =
     clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
@@ -184,7 +193,7 @@ async function resolveCalContext({ agent_id, body }) {
     body?.eventTypeSlug,
     asString(
       mappedSlug,
-      asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "ai-intake-call-test")
+      asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "")
     )
   );
 
@@ -386,6 +395,15 @@ async function handleAvailability(req, res, body) {
   });
 
   const agent_id = asString(req.query.agent_id || body.agent_id);
+
+  if (isTemplateLike(agent_id)) {
+    return json(res, 400, {
+      error: "Invalid agent_id",
+      detail: "agent_id was missing or passed as a template string",
+      received_agent_id: body.agent_id,
+    });
+  }
+
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
@@ -396,6 +414,18 @@ async function handleAvailability(req, res, body) {
     email,
     ctx,
   });
+
+  if (!ctx.eventTypeSlug) {
+    return json(res, 400, {
+      error: "Missing eventTypeSlug",
+      detail: `No Cal event type slug found for agent_id=${agent_id} service_key=${ctx.service_key || ""}`,
+      agent_id,
+      service_key: ctx.service_key,
+      client_id: ctx.client_id,
+      username: ctx.username,
+      used_mapped_slug: ctx.used_mapped_slug,
+    });
+  }
 
   const start = asString(body.start_date, ymd(Date.now()));
   const end = asString(body.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
@@ -447,10 +477,31 @@ async function handleAvailability(req, res, body) {
 
 async function handleBook(req, res, body) {
   const agent_id = asString(req.query.agent_id || body.agent_id);
+
+  if (isTemplateLike(agent_id)) {
+    return json(res, 400, {
+      error: "Invalid agent_id",
+      detail: "agent_id was missing or passed as a template string",
+      received_agent_id: body.agent_id,
+    });
+  }
+
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
   const ctx = await resolveCalContext({ agent_id, body });
+
+  if (!ctx.eventTypeSlug) {
+    return json(res, 400, {
+      error: "Missing eventTypeSlug",
+      detail: `No Cal event type slug found for agent_id=${agent_id} service_key=${ctx.service_key || ""}`,
+      agent_id,
+      service_key: ctx.service_key,
+      client_id: ctx.client_id,
+      username: ctx.username,
+      used_mapped_slug: ctx.used_mapped_slug,
+    });
+  }
 
   const start = asString(body.start);
   const attendeeName = asString(body.attendee_name);
@@ -504,10 +555,31 @@ async function handleBook(req, res, body) {
 
 async function handleAuto(req, res, body) {
   const agent_id = asString(req.query.agent_id || body.agent_id);
+
+  if (isTemplateLike(agent_id)) {
+    return json(res, 400, {
+      error: "Invalid agent_id",
+      detail: "agent_id was missing or passed as a template string",
+      received_agent_id: body.agent_id,
+    });
+  }
+
   const email = asString(req.query.email || body.email);
   const headers = await getHeaders({ agent_id, email });
 
   const ctx = await resolveCalContext({ agent_id, body });
+
+  if (!ctx.eventTypeSlug) {
+    return json(res, 400, {
+      error: "Missing eventTypeSlug",
+      detail: `No Cal event type slug found for agent_id=${agent_id} service_key=${ctx.service_key || ""}`,
+      agent_id,
+      service_key: ctx.service_key,
+      client_id: ctx.client_id,
+      username: ctx.username,
+      used_mapped_slug: ctx.used_mapped_slug,
+    });
+  }
 
   const startDate = asString(body.start_date, ymd(Date.now()));
   const endDate = asString(body.end_date, ymd(Date.now() + 14 * 24 * 60 * 60 * 1000));
@@ -605,8 +677,12 @@ module.exports = async (req, res) => {
   const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
 
   try {
-    if (req.method === "GET" && action === "oauth_start") return await handleOAuthStart(req, res);
-    if (req.method === "GET" && action === "oauth_callback") return await handleOAuthCallback(req, res);
+    if (req.method === "GET" && action === "oauth_start") {
+      return await handleOAuthStart(req, res);
+    }
+    if (req.method === "GET" && action === "oauth_callback") {
+      return await handleOAuthCallback(req, res);
+    }
 
     if (req.method === "POST" && (action === "availability" || action === "slots")) {
       return await handleAvailability(req, res, body);
