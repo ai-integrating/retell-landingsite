@@ -506,6 +506,12 @@ async function handleAvailability(req, res, body) {
 }
 
 async function handleBook(req, res, body) {
+  console.log("handleBook incoming", {
+    query: req.query,
+    body,
+    headers: req.headers,
+  });
+
   const agent_id = asString(req.query.agent_id || body.agent_id);
 
   if (isTemplateLike(agent_id)) {
@@ -521,6 +527,12 @@ async function handleBook(req, res, body) {
 
   const ctx = await resolveCalContext({ agent_id, body });
 
+  console.log("resolved book context", {
+    agent_id,
+    email,
+    ctx,
+  });
+
   if (!ctx.eventTypeSlug) {
     return json(res, 400, {
       error: "Missing eventTypeSlug",
@@ -531,6 +543,24 @@ async function handleBook(req, res, body) {
       username: ctx.username,
       used_mapped_slug: ctx.used_mapped_slug,
     });
+  }
+
+  const start = asString(body.start || body.selected_start || body.slot);
+  const attendeeName = asString(body.attendee_name || body.name);
+  const attendeeEmail = asString(body.attendee_email || body.email);
+  const attendeePhone = asString(body.attendee_phone || body.phone);
+
+  if (!start) {
+    return json(res, 400, {
+      error: "Missing start",
+      detail: "Expected one of: start, selected_start, or slot",
+      received_keys: Object.keys(body || {}),
+      received_body: body,
+    });
+  }
+
+  if (!attendeeName) {
+    return json(res,
   }
 
   const start = asString(body.start);
