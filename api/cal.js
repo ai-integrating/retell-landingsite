@@ -11,13 +11,6 @@
 // - Stores tokens in KV under: cal:tokens:agent:<agent_id>
 // - Keeps backward-compatible email token keys: cal:tokens:<emailLower> (fallback only)
 // - Uses env var CAL_OAUTH_REDIRECT_URI (must EXACTLY match what you set in Cal.com OAuth client).
-//
-// ✅ UPDATED in this version:
-// - Robust query parsing for Vercel serverless (req.query may be undefined otherwise)
-// - Availability returns available_slots (so Retell prompts can rely on {{available_slots}})
-// - Added debug logging for availability + catch block
-// - Rejects invalid/template agent_id values like "{{agent_id}}"
-// - Fails clearly when eventTypeSlug is missing instead of calling Cal with a blank slug
 
 const axios = require("axios");
 const crypto = require("crypto");
@@ -153,7 +146,6 @@ function filterByTimeWindow(starts, time_window) {
   });
 }
 
-
 // -------------------- CLIENT CAL CONFIG (KV) --------------------
 async function getClientCalConfig(agent_id) {
   const aid = asString(agent_id, "");
@@ -206,6 +198,50 @@ async function getClientCalConfig(agent_id) {
     ...cfg,
   };
 }
+
+async function resolveCalContext({ agent_id, body }) {
+  const clientCfg = await getClientCalConfig(agent_id);
+
+  const username = asString(
+    body?.username,
+    asString(clientCfg?.username, process.env.CAL_USERNAME || "rose-dos-santos-1qzzki")
+  );
+
+  const service_key = normalizeServiceKey(
+    body?.service_key || body?.service || body?.serviceKey
+  );
+
+  const map =
+    clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
+      ? clientCfg.eventTypeSlugs
+      : null;
+
+  const mappedSlug =
+    service_key && map && map[service_key] ? asString(map[service_key], "") : "";
+
+  const eventTypeSlug = asString(
+    body?.eventTypeSlug,
+    asString(
+      mappedSlug,
+      asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "")
+    )
+  );
+
+  const timeZone = asString(
+    body?.timeZone,
+    asString(clientCfg?.timeZone, process.env.CAL_TIMEZONE || "America/New_York")
+  );
+
+  return {
+    client_id: clientCfg?.client_id,
+    username,
+    eventTypeSlug,
+    timeZone,
+    service_key: service_key || undefined,
+    used_mapped_slug: !!mappedSlug,
+  };
+}
+
 // -------------------- OAuth TOKEN STORAGE + REFRESH --------------------
 async function handleRefresh({ agent_id, email }) {
   const agentKey = tokenKeyForAgent(agent_id);
