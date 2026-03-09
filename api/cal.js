@@ -151,7 +151,6 @@ async function getClientCalConfig(agent_id) {
   const aid = asString(agent_id, "");
   if (!aid) return null;
 
-  // Step 1: resolve client id from agent
   const client_id = await kv.get(`agent:${aid}:client`);
   if (!client_id) return null;
 
@@ -159,12 +158,10 @@ async function getClientCalConfig(agent_id) {
   let cfg = null;
 
   try {
-    // try normal KV first
     cfg = await kv.get(calKey);
   } catch (err) {
     const msg = String(err?.message || "");
 
-    // If the key was created as Redis JSON in Upstash UI
     if (msg.includes("WRONGTYPE")) {
       try {
         cfg = await kv.json.get(calKey);
@@ -180,7 +177,6 @@ async function getClientCalConfig(agent_id) {
     }
   }
 
-  // Sometimes KV returns JSON as a string
   if (typeof cfg === "string") {
     try {
       cfg = JSON.parse(cfg);
@@ -506,6 +502,12 @@ async function handleAvailability(req, res, body) {
 }
 
 async function handleBook(req, res, body) {
+  console.log("handleBook incoming", {
+    query: req.query,
+    body,
+    headers: req.headers,
+  });
+
   const agent_id = asString(req.query.agent_id || body.agent_id);
 
   if (isTemplateLike(agent_id)) {
@@ -521,6 +523,12 @@ async function handleBook(req, res, body) {
 
   const ctx = await resolveCalContext({ agent_id, body });
 
+  console.log("resolved book context", {
+    agent_id,
+    email,
+    ctx,
+  });
+
   if (!ctx.eventTypeSlug) {
     return json(res, 400, {
       error: "Missing eventTypeSlug",
@@ -533,14 +541,37 @@ async function handleBook(req, res, body) {
     });
   }
 
-  const start = asString(body.start);
-  const attendeeName = asString(body.attendee_name);
-  const attendeeEmail = asString(body.attendee_email);
-  const attendeePhone = asString(body.attendee_phone);
+  const start = asString(body.start || body.selected_start || body.slot);
+  const attendeeName = asString(body.attendee_name || body.name);
+  const attendeeEmail = asString(body.attendee_email || body.email);
+  const attendeePhone = asString(body.attendee_phone || body.phone);
 
-  if (!start) return json(res, 400, { error: "Missing start" });
-  if (!attendeeName) return json(res, 400, { error: "Missing attendee_name" });
-  if (!attendeeEmail) return json(res, 400, { error: "Missing attendee_email" });
+  if (!start) {
+    return json(res, 400, {
+      error: "Missing start",
+      detail: "Expected one of: start, selected_start, or slot",
+      received_keys: Object.keys(body || {}),
+      received_body: body,
+    });
+  }
+
+  if (!attendeeName) {
+    return json(res, 400, {
+      error: "Missing attendee_name",
+      detail: "Expected one of: attendee_name or name",
+      received_keys: Object.keys(body || {}),
+      received_body: body,
+    });
+  }
+
+  if (!attendeeEmail) {
+    return json(res, 400, {
+      error: "Missing attendee_email",
+      detail: "Expected one of: attendee_email or email",
+      received_keys: Object.keys(body || {}),
+      received_body: body,
+    });
+  }
 
   const idKey =
     asString(req.headers["x-idempotency-key"]) || asString(body.idempotency_key);
@@ -564,8 +595,17 @@ async function handleBook(req, res, body) {
     metadata: body.metadata || {},
   };
 
+  console.log("cal booking request", {
+    payload,
+    headers,
+  });
+
   const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers });
   const booking = resp.data?.data || resp.data;
+
+  console.log("cal booking raw response", {
+    data: resp.data,
+  });
 
   if (idKey) {
     const dedupeKey = `cal:book:dedupe:${ctx.eventTypeSlug}:${idKey}`;
@@ -745,3 +785,4 @@ module.exports = async (req, res) => {
     });
   }
 };
+#+#+#+#+assistant to=final code չէ
