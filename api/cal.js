@@ -153,65 +153,59 @@ function filterByTimeWindow(starts, time_window) {
   });
 }
 
+
 // -------------------- CLIENT CAL CONFIG (KV) --------------------
 async function getClientCalConfig(agent_id) {
   const aid = asString(agent_id, "");
   if (!aid) return null;
 
+  // Step 1: resolve client id from agent
   const client_id = await kv.get(`agent:${aid}:client`);
   if (!client_id) return null;
 
-  const cfg = await kv.get(`client:${client_id}:cal`);
+  const calKey = `client:${client_id}:cal`;
+  let cfg = null;
+
+  try {
+    // try normal KV first
+    cfg = await kv.get(calKey);
+  } catch (err) {
+    const msg = String(err?.message || "");
+
+    // If the key was created as Redis JSON in Upstash UI
+    if (msg.includes("WRONGTYPE")) {
+      try {
+        cfg = await kv.json.get(calKey);
+      } catch (jsonErr) {
+        console.error("KV JSON read failed", {
+          calKey,
+          message: jsonErr?.message,
+        });
+        return { client_id: String(client_id) };
+      }
+    } else {
+      throw err;
+    }
+  }
+
+  // Sometimes KV returns JSON as a string
+  if (typeof cfg === "string") {
+    try {
+      cfg = JSON.parse(cfg);
+    } catch {
+      return { client_id: String(client_id) };
+    }
+  }
+
   if (!cfg || typeof cfg !== "object") {
     return { client_id: String(client_id) };
   }
 
-  return { client_id: String(client_id), ...cfg };
-}
-
-async function resolveCalContext({ agent_id, body }) {
-  const clientCfg = await getClientCalConfig(agent_id);
-
-  const username = asString(
-    body?.username,
-    asString(clientCfg?.username, process.env.CAL_USERNAME || "ai-integrating")
-  );
-
-  const service_key = normalizeServiceKey(
-    body?.service_key || body?.service || body?.serviceKey
-  );
-
-  const map =
-    clientCfg?.eventTypeSlugs && typeof clientCfg.eventTypeSlugs === "object"
-      ? clientCfg.eventTypeSlugs
-      : null;
-
-  const mappedSlug =
-    service_key && map && map[service_key] ? asString(map[service_key], "") : "";
-
-  const eventTypeSlug = asString(
-    body?.eventTypeSlug,
-    asString(
-      mappedSlug,
-      asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "")
-    )
-  );
-
-  const timeZone = asString(
-    body?.timeZone,
-    asString(clientCfg?.timeZone, process.env.CAL_TIMEZONE || "America/New_York")
-  );
-
   return {
-    client_id: clientCfg?.client_id,
-    username,
-    eventTypeSlug,
-    timeZone,
-    service_key: service_key || undefined,
-    used_mapped_slug: !!mappedSlug,
+    client_id: String(client_id),
+    ...cfg,
   };
 }
-
 // -------------------- OAuth TOKEN STORAGE + REFRESH --------------------
 async function handleRefresh({ agent_id, email }) {
   const agentKey = tokenKeyForAgent(agent_id);
