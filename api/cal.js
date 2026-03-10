@@ -51,6 +51,13 @@ async function readJsonBody(req) {
   });
 }
 
+function mergeArgs(body) {
+  return {
+    ...(body && typeof body === "object" ? body : {}),
+    ...(body?.args && typeof body.args === "object" ? body.args : {}),
+  };
+}
+
 function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
@@ -382,13 +389,17 @@ async function handleOAuthCallback(req, res) {
 
 // -------------------- CAL ACTIONS --------------------
 async function handleAvailability(req, res, body) {
-  const agent_id = asString(req.query.agent_id || body.agent_id);
+  const mergedBody = mergeArgs(body);
+  const agent_id = asString(req.query.agent_id || mergedBody.agent_id);
 
   if (isTemplateLike(agent_id)) {
-    return json(res, 400, { error: "Invalid agent_id" });
+    return json(res, 400, {
+      error: "Invalid agent_id",
+      received_agent_id: agent_id || null,
+    });
   }
 
-  const ctx = await resolveCalContext({ agent_id, body });
+  const ctx = await resolveCalContext({ agent_id, body: mergedBody });
 
   if (!ctx.eventTypeSlug) {
     return json(res, 400, {
@@ -397,13 +408,15 @@ async function handleAvailability(req, res, body) {
       debug: {
         client_id: ctx?.client_id || null,
         username: ctx?.username || null,
-        bodyEventTypeSlug: body?.eventTypeSlug || null,
+        bodyEventTypeSlug: mergedBody?.eventTypeSlug || null,
         rawServiceKey:
-          body?.service_key ||
-          body?.service ||
-          body?.serviceKey ||
-          body?.appointment_type ||
-          body?.appointmentType ||
+          mergedBody?.service_key ||
+          mergedBody?.service ||
+          mergedBody?.serviceKey ||
+          mergedBody?.appointment_type ||
+          mergedBody?.appointmentType ||
+          mergedBody?.service_type ||
+          mergedBody?.serviceType ||
           null,
         normalizedServiceKey: ctx?.service_key || null,
         serviceKeyVariants: ctx?.service_key_variants || [],
@@ -412,9 +425,12 @@ async function handleAvailability(req, res, body) {
     });
   }
 
-  const headers = await getHeaders({ agent_id, email: body.email });
-  const start = asString(body.start_date, ymd(Date.now()));
-  const end = asString(body.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
+  const headers = await getHeaders({ agent_id, email: mergedBody.email });
+  const start = asString(mergedBody.start_date, ymd(Date.now()));
+  const end = asString(
+    mergedBody.end_date,
+    ymd(Date.now() + 7 * 24 * 60 * 60 * 1000)
+  );
 
   const url =
     `https://api.cal.com/v2/slots?username=${encodeURIComponent(ctx.username)}` +
@@ -425,7 +441,10 @@ async function handleAvailability(req, res, body) {
   const resp = await axios.get(url, { headers });
   let starts = extractStartTimes(resp.data?.data || resp.data);
 
-  const time_window = asString(body.time_window || body.timeWindow, "");
+  const time_window = asString(
+    mergedBody.time_window || mergedBody.timeWindow,
+    ""
+  );
   if (time_window) {
     const filtered = filterByTimeWindow(starts, time_window);
     if (filtered.length) starts = filtered;
@@ -442,11 +461,7 @@ async function handleAvailability(req, res, body) {
 }
 
 async function handleBook(req, res, body) {
-  const mergedBody = {
-    ...body,
-    ...(body?.args && typeof body.args === "object" ? body.args : {}),
-  };
-
+  const mergedBody = mergeArgs(body);
   const agent_id = asString(req.query.agent_id || mergedBody.agent_id);
 
   if (isTemplateLike(agent_id)) {
