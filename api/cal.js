@@ -1,16 +1,11 @@
 // /api/cal.js
 const axios = require("axios");
-const crypto = require("crypto");
-const { kv } = require("@vercel/kv");
 
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Idempotency-Key, X-Agent-Id"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug");
 }
 
 function json(res, status, payload) {
@@ -19,194 +14,90 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-// -------------------- QUERY PARSING --------------------
-function getQuery(req) {
-  const u = new URL(req.url, "http://localhost");
-  const q = {};
-  for (const [k, v] of u.searchParams.entries()) q[k] = v;
-  return q;
-}
-
 // -------------------- HELPERS --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
-  if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
-  }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
-      if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
     });
   });
-}
-
-function mergeArgs(body) {
-  return {
-    ...(body && typeof body === "object" ? body : {}),
-    ...(body?.args && typeof body.args === "object" ? body.args : {}),
-  };
 }
 
 function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
-}
-
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
-function tokenKeyForAgent(agentId) {
-  const a = asString(agentId);
-  return a ? `cal:tokens:agent:${a}` : "";
-}
-
-function tokenKeyForEmail(email) {
-  const e = asString(email).toLowerCase();
-  return e ? `cal:tokens:${e}` : "";
-}
-
-function normalizeServiceKey(v) {
-  const s = asString(v, "").toLowerCase();
-  if (!s) return "";
-  return s.replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").replace(/_+/g, "_").trim();
-}
-
-function serviceKeyVariants(v) {
-  const raw = asString(v, "");
-  if (!raw) return [];
-  const variants = new Set();
-  const underscored = normalizeServiceKey(raw);
-  const dashed = raw.toLowerCase().replace(/[^\w\s-]/g, "").replace(/[_\s]+/g, "-");
-  [raw.toLowerCase(), underscored, dashed].forEach(v => variants.add(v));
-  return Array.from(variants);
-}
-
-function isTemplateLike(value) {
-  const s = asString(value);
-  return !s || s.includes("{{") || s.includes("}}") || s.includes("{") || s.includes("}");
-}
-
-function extractStartTimes(raw) {
-  const candidate = raw?.slots ?? raw;
-  let starts = [];
-  if (Array.isArray(candidate)) {
-    starts = candidate.map((s) => (typeof s === "string" ? s : s?.start || s?.time || null)).filter(Boolean);
-  } else if (candidate && typeof candidate === "object") {
-    for (const k of Object.keys(candidate)) {
-      const v = candidate[k];
-      if (Array.isArray(v)) v.forEach(item => {
-        const st = typeof item === "string" ? item : item?.start || item?.time || null;
-        if (st) starts.push(st);
-      });
-    }
-  }
-  return starts.sort();
-}
-
-// -------------------- CLIENT CAL CONFIG (KV) --------------------
-async function getClientCalConfig(agent_id) {
-  const aid = asString(agent_id, "");
-  if (!aid) return null;
-  const client_id = await kv.get(`agent:${aid}:client`);
-  if (!client_id) return null;
-  const calKey = `client:${client_id}:cal`;
-  let cfg = await kv.get(calKey);
-  if (typeof cfg === "string") { try { cfg = JSON.parse(cfg); } catch { return { client_id: String(client_id) }; } }
-  return cfg && typeof cfg === "object" ? { client_id: String(client_id), ...cfg } : { client_id: String(client_id) };
-}
-
-function findMappedSlugFromService(map, rawServiceKey) {
-  if (!map || typeof map !== "object") return "";
-  const variants = serviceKeyVariants(rawServiceKey);
-  for (const variant of variants) {
-    if (map[variant]) return map[variant];
-  }
-  return "";
-}
-
-async function resolveCalContext({ agent_id, body }) {
-  const clientCfg = await getClientCalConfig(agent_id);
-  const username = asString(body?.username, asString(clientCfg?.username, process.env.CAL_USERNAME));
-  const rawServiceKey = body?.service_key || body?.service || body?.serviceKey || body?.appointment_type || "";
-  const mappedSlug = findMappedSlugFromService(clientCfg?.eventTypeSlugs, rawServiceKey);
-  const eventTypeSlug = asString(body?.eventTypeSlug, asString(mappedSlug, asString(clientCfg?.eventTypeSlug, process.env.CAL_EVENT_SLUG || "")));
-  return { username, eventTypeSlug, timeZone: asString(clientCfg?.timeZone, "America/New_York"), client_id: clientCfg?.client_id };
-}
-
-// -------------------- OAUTH & HEADERS --------------------
-async function getHeaders({ agent_id, email }) {
-  const base = { "cal-api-version": "2024-09-04" };
-  return { ...base, Authorization: `Bearer ${process.env.CAL_API_KEY}` };
-}
-
 // -------------------- MAIN HANDLERS --------------------
 async function handleAvailability(req, res, body) {
-  const mergedBody = mergeArgs(body);
-  // Check the SaaS Header first!
-  const agent_id = asString(req.headers["x-agent-id"] || req.query.agent_id || mergedBody.agent_id);
+  // Pulling config directly from Retell Headers instead of Upstash
+  const username = req.headers["x-cal-username"];
+  const eventTypeSlug = req.headers["x-cal-slug"];
 
-  if (isTemplateLike(agent_id)) return json(res, 400, { error: "Invalid agent_id", received: agent_id });
+  if (!username || !eventTypeSlug) {
+    return json(res, 400, { error: "Missing Client Config in Headers", detail: "Ensure X-Cal-Username and X-Cal-Slug are set in Retell." });
+  }
 
-  const ctx = await resolveCalContext({ agent_id, body: mergedBody });
-  if (!ctx.eventTypeSlug) return json(res, 400, { error: "Missing eventTypeSlug", agent_id });
+  const headers = { "cal-api-version": "2024-09-04", Authorization: `Bearer ${process.env.CAL_API_KEY}` };
+  const start = asString(body.start_date || body.args?.start_date, ymd(Date.now()));
+  const end = asString(body.end_date || body.args?.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
-  const headers = await getHeaders({ agent_id });
-  const start = asString(mergedBody.start_date, ymd(Date.now()));
-  const end = asString(mergedBody.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
-
-  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(ctx.username)}&eventTypeSlug=${encodeURIComponent(ctx.eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
-  const resp = await axios.get(url, { headers });
-  let starts = extractStartTimes(resp.data?.data || resp.data);
-
-  return json(res, 200, { ok: true, available_slots: starts, count: starts.length });
+  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+  
+  try {
+    const resp = await axios.get(url, { headers });
+    const slots = resp.data?.data?.slots || resp.data?.slots || [];
+    const starts = slots.map(s => s.start).filter(Boolean);
+    return json(res, 200, { ok: true, available_slots: starts });
+  } catch (err) {
+    return json(res, 500, { error: "Cal fetch failed", message: err.message });
+  }
 }
 
 async function handleBook(req, res, body) {
-  const mergedBody = mergeArgs(body);
-  const agent_id = asString(req.headers["x-agent-id"] || req.query.agent_id || mergedBody.agent_id);
+  const username = req.headers["x-cal-username"];
+  const eventTypeSlug = req.headers["x-cal-slug"];
+  
+  const args = body.args || body;
+  const start = asString(args.start || args.slot);
+  const name = asString(args.attendee_name || args.name);
+  const email = asString(args.attendee_email || args.email);
 
-  if (isTemplateLike(agent_id)) return json(res, 400, { error: "Invalid agent_id", received: agent_id });
-
-  const ctx = await resolveCalContext({ agent_id, body: mergedBody });
-  const start = asString(mergedBody.start || mergedBody.selected_start || mergedBody.slot);
-  const name = asString(mergedBody.attendee_name || mergedBody.name);
-  const email = asString(mergedBody.attendee_email || mergedBody.email);
-
-  if (!start || !name || !email || !ctx.eventTypeSlug) {
-    return json(res, 400, { error: "Missing details", debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, hasSlug: !!ctx.eventTypeSlug } });
+  if (!start || !name || !email || !username || !eventTypeSlug) {
+    return json(res, 400, { error: "Missing details", debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, hasUser: !!username } });
   }
 
   const payload = { 
-    username: ctx.username, 
-    eventTypeSlug: ctx.eventTypeSlug, 
+    username, 
+    eventTypeSlug, 
     start, 
-    attendee: { name, email, phoneNumber: mergedBody.phone || undefined } 
+    attendee: { name, email, phoneNumber: args.phone || undefined } 
   };
 
-  const headers = await getHeaders({ agent_id });
+  const headers = { "cal-api-version": "2024-09-04", Authorization: `Bearer ${process.env.CAL_API_KEY}` };
   try {
     const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers });
-    return json(res, 200, { ok: true, booking: resp.data?.data || resp.data });
+    return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
     return json(res, 500, { error: "Booking failed", message: err.response?.data || err.message });
   }
 }
 
 module.exports = async (req, res) => {
-  req.query = req.query || getQuery(req);
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+  
   const body = req.method === "POST" ? await readJsonBody(req) : {};
-  const action = asString(req.query.action, asString(body.action, "")).toLowerCase();
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const action = url.searchParams.get("action")?.toLowerCase();
 
-  if (action === "availability" || action === "slots") return await handleAvailability(req, res, body);
+  if (action === "availability") return await handleAvailability(req, res, body);
   if (action === "book") return await handleBook(req, res, body);
   return json(res, 400, { error: "Unknown action" });
 };
