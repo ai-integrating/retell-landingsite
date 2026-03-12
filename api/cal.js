@@ -59,7 +59,7 @@ function resolveEventTypeSlug(req, body) {
     args.event_slug ||
     args.eventSlug ||
     args.slug ||
-    args.service_key ||     // <-- added for Retell payload
+    args.service_key ||
     null;
 
   const headerSlug = req.headers["x-cal-slug"] || null;
@@ -76,8 +76,7 @@ async function handleAvailability(req, res, body) {
   if (!username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing Client Config",
-      detail:
-        "Ensure X-Cal-Username and a valid event slug are provided."
+      detail: "Ensure X-Cal-Username and a valid event slug are provided."
     });
   }
 
@@ -112,8 +111,22 @@ async function handleAvailability(req, res, body) {
   try {
     const resp = await axios.get(url, { headers });
 
-    const slots = resp.data?.data?.slots || resp.data?.slots || [];
-    const starts = slots.map((s) => s.start).filter(Boolean);
+    // Cal.com v2 returns a date-keyed object in resp.data.data
+    // Example:
+    // {
+    //   "2026-03-18": [{ start: "2026-03-18T09:00:00.000-04:00" }, ...],
+    //   "2026-03-19": [{ start: "2026-03-19T10:00:00.000-04:00" }, ...]
+    // }
+
+    const slotsByDate = resp.data?.data || {};
+    const starts = Object.values(slotsByDate)
+      .flat()
+      .map((s) => s.start)
+      .filter(Boolean);
+
+    console.log("CAL RAW RESPONSE DATA", JSON.stringify(resp.data?.data || {}, null, 2));
+    console.log("CAL AVAILABLE SLOT COUNT", starts.length);
+    console.log("CAL FIRST 5 SLOTS", starts.slice(0, 5));
 
     return json(res, 200, {
       ok: true,
