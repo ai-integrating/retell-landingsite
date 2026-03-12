@@ -139,28 +139,17 @@ async function handleAvailability(req, res, body) {
       message: err.response?.data || err.message
     });
   }
+}
+
 async function handleBook(req, res, body) {
   const username = req.headers["x-cal-username"];
   const eventTypeSlug = resolveEventTypeSlug(req, body);
 
-  const args = body.args || body || {};
+  const args = body.args || body;
 
-  const start = asString(
-    args.selected_start || args.start || args.slot,
-    ""
-  );
-
-  const name = asString(
-    args.attendee_name || args.name,
-    ""
-  );
-
-  const email = asString(
-    args.attendee_email || args.email,
-    ""
-  );
-
-  const phone = asString(args.phone, "");
+  const start = asString(args.start || args.slot);
+  const name = asString(args.attendee_name || args.name);
+  const email = asString(args.attendee_email || args.email);
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, {
@@ -169,54 +158,12 @@ async function handleBook(req, res, body) {
         hasStart: !!start,
         hasName: !!name,
         hasEmail: !!email,
-        hasPhone: !!phone,
         hasUser: !!username,
-        hasEventSlug: !!eventTypeSlug,
-        receivedKeys: Object.keys(args || {})
+        hasEventSlug: !!eventTypeSlug
       }
     });
   }
 
-  const payload = {
-    username,
-    eventTypeSlug,
-    start,
-    attendee: {
-      name,
-      email,
-      phoneNumber: phone || undefined
-    }
-  };
-
-  const headers = {
-    "cal-api-version": "2024-09-04",
-    Authorization: `Bearer ${process.env.CAL_API_KEY}`
-  };
-
-  console.log("CAL BOOKING REQUEST", payload);
-
-  try {
-    const resp = await axios.post(
-      "https://api.cal.com/v2/bookings",
-      payload,
-      { headers }
-    );
-
-    console.log("CAL BOOKING RESPONSE", JSON.stringify(resp.data, null, 2));
-
-    return json(res, 200, {
-      ok: true,
-      booking: resp.data
-    });
-  } catch (err) {
-    console.error("CAL BOOKING ERROR", err.response?.data || err.message);
-
-    return json(res, 500, {
-      error: "Booking failed",
-      message: err.response?.data || err.message
-    });
-  }
-}
   const payload = {
     username,
     eventTypeSlug,
