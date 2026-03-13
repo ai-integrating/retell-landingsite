@@ -111,13 +111,6 @@ async function handleAvailability(req, res, body) {
   try {
     const resp = await axios.get(url, { headers });
 
-    // Cal.com v2 returns a date-keyed object in resp.data.data
-    // Example:
-    // {
-    //   "2026-03-18": [{ start: "2026-03-18T09:00:00.000-04:00" }, ...],
-    //   "2026-03-19": [{ start: "2026-03-19T10:00:00.000-04:00" }, ...]
-    // }
-
     const slotsByDate = resp.data?.data || {};
     const starts = Object.values(slotsByDate)
       .flat()
@@ -169,8 +162,6 @@ async function handleBook(req, res, body) {
     });
   }
 
-  // rest of booking logic continues here
-}
   const payload = {
     username,
     eventTypeSlug,
