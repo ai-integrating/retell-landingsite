@@ -147,7 +147,12 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body;
 
-  const start = asString(args.start || args.slot);
+  const start = asString(
+    args.start ||
+    args.slot ||
+    args.selected_start
+  );
+
   const name = asString(args.attendee_name || args.name);
   const email = asString(args.attendee_email || args.email);
 
@@ -164,6 +169,8 @@ async function handleBook(req, res, body) {
     });
   }
 
+  // rest of booking logic continues here
+}
   const payload = {
     username,
     eventTypeSlug,
