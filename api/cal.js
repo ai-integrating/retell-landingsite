@@ -169,12 +169,14 @@ async function handleBook(req, res, body) {
     attendee: {
       name,
       email,
-      phoneNumber: args.phone || undefined
+      phoneNumber: args.phone || undefined,
+      timeZone: "America/New_York"
     }
   };
 
   const headers = {
-    "cal-api-version": "2024-09-04",
+    "Content-Type": "application/json",
+    "cal-api-version": "2026-02-25",
     Authorization: `Bearer ${process.env.CAL_API_KEY}`
   };
 
