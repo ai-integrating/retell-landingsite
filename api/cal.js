@@ -13,8 +13,7 @@ const AGENT_CONFIG = {
   // Example agent (add more later)
   // "agent_123": {
   //   username: "rose-dos-santos-1qzzki",
-  //   eventTypeSlug: "hair-cut",
-  //   timeZone: "America/New_York"
+  //   eventTypeSlug: "hair-cut"
   // }
 };
 
@@ -102,8 +101,7 @@ function resolveClientConfig(req, body) {
 
   return {
     username: req.headers["x-cal-username"],
-    eventTypeSlug: resolveEventTypeSlug(req, body),
-    timeZone: "America/New_York"
+    eventTypeSlug: resolveEventTypeSlug(req, body)
   };
 }
 
@@ -176,7 +174,6 @@ async function handleBook(req, res, body) {
 
   const username = client.username;
   const eventTypeSlug = client.eventTypeSlug;
-  const timeZone = client.timeZone;
 
   const args = body.args || body;
 
@@ -206,7 +203,6 @@ async function handleBook(req, res, body) {
     username,
     eventTypeSlug,
     start,
-    timeZone,
     attendee: {
       name,
       email,
