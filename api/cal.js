@@ -102,6 +102,7 @@ async function handleAvailability(req, res, body) {
     `&end=${encodeURIComponent(end)}`;
 
   console.log("CAL AVAILABILITY REQUEST", {
+    version: "NO_TIMEZONE_DEBUG_V1",
     username,
     eventTypeSlug,
     start,
@@ -123,12 +124,14 @@ async function handleAvailability(req, res, body) {
 
     return json(res, 200, {
       ok: true,
+      version: "NO_TIMEZONE_DEBUG_V1",
       available_slots: starts
     });
 
   } catch (err) {
     return json(res, 500, {
       error: "Cal fetch failed",
+      version: "NO_TIMEZONE_DEBUG_V1",
       message: err.response?.data || err.message
     });
   }
@@ -148,16 +151,19 @@ async function handleBook(req, res, body) {
 
   const name = asString(args.attendee_name || args.name);
   const email = asString(args.attendee_email || args.email);
+  const phone = asString(args.phone);
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing details",
+      version: "NO_TIMEZONE_DEBUG_V1",
       debug: {
         hasStart: !!start,
         hasName: !!name,
         hasEmail: !!email,
         hasUser: !!username,
-        hasEventSlug: !!eventTypeSlug
+        hasEventSlug: !!eventTypeSlug,
+        body
       }
     });
   }
@@ -169,7 +175,7 @@ async function handleBook(req, res, body) {
     attendee: {
       name,
       email,
-      phoneNumber: args.phone || undefined
+      phoneNumber: phone || undefined
     }
   };
 
@@ -179,7 +185,10 @@ async function handleBook(req, res, body) {
     Authorization: `Bearer ${process.env.CAL_API_KEY}`
   };
 
-  console.log("CAL BOOKING REQUEST", payload);
+  console.log("CAL BOOKING REQUEST", JSON.stringify({
+    version: "NO_TIMEZONE_DEBUG_V1",
+    payload
+  }, null, 2));
 
   try {
     const resp = await axios.post(
@@ -190,13 +199,26 @@ async function handleBook(req, res, body) {
 
     return json(res, 200, {
       ok: true,
+      version: "NO_TIMEZONE_DEBUG_V1",
       booking: resp.data
     });
 
   } catch (err) {
+    console.log("CAL BOOKING ERROR", JSON.stringify({
+      version: "NO_TIMEZONE_DEBUG_V1",
+      payload,
+      responseStatus: err.response?.status,
+      responseData: err.response?.data,
+      message: err.message
+    }, null, 2));
+
     return json(res, 500, {
       error: "Booking failed",
-      message: err.response?.data || err.message
+      version: "NO_TIMEZONE_DEBUG_V1",
+      message: err.response?.data || err.message,
+      debug: {
+        payload
+      }
     });
   }
 }
@@ -222,5 +244,8 @@ module.exports = async (req, res) => {
     return await handleBook(req, res, body);
   }
 
-  return json(res, 400, { error: "Unknown action" });
+  return json(res, 400, {
+    error: "Unknown action",
+    version: "NO_TIMEZONE_DEBUG_V1"
+  });
 };
