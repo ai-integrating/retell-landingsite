@@ -58,7 +58,10 @@ const RETELL_BASE = "https://api.retellai.com";
 function retellHeaders() {
   const apiKey = process.env.RETELL_API_KEY;
   if (!apiKey) throw new Error("Missing RETELL_API_KEY in Environment Variables.");
-  return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json"
+  };
 }
 
 // -------------------- ROLE NORMALIZATION --------------------
@@ -472,6 +475,7 @@ function buildBusinessContext(body) {
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
+// ✅ Updated scheduler block
 function buildSchedulerEmailGateBlock() {
   return [
     `SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
@@ -483,11 +487,18 @@ function buildSchedulerEmailGateBlock() {
     `SCHEDULING REALITY RULE (CRITICAL):`,
     `- You do NOT know actual availability unless it is returned by the scheduling system.`,
     `- NEVER suggest specific times (e.g., "Monday at 2") unless the system has confirmed that exact slot.`,
-    `- If the caller asks for availability, ask for preferences only (day + time window).`,
-    `- Say: "I can collect your preferred times and send a confirmation once the schedule is checked."`,
+    `- If the caller asks for availability, say: "Let me check the schedule for you."`,
+    ``,
+    `FIRST AVAILABLE OFFER RULE (CRITICAL):`,
+    `- After the availability tool returns valid appointment slots, you MUST offer the first available slot.`,
+    `- "First available" means the earliest returned slot from the scheduling system.`,
+    `- Offer only ONE slot at a time unless the caller asks for more options.`,
+    `- If the caller declines, offer the next available slot.`,
+    `- Do NOT read a long list of times unless the caller specifically asks.`,
+    `- Example: "The first available I have is Tuesday at 10:00 AM. Would you like that?"`,
     ``,
     `EMAIL REQUIRED TO BOOK (STRICT):`,
-    `- You may NOT book, confirm, or reserve an appointment unless you have the caller’s email address.`,
+    `- You may NOT book or confirm an appointment without the caller’s email.`,
     `- Ask exactly: "What’s the best email to send your appointment confirmation to?"`,
     `- If the caller provides an email:`,
     `  1) Repeat it back exactly.`,
@@ -495,22 +506,15 @@ function buildSchedulerEmailGateBlock() {
     `  3) Do NOT proceed until confirmed "yes".`,
     `- If the caller corrects it, repeat the confirmation process.`,
     `- Do NOT guess or auto-correct email addresses.`,
-    `- If caller refuses/can’t provide email: do NOT book. Collect callback number + preferred day/time window and say the team will follow up.`,
     ``,
     `SERVICE SELECTION (REQUIRED):`,
-    `- Before booking, you MUST determine the type of appointment/service.`,
+    `- Before booking, determine the service.`,
     `- Ask: "What service are you looking to book?"`,
-    `- Do NOT assume a service unless the caller explicitly states it.`,
-    `- If caller is vague (e.g., "hair appointment"), ask ONE clarifying question (e.g., "Is that for a haircut, color, or something else?").`,
+    `- If the caller is vague (e.g., "hair appointment"), ask ONE clarifying question.`,
     ``,
-    `UPLOADED SERVICES USAGE RULE:`,
-    `- The business may upload a list of services and durations.`,
-    `- These define what the business offers, NOT what the caller has chosen.`,
-    `- Use uploaded services only to recognize/clarify valid options; do not read a long menu.`,
-    ``,
-    `TOOLING RULE (if booking tools exist):`,
-    `- Only proceed to booking after you have: name + phone + confirmed email + selected service + preferred day/time window.`,
-    `- Only confirm an appointment time if it is returned by the booking system.`,
+    `BOOKING RULE:`,
+    `- Once the caller accepts a returned slot, call the booking tool with that exact start time.`,
+    `- Never say the appointment is booked unless the booking tool succeeds.`,
   ].join("\n");
 }
 
@@ -532,15 +536,30 @@ function buildReceptionistNoBookingBlock() {
 }
 
 // -------------------- IDEMPOTENCY HELPERS --------------------
-async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-function getSubmissionId(body) { return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim(); }
+async function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function getSubmissionId(body) {
+  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
+}
+
 async function getExistingProvision(idemKey) {
   const existing = await kv.get(idemKey);
   if (existing && typeof existing === "object" && existing.agent_id) return existing;
   return null;
 }
-async function acquireLock(lockKey, ttlSeconds = 120) { return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds }); }
-async function releaseLock(lockKey) { try { await kv.del(lockKey); } catch {} }
+
+async function acquireLock(lockKey, ttlSeconds = 120) {
+  return kv.set(lockKey, "1", { nx: true, ex: ttlSeconds });
+}
+
+async function releaseLock(lockKey) {
+  try {
+    await kv.del(lockKey);
+  } catch {}
+}
+
 function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
   return {
     mode,
@@ -558,22 +577,34 @@ function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumb
 // -------------------- HANDLER --------------------
 module.exports = async (req, res) => {
   setCors(res);
+
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
   let lockKey = null;
+
   try {
     const body = await readJsonBody(req);
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
-    if (debug) return res.status(200).json({ ok: true, debug: true, received: body });
+
+    if (debug) {
+      return res.status(200).json({ ok: true, debug: true, received: body });
+    }
 
     const submissionId = getSubmissionId(body);
-    if (!submissionId) return res.status(400).json({ ok: false, error: "Missing submission ID." });
+    if (!submissionId) {
+      return res.status(400).json({ ok: false, error: "Missing submission ID." });
+    }
 
     const idemKey = `prov:${submissionId}`;
     lockKey = `provlock:${submissionId}`;
 
     const existing = await getExistingProvision(idemKey);
-    if (existing) return res.status(200).json({ ok: true, idempotent: true, ...existing });
+    if (existing) {
+      return res.status(200).json({ ok: true, idempotent: true, ...existing });
+    }
 
     const locked = await acquireLock(lockKey, 120);
     if (!locked) {
@@ -630,7 +661,9 @@ module.exports = async (req, res) => {
           : "";
 
       const ctx = buildBusinessContext(body);
-      const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
+      const websiteSection = scrape.ok
+        ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
+        : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
 
       promptToUse = [base, urgencyFallback, tierProtection, ctx, setupSection, websiteSection]
         .filter(Boolean)
@@ -641,7 +674,10 @@ module.exports = async (req, res) => {
 
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
-      { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") },
+      {
+        general_prompt: promptToUse,
+        model: pick(body, ["llm_model"], "gpt-4o-mini")
+      },
       { headers: retellHeaders(), timeout: 20000 }
     );
     const llmId = llmResp.data.llm_id || llmResp.data.id;
