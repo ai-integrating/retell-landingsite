@@ -102,7 +102,7 @@ async function handleAvailability(req, res, body) {
     `&end=${encodeURIComponent(end)}`;
 
   console.log("CAL AVAILABILITY REQUEST", {
-    version: "ROOT_TIMEZONE_DEBUG_V2",
+    version: "ATTENDEE_TIMEZONE_LANG_V3",
     username,
     eventTypeSlug,
     start,
@@ -124,14 +124,14 @@ async function handleAvailability(req, res, body) {
 
     return json(res, 200, {
       ok: true,
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       available_slots: starts
     });
 
   } catch (err) {
     return json(res, 500, {
       error: "Cal fetch failed",
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       message: err.response?.data || err.message
     });
   }
@@ -156,7 +156,7 @@ async function handleBook(req, res, body) {
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing details",
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       debug: {
         hasStart: !!start,
         hasName: !!name,
@@ -172,11 +172,12 @@ async function handleBook(req, res, body) {
     username,
     eventTypeSlug,
     start,
-    timeZone: "America/New_York",
     attendee: {
       name,
       email,
-      phoneNumber: phone || undefined
+      phoneNumber: phone || undefined,
+      timeZone: "America/New_York",
+      language: "en"
     }
   };
 
@@ -187,7 +188,7 @@ async function handleBook(req, res, body) {
   };
 
   console.log("CAL BOOKING REQUEST", JSON.stringify({
-    version: "ROOT_TIMEZONE_DEBUG_V2",
+    version: "ATTENDEE_TIMEZONE_LANG_V3",
     payload
   }, null, 2));
 
@@ -200,13 +201,13 @@ async function handleBook(req, res, body) {
 
     return json(res, 200, {
       ok: true,
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       booking: resp.data
     });
 
   } catch (err) {
     console.log("CAL BOOKING ERROR", JSON.stringify({
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       payload,
       responseStatus: err.response?.status,
       responseData: err.response?.data,
@@ -215,7 +216,7 @@ async function handleBook(req, res, body) {
 
     return json(res, 500, {
       error: "Booking failed",
-      version: "ROOT_TIMEZONE_DEBUG_V2",
+      version: "ATTENDEE_TIMEZONE_LANG_V3",
       message: err.response?.data || err.message,
       debug: {
         payload
@@ -247,6 +248,6 @@ module.exports = async (req, res) => {
 
   return json(res, 400, {
     error: "Unknown action",
-    version: "ROOT_TIMEZONE_DEBUG_V2"
+    version: "ATTENDEE_TIMEZONE_LANG_V3"
   });
 };
