@@ -1,6 +1,23 @@
 // /api/cal.js
 const axios = require("axios");
 
+/*
+-------------------------------------------------------
+AGENT CONFIG (future SaaS routing)
+If an X-Agent-Id header exists, we use this mapping.
+Otherwise we fall back to X-Cal-Username + X-Cal-Slug
+-------------------------------------------------------
+*/
+
+const AGENT_CONFIG = {
+  // Example agent (add more later)
+  // "agent_123": {
+  //   username: "rose-dos-santos-1qzzki",
+  //   eventTypeSlug: "hair-cut",
+  //   timeZone: "America/New_York"
+  // }
+};
+
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -68,15 +85,39 @@ function resolveEventTypeSlug(req, body) {
   return normalizeSlug(chosen);
 }
 
+/*
+-------------------------------------------------------
+CLIENT CONFIG RESOLVER
+Uses agent config if present
+Otherwise falls back to headers (current system)
+-------------------------------------------------------
+*/
+
+function resolveClientConfig(req, body) {
+  const agentId = req.headers["x-agent-id"];
+
+  if (agentId && AGENT_CONFIG[agentId]) {
+    return AGENT_CONFIG[agentId];
+  }
+
+  return {
+    username: req.headers["x-cal-username"],
+    eventTypeSlug: resolveEventTypeSlug(req, body),
+    timeZone: "America/New_York"
+  };
+}
+
 // -------------------- MAIN HANDLERS --------------------
 async function handleAvailability(req, res, body) {
-  const username = req.headers["x-cal-username"];
-  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  const client = resolveClientConfig(req, body);
+
+  const username = client.username;
+  const eventTypeSlug = client.eventTypeSlug;
 
   if (!username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing Client Config",
-      detail: "Ensure X-Cal-Username and a valid event slug are provided."
+      detail: "Ensure calendar configuration exists."
     });
   }
 
@@ -117,10 +158,6 @@ async function handleAvailability(req, res, body) {
       .map((s) => s.start)
       .filter(Boolean);
 
-    console.log("CAL RAW RESPONSE DATA", JSON.stringify(resp.data?.data || {}, null, 2));
-    console.log("CAL AVAILABLE SLOT COUNT", starts.length);
-    console.log("CAL FIRST 5 SLOTS", starts.slice(0, 5));
-
     return json(res, 200, {
       ok: true,
       available_slots: starts
@@ -135,8 +172,11 @@ async function handleAvailability(req, res, body) {
 }
 
 async function handleBook(req, res, body) {
-  const username = req.headers["x-cal-username"];
-  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  const client = resolveClientConfig(req, body);
+
+  const username = client.username;
+  const eventTypeSlug = client.eventTypeSlug;
+  const timeZone = client.timeZone;
 
   const args = body.args || body;
 
@@ -166,11 +206,11 @@ async function handleBook(req, res, body) {
     username,
     eventTypeSlug,
     start,
+    timeZone,
     attendee: {
       name,
       email,
-      phoneNumber: args.phone || undefined,
-      timeZone: "America/New_York"
+      phoneNumber: args.phone || undefined
     }
   };
 
