@@ -184,6 +184,78 @@ async function scrapeWebsiteText(url) {
   }
 }
 
+// -------------------- CALENDAR CONFIG HELPERS --------------------
+function normalizeTimeZone(tz) {
+  const raw = String(tz || "").trim();
+  if (!raw) return "America/New_York";
+
+  const map = {
+    est: "America/New_York",
+    edt: "America/New_York",
+    eastern: "America/New_York",
+    "eastern time": "America/New_York",
+    cst: "America/Chicago",
+    cdt: "America/Chicago",
+    central: "America/Chicago",
+    "central time": "America/Chicago",
+    mst: "America/Denver",
+    mdt: "America/Denver",
+    mountain: "America/Denver",
+    "mountain time": "America/Denver",
+    pst: "America/Los_Angeles",
+    pdt: "America/Los_Angeles",
+    pacific: "America/Los_Angeles",
+    "pacific time": "America/Los_Angeles",
+  };
+
+  const lower = raw.toLowerCase();
+  return map[lower] || raw;
+}
+
+function normalizeServiceKeyToSlug(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-");
+}
+
+function extractCalendarConfig(body) {
+  const calUsername = pick(body, [
+    "cal_username",
+    "calendar_username",
+    "calcom_username",
+    "cal_com_username",
+    "booking_username",
+  ], "");
+
+  const calSlugRaw = pick(body, [
+    "cal_slug",
+    "calendar_slug",
+    "event_type_slug",
+    "eventTypeSlug",
+    "service_key",
+    "booking_service_key",
+  ], "");
+
+  const serviceKey = pick(body, [
+    "service_key",
+    "booking_service_key",
+    "default_service_key",
+  ], calSlugRaw || "");
+
+  const timeZone = normalizeTimeZone(
+    pick(body, ["timezone", "tz", "time_zone"], "America/New_York")
+  );
+
+  return {
+    cal_username: calUsername,
+    cal_slug: normalizeServiceKeyToSlug(calSlugRaw),
+    service_key: String(serviceKey || "").trim(),
+    timezone: timeZone,
+  };
+}
+
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
 function getGlobalSetupBlock(body) {
   return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
@@ -300,7 +372,6 @@ function buildUrgencyFallbackBlock(roleKey) {
 
 // -------------------- PROMPT BASES --------------------
 function buildPromptBase({ agentName, bizName, roleKey }) {
-  // ✅ STABILITY Logic
   const stabilityLogic = [
     `# ANTI-REPEAT / BARGE-IN RULES (CRITICAL STABILITY)`,
     `- You MUST NOT restart, repeat, or re-say your greeting because of background noise, phone line "clunks", or early talk-over.`,
@@ -310,7 +381,6 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     `- If the audio is unclear at the start, wait 1 second for the line to stabilize BEFORE speaking the opener.`,
   ].join("\n");
 
-  // ✅ CONVERSATION STAGING (The Logic Fix)
   const stagingLogic = [
     `# CONVERSATION FLOW CONTROL (STRICT STAGES)`,
     `Stage 1: DISCOVERY - If the caller asks about services, pricing, or "what you do," stay here. Provide information and wait for a reaction.`,
@@ -402,7 +472,6 @@ function buildBusinessContext(body) {
   return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
 }
 
-// ✅ Tier protection blocks
 function buildSchedulerEmailGateBlock() {
   return [
     `SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
@@ -496,12 +565,16 @@ module.exports = async (req, res) => {
     const body = await readJsonBody(req);
     const debug = String(pick(body, ["debug"], "false")).toLowerCase() === "true";
     if (debug) return res.status(200).json({ ok: true, debug: true, received: body });
+
     const submissionId = getSubmissionId(body);
     if (!submissionId) return res.status(400).json({ ok: false, error: "Missing submission ID." });
+
     const idemKey = `prov:${submissionId}`;
     lockKey = `provlock:${submissionId}`;
+
     const existing = await getExistingProvision(idemKey);
     if (existing) return res.status(200).json({ ok: true, idempotent: true, ...existing });
+
     const locked = await acquireLock(lockKey, 120);
     if (!locked) {
       for (let i = 0; i < 8; i++) {
@@ -511,23 +584,32 @@ module.exports = async (req, res) => {
       }
       return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
+
     const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
     const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
+
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
     const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
+
     const { voiceKey, voiceId } = resolveVoice(body);
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
+
     const globalSetup = getGlobalSetupBlock(body) || buildGlobalSetupFromFields(body);
     const roleSetup = getRoleSetupBlock(body, roleKey) || buildSetupForRole(body, roleKey);
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
+
     let website = pick(body, ["website", "web", "website_url", "site", "url"], "");
     if (!website) website = extractWebsiteFromText(globalSetup);
+
     const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
+
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
+
     if (!promptToUse) {
       let base = buildPromptBase({ agentName, bizName, roleKey });
+
       const outboundRules = [
         `OUTBOUND BEHAVIOR RULES (apply ONLY when {{first_line}} is NOT blank):`,
         `- You initiated the call.`,
@@ -535,32 +617,137 @@ module.exports = async (req, res) => {
         `- Never forget to state you are from ${bizName}.`,
         `- Never ask "How can I help you?" as your first line on outbound.`,
       ].join("\n");
+
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
       if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
+
       const urgencyFallback = buildUrgencyFallbackBlock(roleKey);
-      const tierProtection = roleKey === "receptionist" ? buildReceptionistNoBookingBlock() : roleKey === "scheduler" || roleKey === "operations" ? buildSchedulerEmailGateBlock() : "";
+      const tierProtection =
+        roleKey === "receptionist"
+          ? buildReceptionistNoBookingBlock()
+          : roleKey === "scheduler" || roleKey === "operations"
+          ? buildSchedulerEmailGateBlock()
+          : "";
+
       const ctx = buildBusinessContext(body);
       const websiteSection = scrape.ok ? `WEBSITE KNOWLEDGE:\n${scrape.text}` : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
-      promptToUse = [base, urgencyFallback, tierProtection, ctx, setupSection, websiteSection].filter(Boolean).join("\n\n");
+
+      promptToUse = [base, urgencyFallback, tierProtection, ctx, setupSection, websiteSection]
+        .filter(Boolean)
+        .join("\n\n");
+
       promptSource = "built_prompt";
     }
-    const llmResp = await axios.post(`${RETELL_BASE}/create-retell-llm`, { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") }, { headers: retellHeaders(), timeout: 20000 });
+
+    const llmResp = await axios.post(
+      `${RETELL_BASE}/create-retell-llm`,
+      { general_prompt: promptToUse, model: pick(body, ["llm_model"], "gpt-4o-mini") },
+      { headers: retellHeaders(), timeout: 20000 }
+    );
     const llmId = llmResp.data.llm_id || llmResp.data.id;
-    const agentResp = await axios.post(`${RETELL_BASE}/create-agent`, { agent_name: `${bizName} - ${agentName} (${roleKey})`, voice_id: voiceId, response_engine: { type: "retell-llm", llm_id: llmId }, metadata: { business_name: bizName, agent_role: roleKey, submission_id: submissionId }, }, { headers: retellHeaders(), timeout: 20000 });
+
+    const agentResp = await axios.post(
+      `${RETELL_BASE}/create-agent`,
+      {
+        agent_name: `${bizName} - ${agentName} (${roleKey})`,
+        voice_id: voiceId,
+        response_engine: { type: "retell-llm", llm_id: llmId },
+        metadata: {
+          business_name: bizName,
+          agent_role: roleKey,
+          submission_id: submissionId
+        },
+      },
+      { headers: retellHeaders(), timeout: 20000 }
+    );
     const agentId = agentResp.data.agent_id || agentResp.data.id;
+
+    // -------------------- SAVE CALENDAR CONFIG FOR THIS AGENT --------------------
+    const calendarConfig = extractCalendarConfig(body);
+
+    if (calendarConfig.cal_username && calendarConfig.cal_slug) {
+      await kv.set(
+        `agentcfg:${agentId}`,
+        {
+          agent_id: agentId,
+          submission_id: submissionId,
+          business_name: bizName,
+          role: roleKey,
+          cal_username: calendarConfig.cal_username,
+          cal_slug: calendarConfig.cal_slug,
+          service_key: calendarConfig.service_key || calendarConfig.cal_slug,
+          timezone: calendarConfig.timezone || "America/New_York",
+          created_at: new Date().toISOString(),
+        },
+        { ex: 60 * 60 * 24 * 30 }
+      );
+    }
+
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
     const numberTierFinal = tierForRole(roleKey);
-    await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
+
+    await kv.set(
+      idemKey,
+      normalizeProvisionRecord({
+        mode,
+        llmId,
+        agentId,
+        phoneNumber,
+        phoneNumberId,
+        numberTierFinal,
+        voiceKey,
+        roleKey
+      }),
+      { ex: 60 * 60 * 24 * 30 }
+    );
+
     if (mode === "agent_and_number") {
       const baseUrl = getBaseUrl(req);
-      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, { agent_id: agentId, business_name: bizName, idempotency_key: submissionId, number_tier: numberTierFinal });
+      const buyResp = await axios.post(`${baseUrl}/api/buy-number`, {
+        agent_id: agentId,
+        business_name: bizName,
+        idempotency_key: submissionId,
+        number_tier: numberTierFinal
+      });
+
       if (buyResp?.data?.ok) {
         phoneNumber = buyResp.data.phone_number;
         phoneNumberId = buyResp.data.phone_number_id;
-        await kv.set(idemKey, normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }), { ex: 60 * 60 * 24 * 30 });
+
+        await kv.set(
+          idemKey,
+          normalizeProvisionRecord({
+            mode,
+            llmId,
+            agentId,
+            phoneNumber,
+            phoneNumberId,
+            numberTierFinal,
+            voiceKey,
+            roleKey
+          }),
+          { ex: 60 * 60 * 24 * 30 }
+        );
       }
     }
-    return res.status(200).json({ ok: true, agent_id: agentId, phone_number: phoneNumber, role: roleKey, prompt_source: promptSource, website_used: website ? normalizeUrl(website) : "", website_scrape_reason: scrape.reason, });
-  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); } finally { if (lockKey) await releaseLock(lockKey); }
+
+    return res.status(200).json({
+      ok: true,
+      agent_id: agentId,
+      phone_number: phoneNumber,
+      role: roleKey,
+      prompt_source: promptSource,
+      website_used: website ? normalizeUrl(website) : "",
+      website_scrape_reason: scrape.reason,
+      calendar_config_saved: !!(calendarConfig.cal_username && calendarConfig.cal_slug),
+      cal_username: calendarConfig.cal_username || "",
+      cal_slug: calendarConfig.cal_slug || "",
+      timezone: calendarConfig.timezone || "America/New_York",
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  } finally {
+    if (lockKey) await releaseLock(lockKey);
+  }
 };
