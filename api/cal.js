@@ -82,6 +82,10 @@ function getCalRedirectUri() {
   );
 }
 
+function getCalOauthScopes() {
+  return process.env.CAL_OAUTH_SCOPES || "BOOKING_READ BOOKING_WRITE";
+}
+
 async function fetchCalMe(accessToken) {
   const resp = await axios.get("https://api.cal.com/v2/me", {
     headers: {
@@ -100,6 +104,7 @@ async function handleOauthStart(req, res, url) {
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = getCalRedirectUri();
+  const scope = getCalOauthScopes();
 
   if (!clientId || !redirectUri) {
     return json(res, 500, {
@@ -121,18 +126,19 @@ async function handleOauthStart(req, res, url) {
   const state = Buffer.from(JSON.stringify(statePayload)).toString("base64");
 
   const authUrl =
-    `https://cal.com/api/oauth/authorize` +
+    `https://app.cal.com/auth/oauth2/authorize` +
     `?client_id=${encodeURIComponent(clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&response_type=code` +
-    `&scope=${encodeURIComponent("default")}` +
+    `&scope=${encodeURIComponent(scope)}` +
     `&state=${encodeURIComponent(state)}`;
 
   console.log("CAL OAUTH START", {
     version: "ATTENDEE_TIMEZONE_LANG_V3",
     agentId,
     email,
-    redirectUri
+    redirectUri,
+    scope
   });
 
   return redirect(res, authUrl);
@@ -178,7 +184,7 @@ async function handleOauthCallback(req, res, url) {
 
   try {
     const tokenResp = await axios.post(
-      "https://cal.com/api/oauth/token",
+      "https://api.cal.com/v2/auth/oauth2/token",
       {
         grant_type: "authorization_code",
         code,
@@ -487,3 +493,4 @@ module.exports = async (req, res) => {
     received_action: action || null
   });
 };
+::contentReference[oaicite:1]{index=1}
