@@ -17,6 +17,12 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function redirect(res, location) {
+  res.statusCode = 302;
+  res.setHeader("Location", location);
+  res.end();
+}
+
 // -------------------- HELPERS --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -41,7 +47,6 @@ function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
-// converts hair_cut -> hair-cut
 function normalizeSlug(slug = "") {
   return String(slug)
     .trim()
@@ -50,7 +55,6 @@ function normalizeSlug(slug = "") {
     .replace(/_/g, "-");
 }
 
-// resolves slug from body OR header
 function resolveEventTypeSlug(req, body) {
   const args = body.args || body || {};
 
@@ -68,7 +72,90 @@ function resolveEventTypeSlug(req, body) {
   return normalizeSlug(chosen);
 }
 
-// -------------------- MAIN HANDLERS --------------------
+// -------------------- OAUTH --------------------
+async function handleOauthStart(req, res, url) {
+  const agentId = url.searchParams.get("agent_id") || "";
+  const email = url.searchParams.get("email") || "";
+
+  const statePayload = {
+    agent_id: agentId,
+    email
+  };
+
+  const state = Buffer.from(JSON.stringify(statePayload)).toString("base64");
+
+  const clientId = process.env.CAL_CLIENT_ID;
+  const redirectUri = process.env.CAL_REDIRECT_URI;
+
+  if (!clientId || !redirectUri) {
+    return json(res, 500, {
+      error: "Missing OAuth env vars",
+      need: ["CAL_CLIENT_ID", "CAL_REDIRECT_URI"]
+    });
+  }
+
+  const authUrl =
+    `https://cal.com/api/oauth/authorize` +
+    `?client_id=${encodeURIComponent(clientId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&response_type=code` +
+    `&scope=${encodeURIComponent("default")}` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return redirect(res, authUrl);
+}
+
+async function handleOauthCallback(req, res, url) {
+  const code = url.searchParams.get("code") || "";
+  const state = url.searchParams.get("state") || "";
+
+  if (!code) {
+    return json(res, 400, { error: "Missing code" });
+  }
+
+  let decodedState = {};
+  try {
+    decodedState = JSON.parse(Buffer.from(state, "base64").toString("utf8"));
+  } catch {
+    decodedState = {};
+  }
+
+  try {
+    const tokenResp = await axios.post(
+      "https://cal.com/api/oauth/token",
+      {
+        grant_type: "authorization_code",
+        code,
+        client_id: process.env.CAL_CLIENT_ID,
+        client_secret: process.env.CAL_CLIENT_SECRET,
+        redirect_uri: process.env.CAL_REDIRECT_URI
+      },
+      {
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    // TODO:
+    // Save tokenResp.data plus decodedState.agent_id / decodedState.email
+    // into your KV, database, or wherever you store client calendar config.
+
+    return json(res, 200, {
+      ok: true,
+      message: "OAuth connected successfully",
+      state: decodedState,
+      token_received: !!tokenResp.data
+    });
+  } catch (err) {
+    return json(res, 500, {
+      error: "OAuth callback failed",
+      message: err.response?.data || err.message
+    });
+  }
+}
+
+// -------------------- AVAILABILITY --------------------
 async function handleAvailability(req, res, body) {
   const username = req.headers["x-cal-username"];
   const eventTypeSlug = resolveEventTypeSlug(req, body);
@@ -101,14 +188,6 @@ async function handleAvailability(req, res, body) {
     `&start=${encodeURIComponent(start)}` +
     `&end=${encodeURIComponent(end)}`;
 
-  console.log("CAL AVAILABILITY REQUEST", {
-    version: "ATTENDEE_TIMEZONE_LANG_V3",
-    username,
-    eventTypeSlug,
-    start,
-    end
-  });
-
   try {
     const resp = await axios.get(url, { headers });
 
@@ -118,16 +197,11 @@ async function handleAvailability(req, res, body) {
       .map((s) => s.start)
       .filter(Boolean);
 
-    console.log("CAL RAW RESPONSE DATA", JSON.stringify(resp.data?.data || {}, null, 2));
-    console.log("CAL AVAILABLE SLOT COUNT", starts.length);
-    console.log("CAL FIRST 5 SLOTS", starts.slice(0, 5));
-
     return json(res, 200, {
       ok: true,
       version: "ATTENDEE_TIMEZONE_LANG_V3",
       available_slots: starts
     });
-
   } catch (err) {
     return json(res, 500, {
       error: "Cal fetch failed",
@@ -137,6 +211,7 @@ async function handleAvailability(req, res, body) {
   }
 }
 
+// -------------------- BOOK --------------------
 async function handleBook(req, res, body) {
   const username = req.headers["x-cal-username"];
   const eventTypeSlug = resolveEventTypeSlug(req, body);
@@ -187,11 +262,6 @@ async function handleBook(req, res, body) {
     Authorization: `Bearer ${process.env.CAL_API_KEY}`
   };
 
-  console.log("CAL BOOKING REQUEST", JSON.stringify({
-    version: "ATTENDEE_TIMEZONE_LANG_V3",
-    payload
-  }, null, 2));
-
   try {
     const resp = await axios.post(
       "https://api.cal.com/v2/bookings",
@@ -204,23 +274,12 @@ async function handleBook(req, res, body) {
       version: "ATTENDEE_TIMEZONE_LANG_V3",
       booking: resp.data
     });
-
   } catch (err) {
-    console.log("CAL BOOKING ERROR", JSON.stringify({
-      version: "ATTENDEE_TIMEZONE_LANG_V3",
-      payload,
-      responseStatus: err.response?.status,
-      responseData: err.response?.data,
-      message: err.message
-    }, null, 2));
-
     return json(res, 500, {
       error: "Booking failed",
       version: "ATTENDEE_TIMEZONE_LANG_V3",
       message: err.response?.data || err.message,
-      debug: {
-        payload
-      }
+      debug: { payload }
     });
   }
 }
@@ -234,9 +293,16 @@ module.exports = async (req, res) => {
   }
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
-
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const action = url.searchParams.get("action")?.toLowerCase();
+  const action = url.searchParams.get("action")?.toLowerCase() || "";
+
+  if (action === "oauth_start") {
+    return await handleOauthStart(req, res, url);
+  }
+
+  if (action === "oauth_callback") {
+    return await handleOauthCallback(req, res, url);
+  }
 
   if (action === "availability") {
     return await handleAvailability(req, res, body);
@@ -248,6 +314,8 @@ module.exports = async (req, res) => {
 
   return json(res, 400, {
     error: "Unknown action",
-    version: "ATTENDEE_TIMEZONE_LANG_V3"
+    version: "ATTENDEE_TIMEZONE_LANG_V3",
+    received_action: action,
+    received_url: req.url
   });
 };
