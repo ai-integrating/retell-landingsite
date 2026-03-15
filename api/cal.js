@@ -48,7 +48,6 @@ function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
-// converts hair_cut -> hair-cut
 function normalizeSlug(slug = "") {
   return String(slug)
     .trim()
@@ -57,7 +56,6 @@ function normalizeSlug(slug = "") {
     .replace(/_/g, "-");
 }
 
-// resolves slug from body OR header
 function resolveEventTypeSlug(req, body) {
   const args = body.args || body || {};
 
@@ -73,6 +71,15 @@ function resolveEventTypeSlug(req, body) {
 
   const chosen = bodySlug || headerSlug || "";
   return normalizeSlug(chosen);
+}
+
+function getCalRedirectUri() {
+  return (
+    process.env.CAL_REDIRECT_URI ||
+    process.env.CAL_OAUTH_REDIRECT_URI ||
+    process.env.CAL_OAUTH_REDIRECT_URL ||
+    ""
+  );
 }
 
 async function fetchCalMe(accessToken) {
@@ -92,13 +99,17 @@ async function handleOauthStart(req, res, url) {
   const email = asString(url.searchParams.get("email"));
 
   const clientId = process.env.CAL_CLIENT_ID;
-  const redirectUri = process.env.CAL_REDIRECT_URI;
+  const redirectUri = getCalRedirectUri();
 
   if (!clientId || !redirectUri) {
     return json(res, 500, {
       error: "Missing OAuth env vars",
       version: "ATTENDEE_TIMEZONE_LANG_V3",
-      detail: "Set CAL_CLIENT_ID and CAL_REDIRECT_URI"
+      detail: "Need CAL_CLIENT_ID and a redirect URI",
+      debug: {
+        hasClientId: !!clientId,
+        hasRedirectUri: !!redirectUri
+      }
     });
   }
 
@@ -150,18 +161,22 @@ async function handleOauthCallback(req, res, url) {
 
   const clientIdEnv = process.env.CAL_CLIENT_ID;
   const clientSecret = process.env.CAL_CLIENT_SECRET;
-  const redirectUri = process.env.CAL_REDIRECT_URI;
+  const redirectUri = getCalRedirectUri();
 
   if (!clientIdEnv || !clientSecret || !redirectUri) {
     return json(res, 500, {
       error: "Missing OAuth env vars",
       version: "ATTENDEE_TIMEZONE_LANG_V3",
-      detail: "Set CAL_CLIENT_ID, CAL_CLIENT_SECRET, and CAL_REDIRECT_URI"
+      detail: "Need CAL_CLIENT_ID, CAL_CLIENT_SECRET, and redirect URI",
+      debug: {
+        hasClientId: !!clientIdEnv,
+        hasClientSecret: !!clientSecret,
+        hasRedirectUri: !!redirectUri
+      }
     });
   }
 
   try {
-    // 1) Exchange code for tokens
     const tokenResp = await axios.post(
       "https://cal.com/api/oauth/token",
       {
@@ -190,7 +205,6 @@ async function handleOauthCallback(req, res, url) {
       });
     }
 
-    // 2) Fetch connected Cal account details
     const me = await fetchCalMe(accessToken);
 
     const username =
@@ -204,7 +218,6 @@ async function handleOauthCallback(req, res, url) {
       asString(me.user?.timeZone) ||
       asString(me.user?.timezone);
 
-    // 3) Save connected calendar info in KV if we have an agent mapping
     let client_id = "";
     let calKey = "";
     let kvSaved = false;
@@ -220,15 +233,10 @@ async function handleOauthCallback(req, res, url) {
           ...prev,
           username: username || prev.username || undefined,
           timeZone: timeZone || prev.timeZone || undefined,
-
-          // preserve any existing slug config
           eventTypeSlug: prev.eventTypeSlug || undefined,
           eventTypeSlugs: prev.eventTypeSlugs || undefined,
-
-          // optional future-use fields
           accessToken,
           refreshToken: refreshToken || prev.refreshToken || undefined,
-
           email: email || prev.email || undefined,
           connected_at: prev.connected_at || new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -258,44 +266,13 @@ async function handleOauthCallback(req, res, url) {
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
           <title>Calendar Connected</title>
-          <style>
-            body {
-              font-family: Georgia, serif;
-              background: #f8f6f2;
-              color: #123b2f;
-              text-align: center;
-              padding: 60px 24px;
-            }
-            .card {
-              max-width: 620px;
-              margin: 0 auto;
-              background: white;
-              border: 1px solid #d8c27a;
-              padding: 32px;
-              border-radius: 12px;
-              box-shadow: 0 10px 30px rgba(0,0,0,0.06);
-            }
-            h1 {
-              margin-top: 0;
-              color: #123b2f;
-            }
-            p {
-              font-size: 20px;
-              line-height: 1.6;
-            }
-            .small {
-              font-size: 14px;
-              color: #666;
-              margin-top: 18px;
-            }
-          </style>
         </head>
-        <body>
-          <div class="card">
+        <body style="font-family: Georgia, serif; background: #f8f6f2; color: #123b2f; text-align: center; padding: 60px 24px;">
+          <div style="max-width: 620px; margin: 0 auto; background: white; border: 1px solid #d8c27a; padding: 32px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.06);">
             <h1>✅ Calendar Connected</h1>
-            <p>Your calendar authorization was received successfully.</p>
-            <p>You can now return to your email.</p>
-            <p class="small">
+            <p style="font-size: 20px; line-height: 1.6;">Your calendar authorization was received successfully.</p>
+            <p style="font-size: 20px; line-height: 1.6;">You can now return to your email.</p>
+            <p style="font-size: 14px; color: #666; margin-top: 18px;">
               ${username ? `Connected account: ${username}` : ""}
             </p>
           </div>
