@@ -110,6 +110,72 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+// -------------------- SCHEDULING TOOLS --------------------
+function buildSchedulingTools(baseUrl) {
+  return [
+    {
+      type: "custom_function",
+      name: "check_Availability",
+      description: "Check available appointment times for a requested service.",
+      url: `${baseUrl}/api/cal?action=availability&agent_id={{agent_id}}`,
+      method: "POST",
+      speak_during_execution: true,
+      parameters: {
+        type: "object",
+        properties: {
+          start_date: {
+            type: "string",
+            description: "Optional preferred start date in YYYY-MM-DD format. If omitted, use today."
+          },
+          end_date: {
+            type: "string",
+            description: "Optional end date in YYYY-MM-DD format."
+          },
+          service_key: {
+            type: "string",
+            description: "Service requested by the caller. Example: hair_cut"
+          }
+        },
+        required: ["service_key"]
+      }
+    },
+    {
+      type: "custom_function",
+      name: "book_Appointment",
+      description: "Book an appointment for the caller using the selected slot.",
+      url: `${baseUrl}/api/cal?action=book&agent_id={{agent_id}}`,
+      method: "POST",
+      speak_during_execution: true,
+      parameters: {
+        type: "object",
+        properties: {
+          start: {
+            type: "string",
+            description: "The exact appointment slot time returned by availability."
+          },
+          attendee_name: {
+            type: "string",
+            description: "Caller full name."
+          },
+          attendee_email: {
+            type: "string",
+            description: "Caller email for confirmation."
+          },
+          phone: {
+            type: "string",
+            description: "Caller phone number."
+          },
+          service_key: {
+            type: "string",
+            description: "Service requested by the caller. Example: hair_cut"
+          }
+        },
+        required: ["start", "attendee_name", "attendee_email", "service_key"]
+      }
+    }
+  ];
+}
+
 // -------------------- VOICE --------------------
 function resolveVoice(body) {
   const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
@@ -672,12 +738,22 @@ module.exports = async (req, res) => {
       promptSource = "built_prompt";
     }
 
+    const baseUrl = getBaseUrl(req);
+    const schedulingCapable = roleKey !== "emergency";
+
+    const llmPayload = {
+      general_prompt: promptToUse,
+      model: pick(body, ["llm_model"], "gpt-4o-mini"),
+      tool_call_strict_mode: true
+    };
+
+    if (schedulingCapable) {
+      llmPayload.general_tools = buildSchedulingTools(baseUrl);
+    }
+
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
-      {
-        general_prompt: promptToUse,
-        model: pick(body, ["llm_model"], "gpt-4o-mini")
-      },
+      llmPayload,
       { headers: retellHeaders(), timeout: 20000 }
     );
     const llmId = llmResp.data.llm_id || llmResp.data.id;
@@ -697,6 +773,18 @@ module.exports = async (req, res) => {
       { headers: retellHeaders(), timeout: 20000 }
     );
     const agentId = agentResp.data.agent_id || agentResp.data.id;
+
+    if (schedulingCapable) {
+      await axios.patch(
+        `${RETELL_BASE}/update-retell-llm/${llmId}`,
+        {
+          default_dynamic_variables: {
+            agent_id: agentId
+          }
+        },
+        { headers: retellHeaders(), timeout: 20000 }
+      );
+    }
 
     // -------------------- SAVE CALENDAR CONFIG FOR THIS AGENT --------------------
     const calendarConfig = extractCalendarConfig(body);
@@ -739,7 +827,6 @@ module.exports = async (req, res) => {
     );
 
     if (mode === "agent_and_number") {
-      const baseUrl = getBaseUrl(req);
       const buyResp = await axios.post(`${baseUrl}/api/buy-number`, {
         agent_id: agentId,
         business_name: bizName,
@@ -780,6 +867,7 @@ module.exports = async (req, res) => {
       cal_username: calendarConfig.cal_username || "",
       cal_slug: calendarConfig.cal_slug || "",
       timezone: calendarConfig.timezone || "America/New_York",
+      scheduling_capable: schedulingCapable,
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
