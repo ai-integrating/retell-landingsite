@@ -55,6 +55,15 @@ function normalizeSlug(slug = "") {
     .replace(/_/g, "-");
 }
 
+function normalizeServiceKey(v = "") {
+  return String(v)
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_");
+}
+
 function resolveEventTypeSlug(req, body) {
   const args = body.args || body || {};
 
@@ -92,6 +101,71 @@ function getCalRedirectUri() {
   );
 }
 
+// -------------------- AUTO-RESOLVE CAL CONFIG FROM AGENT --------------------
+// Reads:
+// agent:<agent_id>:client -> client_id
+// client:<client_id>:cal  -> { username, eventTypeSlug, eventTypeSlugs, timeZone }
+async function resolveCalFromAgent(req, body) {
+  const args = body.args || body || {};
+
+  const agentId = asString(
+    req.headers["x-agent-id"] ||
+    body.agent_id ||
+    args.agent_id,
+    ""
+  );
+
+  if (!agentId) return null;
+
+  const clientId = await kv.get(`agent:${agentId}:client`);
+  if (!clientId) return null;
+
+  const cal = await kv.get(`client:${clientId}:cal`);
+  if (!cal || typeof cal !== "object") {
+    return {
+      agentId,
+      clientId: String(clientId)
+    };
+  }
+
+  return {
+    agentId,
+    clientId: String(clientId),
+    username: asString(cal.username, ""),
+    eventTypeSlug: asString(cal.eventTypeSlug, ""),
+    eventTypeSlugs:
+      cal.eventTypeSlugs && typeof cal.eventTypeSlugs === "object"
+        ? cal.eventTypeSlugs
+        : null,
+    timeZone: asString(cal.timeZone, "")
+  };
+}
+
+function pickResolvedSlug(body, resolved) {
+  if (!resolved) return "";
+
+  if (resolved.eventTypeSlug) {
+    return normalizeSlug(resolved.eventTypeSlug);
+  }
+
+  const args = body.args || body || {};
+  const serviceKey = normalizeServiceKey(
+    args.service_key ||
+    args.serviceKey ||
+    args.service
+  );
+
+  if (
+    serviceKey &&
+    resolved.eventTypeSlugs &&
+    resolved.eventTypeSlugs[serviceKey]
+  ) {
+    return normalizeSlug(resolved.eventTypeSlugs[serviceKey]);
+  }
+
+  return "";
+}
+
 // -------------------- OAUTH HANDLERS (FROM OLD WORKING FLOW) --------------------
 async function handleOauthStart(req, res, url) {
   const agent_id = asString(url.searchParams.get("agent_id"));
@@ -118,7 +192,6 @@ async function handleOauthStart(req, res, url) {
     });
   }
 
-  // old working nonce state pattern
   const nonce = crypto.randomBytes(16).toString("hex");
   await kv.set(
     `cal:oauth:state:${nonce}`,
@@ -167,7 +240,6 @@ async function handleOauthCallback(req, res, url) {
     return json(res, 400, { error: "Invalid or expired state" });
   }
 
-  // one-time use
   await kv.del(`cal:oauth:state:${state}`);
 
   const clientId = process.env.CAL_CLIENT_ID;
@@ -222,7 +294,6 @@ async function handleOauthCallback(req, res, url) {
       });
     }
 
-    // old working storage pattern
     await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
 
     if (emailLower && isValidEmail(emailLower)) {
@@ -236,7 +307,6 @@ async function handleOauthCallback(req, res, url) {
       storedEmailKey: emailLower ? tokenKeyForEmail(emailLower) : null
     });
 
-    // old working success behavior
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
     return res.end();
   } catch (err) {
@@ -253,15 +323,33 @@ async function handleOauthCallback(req, res, url) {
   }
 }
 
-// -------------------- CURRENT AVAILABILITY HANDLER (UNCHANGED) --------------------
+// -------------------- CURRENT AVAILABILITY HANDLER (MINIMALLY PATCHED) --------------------
 async function handleAvailability(req, res, body) {
-  const username = req.headers["x-cal-username"];
-  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  const resolved = await resolveCalFromAgent(req, body);
+
+  let username = req.headers["x-cal-username"];
+  let eventTypeSlug = resolveEventTypeSlug(req, body);
+
+  if (!username && resolved?.username) {
+    username = resolved.username;
+  }
+
+  if (!eventTypeSlug) {
+    eventTypeSlug = pickResolvedSlug(body, resolved);
+  }
 
   if (!username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing Client Config",
-      detail: "Ensure X-Cal-Username and a valid event slug are provided."
+      detail: "Ensure X-Cal-Username and a valid event slug are provided.",
+      debug: {
+        hasHeaderUsername: !!req.headers["x-cal-username"],
+        hasResolvedUsername: !!resolved?.username,
+        hasHeaderOrBodySlug: !!resolveEventTypeSlug(req, body),
+        hasResolvedSlug: !!pickResolvedSlug(body, resolved),
+        agentId: resolved?.agentId || null,
+        clientId: resolved?.clientId || null
+      }
     });
   }
 
@@ -291,7 +379,10 @@ async function handleAvailability(req, res, body) {
     username,
     eventTypeSlug,
     start,
-    end
+    end,
+    resolvedFromAgent: !!resolved,
+    agentId: resolved?.agentId || null,
+    clientId: resolved?.clientId || null
   });
 
   try {
@@ -322,10 +413,20 @@ async function handleAvailability(req, res, body) {
   }
 }
 
-// -------------------- CURRENT BOOK HANDLER (UNCHANGED) --------------------
+// -------------------- CURRENT BOOK HANDLER (MINIMALLY PATCHED) --------------------
 async function handleBook(req, res, body) {
-  const username = req.headers["x-cal-username"];
-  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  const resolved = await resolveCalFromAgent(req, body);
+
+  let username = req.headers["x-cal-username"];
+  let eventTypeSlug = resolveEventTypeSlug(req, body);
+
+  if (!username && resolved?.username) {
+    username = resolved.username;
+  }
+
+  if (!eventTypeSlug) {
+    eventTypeSlug = pickResolvedSlug(body, resolved);
+  }
 
   const args = body.args || body;
 
@@ -349,6 +450,9 @@ async function handleBook(req, res, body) {
         hasEmail: !!email,
         hasUser: !!username,
         hasEventSlug: !!eventTypeSlug,
+        resolvedFromAgent: !!resolved,
+        agentId: resolved?.agentId || null,
+        clientId: resolved?.clientId || null,
         body
       }
     });
@@ -375,7 +479,10 @@ async function handleBook(req, res, body) {
 
   console.log("CAL BOOKING REQUEST", JSON.stringify({
     version: "ATTENDEE_TIMEZONE_LANG_V3",
-    payload
+    payload,
+    resolvedFromAgent: !!resolved,
+    agentId: resolved?.agentId || null,
+    clientId: resolved?.clientId || null
   }, null, 2));
 
   try {
