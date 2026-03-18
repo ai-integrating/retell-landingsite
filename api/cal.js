@@ -324,6 +324,64 @@ async function handleOauthCallback(req, res, url) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
+    // NEW: fetch the connected Cal profile so we can store the real username in KV
+    let calUsername = "";
+    let calTimeZone = "";
+
+    try {
+      const meResp = await axios.get("https://api.cal.com/v2/me", {
+        headers: {
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+          "cal-api-version": CAL_API_VERSION
+        }
+      });
+
+      const me = meResp.data?.data || meResp.data || {};
+      calUsername =
+        asString(me.username) ||
+        asString(me?.user?.username) ||
+        "";
+
+      calTimeZone =
+        asString(me.timeZone) ||
+        asString(me?.user?.timeZone) ||
+        "";
+    } catch (profileErr) {
+      console.error("CAL PROFILE FETCH ERROR", {
+        agent_id,
+        message: extractCalError(profileErr)
+      });
+    }
+
+    // NEW: save username/timezone onto the mapped client cal config
+    const mappedClientId = await kv.get(`agent:${agent_id}:client`);
+
+    if (mappedClientId && calUsername) {
+      const calKey = `client:${mappedClientId}:cal`;
+      const prevCal = (await kv.get(calKey)) || {};
+
+      await kv.set(calKey, {
+        ...prevCal,
+        username: calUsername,
+        ...(calTimeZone ? { timeZone: calTimeZone } : {}),
+        updated_at: new Date().toISOString()
+      });
+
+      console.log("CAL PROFILE STORED", {
+        agent_id,
+        client_id: String(mappedClientId),
+        username: calUsername,
+        timeZone: calTimeZone || null,
+        calKey
+      });
+    } else {
+      console.log("CAL PROFILE NOT STORED", {
+        agent_id,
+        mappedClientId: mappedClientId ? String(mappedClientId) : null,
+        calUsername: calUsername || null
+      });
+    }
+
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
     return res.end();
   } catch (err) {
