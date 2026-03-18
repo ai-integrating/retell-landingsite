@@ -675,15 +675,10 @@ module.exports = async (req, res) => {
     const baseUrl = getBaseUrl(req);
     const schedulingCapable = roleKey !== "emergency";
 
-    const llmPayload = {
-      general_prompt: promptToUse,
-      model: pick(body, ["llm_model"], "gpt-4o-mini"),
-      tool_call_strict_mode: true
-    };
-
-    if (schedulingCapable) {
-      llmPayload.general_tools = buildSchedulingTools(baseUrl);
-    }
+const llmPayload = {
+  general_prompt: promptToUse,
+  model: pick(body, ["llm_model"], "gpt-4o-mini")
+};
 
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
@@ -707,18 +702,6 @@ module.exports = async (req, res) => {
       { headers: retellHeaders(), timeout: 20000 }
     );
     const agentId = agentResp.data.agent_id || agentResp.data.id;
-
-    if (schedulingCapable) {
-      await axios.patch(
-        `${RETELL_BASE}/update-retell-llm/${llmId}`,
-        {
-          default_dynamic_variables: {
-            agent_id: agentId
-          }
-        },
-        { headers: retellHeaders(), timeout: 20000 }
-      );
-    }
 
     // -------------------- SAVE CALENDAR CONFIG FOR THIS AGENT --------------------
     const calendarConfig = extractCalendarConfig(body);
