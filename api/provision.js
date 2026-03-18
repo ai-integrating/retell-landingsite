@@ -12,6 +12,7 @@ function setCors(res) {
 // -------------------- BODY --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
+
   if (req.body && typeof req.body === "string") {
     try {
       return JSON.parse(req.body);
@@ -19,6 +20,7 @@ async function readJsonBody(req) {
       return {};
     }
   }
+
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
@@ -37,7 +39,11 @@ async function readJsonBody(req) {
 function pick(obj, keys, fallback = undefined) {
   for (const k of keys) {
     let val = obj?.[k];
-    if (val && typeof val === "object" && "output" in val) val = val.output;
+
+    if (val && typeof val === "object" && "output" in val) {
+      val = val.output;
+    }
+
     if (val === undefined || val === null) continue;
 
     if (typeof val === "string") {
@@ -47,8 +53,10 @@ function pick(obj, keys, fallback = undefined) {
       if (s.toLowerCase() === "undefined") continue;
       return s;
     }
+
     return val;
   }
+
   return fallback;
 }
 
@@ -57,18 +65,46 @@ const RETELL_BASE = "https://api.retellai.com";
 
 function retellHeaders() {
   const apiKey = process.env.RETELL_API_KEY;
-  if (!apiKey) throw new Error("Missing RETELL_API_KEY in Environment Variables.");
+  if (!apiKey) {
+    throw new Error("Missing RETELL_API_KEY in Environment Variables.");
+  }
+
   return {
     Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
   };
+}
+
+// Pull the exact working tools from a manually configured template LLM
+async function getTemplateLlmTools(templateLlmId) {
+  const id = String(templateLlmId || "").trim();
+  if (!id) return null;
+
+  const resp = await axios.get(
+    `${RETELL_BASE}/get-retell-llm/${encodeURIComponent(id)}`,
+    {
+      headers: retellHeaders(),
+      timeout: 20000,
+    }
+  );
+
+  const tools = resp.data?.general_tools;
+  return Array.isArray(tools) && tools.length ? tools : null;
 }
 
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
-  if (r.includes("full staff") || r.includes("full_staff") || r.includes("operations") || r.includes("operator"))
+
+  if (
+    r.includes("full staff") ||
+    r.includes("full_staff") ||
+    r.includes("operations") ||
+    r.includes("operator")
+  ) {
     return "operations";
+  }
+
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
   if (r.includes("intake")) return "intake";
@@ -105,6 +141,7 @@ function tierForRole(roleKey) {
 function getBaseUrl(req) {
   const envBase = process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || "";
   if (envBase) return String(envBase).replace(/\/+$/, "");
+
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
@@ -112,8 +149,13 @@ function getBaseUrl(req) {
 
 // -------------------- VOICE --------------------
 function resolveVoice(body) {
-  const tone = String(pick(body, ["voice_tone", "tone"], "warm")).toLowerCase().trim();
-  const gender = String(pick(body, ["agent_gender", "voice_gender", "gender"], "female"))
+  const tone = String(pick(body, ["voice_tone", "tone"], "warm"))
+    .toLowerCase()
+    .trim();
+
+  const gender = String(
+    pick(body, ["agent_gender", "voice_gender", "gender"], "female")
+  )
     .toLowerCase()
     .trim();
 
@@ -128,7 +170,9 @@ function resolveVoice(body) {
 
   const voiceKey = `${gender}_${tone}`;
   const voiceId =
-    VOICE_MAP[voiceKey] || process.env.DEFAULT_VOICE_ID || "11fb5674c35b44638d387693994e63f4";
+    VOICE_MAP[voiceKey] ||
+    process.env.DEFAULT_VOICE_ID ||
+    "11fb5674c35b44638d387693994e63f4";
 
   return { voiceKey, voiceId, gender, tone };
 }
@@ -144,6 +188,7 @@ function normalizeUrl(url) {
 
 function cleanScrapedText(raw) {
   if (!raw) return "";
+
   let text = String(raw);
   text = text.replace(/!\[.*?\]\(.*?\)\s*/g, "");
   text = text.replace(/Markdown Content:\s*/gi, "");
@@ -151,32 +196,46 @@ function cleanScrapedText(raw) {
   text = text.replace(/\r/g, "");
   text = text.replace(/[ \t]+\n/g, "\n");
   text = text.replace(/\n{3,}/g, "\n\n");
+
   return text.trim();
 }
 
 function extractWebsiteFromText(text) {
   if (!text) return "";
+
   const s = String(text);
   const m1 = s.match(/website\s*[:=]\s*(https?:\/\/[^\s]+)/i);
   if (m1?.[1]) return m1[1].trim();
+
   const m2 = s.match(/website\s*[:=]\s*([a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
   if (m2?.[1]) return m2[1].trim();
+
   return "";
 }
 
 async function scrapeWebsiteText(url) {
   const u = normalizeUrl(url);
   if (!u) return { ok: false, text: "", reason: "no_url" };
+
   const scrapeUrl = `https://r.jina.ai/${u}`;
+
   try {
     const resp = await axios.get(scrapeUrl, {
       timeout: 15000,
       headers: { "X-Return-Format": "markdown" },
     });
+
     let text = cleanScrapedText(resp.data || "");
     const MAX_CHARS = 1800;
-    if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
-    if (text.length < 80) return { ok: false, text: "", reason: "too_short" };
+
+    if (text.length > MAX_CHARS) {
+      text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
+    }
+
+    if (text.length < 80) {
+      return { ok: false, text: "", reason: "too_short" };
+    }
+
     return { ok: true, text, reason: "ok" };
   } catch (e) {
     return {
@@ -224,28 +283,36 @@ function normalizeServiceKeyToSlug(v) {
 }
 
 function extractCalendarConfig(body) {
-  const calUsername = pick(body, [
-    "cal_username",
-    "calendar_username",
-    "calcom_username",
-    "cal_com_username",
-    "booking_username",
-  ], "");
+  const calUsername = pick(
+    body,
+    [
+      "cal_username",
+      "calendar_username",
+      "calcom_username",
+      "cal_com_username",
+      "booking_username",
+    ],
+    ""
+  );
 
-  const calSlugRaw = pick(body, [
-    "cal_slug",
-    "calendar_slug",
-    "event_type_slug",
-    "eventTypeSlug",
-    "service_key",
-    "booking_service_key",
-  ], "");
+  const calSlugRaw = pick(
+    body,
+    [
+      "cal_slug",
+      "calendar_slug",
+      "event_type_slug",
+      "eventTypeSlug",
+      "service_key",
+      "booking_service_key",
+    ],
+    ""
+  );
 
-  const serviceKey = pick(body, [
-    "service_key",
-    "booking_service_key",
-    "default_service_key",
-  ], calSlugRaw || "");
+  const serviceKey = pick(
+    body,
+    ["service_key", "booking_service_key", "default_service_key"],
+    calSlugRaw || ""
+  );
 
   const timeZone = normalizeTimeZone(
     pick(body, ["timezone", "tz", "time_zone"], "America/New_York")
@@ -261,7 +328,11 @@ function extractCalendarConfig(body) {
 
 // -------------------- SETUP BLOCKS (GLOBAL + ROLE) --------------------
 function getGlobalSetupBlock(body) {
-  return pick(body, ["global_setup", "business_setup", "company_setup", "global_info"], "");
+  return pick(
+    body,
+    ["global_setup", "business_setup", "company_setup", "global_info"],
+    ""
+  );
 }
 
 function buildGlobalSetupFromFields(body) {
@@ -295,7 +366,12 @@ function buildGlobalSetupFromFields(body) {
     `- If unsure about a service detail, take a message rather than guessing.`,
   ];
 
-  return [`GLOBAL BUSINESS INFO (internal reference):`, ...facts.map((l) => `- ${l}`), ``, ...instructions].join("\n");
+  return [
+    `GLOBAL BUSINESS INFO (internal reference):`,
+    ...facts.map((l) => `- ${l}`),
+    ``,
+    ...instructions,
+  ].join("\n");
 }
 
 function getRoleSetupBlock(body, roleKey) {
@@ -329,7 +405,13 @@ function buildSetupForRole(body, roleKey) {
 
 function formatSetupBlock(setupText) {
   if (!setupText) return "";
-  return `BUSINESS SETUP (owner answers from onboarding form — internal rules):\n${setupText}\n\nIMPORTANT:\n- Do NOT ask the caller these onboarding questions.\n- Use these answers as your operating instructions.`;
+
+  return `BUSINESS SETUP (owner answers from onboarding form — internal rules):
+${setupText}
+
+IMPORTANT:
+- Do NOT ask the caller these onboarding questions.
+- Use these answers as your operating instructions.`;
 }
 
 // -------------------- URGENCY FALLBACKS (CODED) --------------------
@@ -363,13 +445,18 @@ function buildUrgencyFallbackBlock(roleKey) {
     `  - callback_needed: yes`,
     `  - a short "urgent_reason" phrase (e.g., "requested immediate callback" / "leak reported")`,
   ];
+
   const dispatchOnly = [
     ``,
     `EMERGENCY DISPATCH UPGRADE BEHAVIOR (only if your BUSINESS SETUP includes dispatch rules/contacts):`,
     `- If dispatch contacts/rules exist in BUSINESS SETUP, follow them precisely.`,
     `- If no dispatch contact is available, still follow the fallback above and flag as URGENT.`,
   ];
-  if (roleKey === "emergency" || roleKey === "operations") return common.concat(dispatchOnly).join("\n");
+
+  if (roleKey === "emergency" || roleKey === "operations") {
+    return common.concat(dispatchOnly).join("\n");
+  }
+
   return common.join("\n");
 }
 
@@ -421,6 +508,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
+
     scheduler: [
       `ROLE: You are ${agentName}, the scheduling assistant for ${bizName}.`,
       `RULES:`,
@@ -428,6 +516,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
+
     intake: [
       `ROLE: You are ${agentName}, the intake specialist for ${bizName}.`,
       `RULES:`,
@@ -435,6 +524,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
+
     emergency: [
       `ROLE: You are ${agentName}, the emergency dispatcher for ${bizName}.`,
       `RULES:`,
@@ -443,6 +533,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
+
     lead_revival: [
       `ROLE: You are ${agentName}, the lead revival specialist for ${bizName}.`,
       `RULES:`,
@@ -450,6 +541,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
+
     operations: [
       `ROLE: You are ${agentName}, the operations assistant for ${bizName}.`,
       `RULES:`,
@@ -460,6 +552,7 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       directionLogic,
     ].join("\n"),
   };
+
   return bases[roleKey] || bases.receptionist;
 }
 
@@ -467,12 +560,16 @@ function buildBusinessContext(body) {
   const tz = pick(body, ["timezone", "tz"], "");
   const hours = pick(body, ["business_hours", "hours"], "");
   const industry = pick(body, ["industry"], "");
+
   const lines = [];
   if (industry) lines.push(`Industry: ${industry}`);
   if (tz) lines.push(`Time Zone: ${tz}`);
   if (hours) lines.push(`Business Hours: ${hours}`);
+
   if (!lines.length) return "";
-  return `BUSINESS CONTEXT:\n- ${lines.join("\n- ")}`;
+
+  return `BUSINESS CONTEXT:
+- ${lines.join("\n- ")}`;
 }
 
 // ✅ Updated scheduler block
@@ -541,7 +638,9 @@ async function sleep(ms) {
 }
 
 function getSubmissionId(body) {
-  return String(pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")).trim();
+  return String(
+    pick(body, ["jotform_submission_id", "submission_id", "idempotency_key", "job_id"], "")
+  ).trim();
 }
 
 async function getExistingProvision(idemKey) {
@@ -560,7 +659,16 @@ async function releaseLock(lockKey) {
   } catch {}
 }
 
-function normalizeProvisionRecord({ mode, llmId, agentId, phoneNumber, phoneNumberId, numberTierFinal, voiceKey, roleKey }) {
+function normalizeProvisionRecord({
+  mode,
+  llmId,
+  agentId,
+  phoneNumber,
+  phoneNumberId,
+  numberTierFinal,
+  voiceKey,
+  roleKey,
+}) {
   return {
     mode,
     llm_id: llmId,
@@ -579,6 +687,7 @@ module.exports = async (req, res) => {
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(200).end();
+
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
@@ -611,13 +720,22 @@ module.exports = async (req, res) => {
       for (let i = 0; i < 8; i++) {
         await sleep(600);
         const after = await getExistingProvision(idemKey);
-        if (after) return res.status(200).json({ ok: true, idempotent: true, ...after });
+        if (after) {
+          return res.status(200).json({ ok: true, idempotent: true, ...after });
+        }
       }
+
       return res.status(409).json({ ok: false, error: "Provisioning in progress" });
     }
 
-    const purchaseNumber = String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
-    const mode = String(pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")).toLowerCase().trim();
+    const purchaseNumber =
+      String(pick(body, ["purchase_number", "buy_number"], "false")).toLowerCase() === "true";
+
+    const mode = String(
+      pick(body, ["mode"], purchaseNumber ? "agent_and_number" : "agent_only")
+    )
+      .toLowerCase()
+      .trim();
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
     const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
@@ -631,9 +749,13 @@ module.exports = async (req, res) => {
     const setupSection = formatSetupBlock([globalSetup, roleSetup].filter(Boolean).join("\n\n"));
 
     let website = pick(body, ["website", "web", "website_url", "site", "url"], "");
-    if (!website) website = extractWebsiteFromText(globalSetup);
+    if (!website) {
+      website = extractWebsiteFromText(globalSetup);
+    }
 
-    const scrape = website ? await scrapeWebsiteText(website) : { ok: false, text: "", reason: "no_url" };
+    const scrape = website
+      ? await scrapeWebsiteText(website)
+      : { ok: false, text: "", reason: "no_url" };
 
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
@@ -650,9 +772,12 @@ module.exports = async (req, res) => {
       ].join("\n");
 
       const outboundRoles = new Set(["receptionist", "lead_revival", "operations"]);
-      if (outboundRoles.has(roleKey)) base = [base, outboundRules].join("\n\n");
+      if (outboundRoles.has(roleKey)) {
+        base = [base, outboundRules].join("\n\n");
+      }
 
       const urgencyFallback = buildUrgencyFallbackBlock(roleKey);
+
       const tierProtection =
         roleKey === "receptionist"
           ? buildReceptionistNoBookingBlock()
@@ -661,6 +786,7 @@ module.exports = async (req, res) => {
           : "";
 
       const ctx = buildBusinessContext(body);
+
       const websiteSection = scrape.ok
         ? `WEBSITE KNOWLEDGE:\n${scrape.text}`
         : `WEBSITE KNOWLEDGE: (Not available: ${scrape.reason})`;
@@ -675,16 +801,24 @@ module.exports = async (req, res) => {
     const baseUrl = getBaseUrl(req);
     const schedulingCapable = roleKey !== "emergency";
 
-const llmPayload = {
-  general_prompt: promptToUse,
-  model: pick(body, ["llm_model"], "gpt-4o-mini")
-};
+    // ✅ Optional: clone tools from a working template LLM if provided
+    const templateLlmId = pick(body, ["template_llm_id", "retell_template_llm_id"], "");
+    const templateTools = templateLlmId
+      ? await getTemplateLlmTools(templateLlmId)
+      : null;
+
+    const llmPayload = {
+      general_prompt: promptToUse,
+      model: pick(body, ["llm_model"], "gpt-4o-mini"),
+      ...(templateTools ? { general_tools: templateTools } : {}),
+    };
 
     const llmResp = await axios.post(
       `${RETELL_BASE}/create-retell-llm`,
       llmPayload,
       { headers: retellHeaders(), timeout: 20000 }
     );
+
     const llmId = llmResp.data.llm_id || llmResp.data.id;
 
     const agentResp = await axios.post(
@@ -692,15 +826,19 @@ const llmPayload = {
       {
         agent_name: `${bizName} - ${agentName} (${roleKey})`,
         voice_id: voiceId,
-        response_engine: { type: "retell-llm", llm_id: llmId },
+        response_engine: {
+          type: "retell-llm",
+          llm_id: llmId,
+        },
         metadata: {
           business_name: bizName,
           agent_role: roleKey,
-          submission_id: submissionId
+          submission_id: submissionId,
         },
       },
       { headers: retellHeaders(), timeout: 20000 }
     );
+
     const agentId = agentResp.data.agent_id || agentResp.data.id;
 
     // -------------------- SAVE CALENDAR CONFIG FOR THIS AGENT --------------------
@@ -738,7 +876,7 @@ const llmPayload = {
         phoneNumberId,
         numberTierFinal,
         voiceKey,
-        roleKey
+        roleKey,
       }),
       { ex: 60 * 60 * 24 * 30 }
     );
@@ -748,7 +886,7 @@ const llmPayload = {
         agent_id: agentId,
         business_name: bizName,
         idempotency_key: submissionId,
-        number_tier: numberTierFinal
+        number_tier: numberTierFinal,
       });
 
       if (buyResp?.data?.ok) {
@@ -765,7 +903,7 @@ const llmPayload = {
             phoneNumberId,
             numberTierFinal,
             voiceKey,
-            roleKey
+            roleKey,
           }),
           { ex: 60 * 60 * 24 * 30 }
         );
@@ -785,10 +923,17 @@ const llmPayload = {
       cal_slug: calendarConfig.cal_slug || "",
       timezone: calendarConfig.timezone || "America/New_York",
       scheduling_capable: schedulingCapable,
+      tools_cloned_from_template: !!templateTools,
+      template_llm_id_used: templateLlmId || "",
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: err?.response?.data || err.message,
+    });
   } finally {
-    if (lockKey) await releaseLock(lockKey);
+    if (lockKey) {
+      await releaseLock(lockKey);
+    }
   }
 };
