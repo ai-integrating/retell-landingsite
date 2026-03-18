@@ -53,6 +53,23 @@ function asString(v, fallback = "") {
   return s ? s : fallback;
 }
 
+function normalizeSlug(slug = "") {
+  return String(slug)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-");
+}
+
+function normalizeServiceKey(v = "") {
+  return String(v)
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_");
+}
+
 // Shallow-clean an object map:
 // - Only keep string values
 // - Trim
@@ -61,9 +78,9 @@ function cleanStringMap(obj) {
   if (!obj || typeof obj !== "object") return null;
   const out = {};
   for (const k of Object.keys(obj)) {
-    const key = asString(k, "");
+    const key = normalizeServiceKey(k);
     if (!key) continue;
-    const val = asString(obj[k], "");
+    const val = normalizeSlug(obj[k]);
     if (!val) continue;
     out[key] = val;
   }
@@ -74,57 +91,79 @@ function cleanStringMap(obj) {
 // - body.cal = { username, eventTypeSlug, eventTypeSlugs, timeZone }
 // - OR flat keys: cal_username, cal_event_slug, cal_eventTypeSlug, cal_timezone
 // - OR mapping at body.cal_eventTypeSlugs (object)
-function extractCalConfig(body) {
+// - OR additional common aliases: username, calUsername, eventTypeSlug, event_slug, timeZone
+function extractCalConfig(body, existingCal = {}) {
   const calObj = body?.cal && typeof body.cal === "object" ? body.cal : {};
 
   const username = asString(
     calObj.username,
-    asString(body?.cal_username, asString(body?.CAL_USERNAME, ""))
+    asString(
+      body?.cal_username,
+      asString(
+        body?.CAL_USERNAME,
+        asString(
+          body?.username,
+          asString(body?.calUsername, asString(existingCal?.username, ""))
+        )
+      )
+    )
   );
 
-  // Legacy: single event type slug
-  const eventTypeSlug = asString(
-    calObj.eventTypeSlug,
+  const eventTypeSlug = normalizeSlug(
     asString(
-      body?.cal_eventTypeSlug,
-      asString(body?.cal_event_slug, asString(body?.CAL_EVENT_SLUG, ""))
+      calObj.eventTypeSlug,
+      asString(
+        calObj.event_slug,
+        asString(
+          body?.cal_eventTypeSlug,
+          asString(
+            body?.cal_event_slug,
+            asString(
+              body?.CAL_EVENT_SLUG,
+              asString(
+                body?.eventTypeSlug,
+                asString(body?.event_slug, asString(existingCal?.eventTypeSlug, ""))
+              )
+            )
+          )
+        )
+      )
     )
   );
 
   const timeZone = asString(
     calObj.timeZone,
-    asString(body?.cal_timezone, asString(body?.CAL_TIMEZONE, ""))
+    asString(
+      body?.cal_timezone,
+      asString(
+        body?.CAL_TIMEZONE,
+        asString(body?.timeZone, asString(existingCal?.timeZone, ""))
+      )
+    )
   );
 
-  // New: per-service slugs mapping (recommended for salons)
-  // Accept either:
-  // - cal.eventTypeSlugs = { haircut: "haircut-30", color: "color-60", ... }
-  // - body.cal_eventTypeSlugs = { ... }
   const eventTypeSlugsRaw =
     (calObj.eventTypeSlugs && typeof calObj.eventTypeSlugs === "object"
       ? calObj.eventTypeSlugs
       : null) ||
     (body?.cal_eventTypeSlugs && typeof body.cal_eventTypeSlugs === "object"
       ? body.cal_eventTypeSlugs
-      : null);
+      : null) ||
+    (body?.eventTypeSlugs && typeof body.eventTypeSlugs === "object"
+      ? body.eventTypeSlugs
+      : null) ||
+    existingCal?.eventTypeSlugs ||
+    null;
 
   const eventTypeSlugs = cleanStringMap(eventTypeSlugsRaw);
 
-  // Only return a config object if at least one value was supplied
   const hasAny = !!(username || eventTypeSlug || eventTypeSlugs || timeZone);
   if (!hasAny) return null;
 
   return {
     username: username || undefined,
-
-    // Keep legacy single-slug support (useful as a fallback default slug)
     eventTypeSlug: eventTypeSlug || undefined,
-
-    // New mapping support (serviceKey -> eventTypeSlug)
-    // Example:
-    // eventTypeSlugs: { haircut: "haircut-30", color: "color-60" }
     eventTypeSlugs: eventTypeSlugs || undefined,
-
     timeZone: timeZone || undefined,
     updated_at: new Date().toISOString(),
   };
@@ -133,7 +172,6 @@ function extractCalConfig(body) {
 // -------------------- AUTH --------------------
 function isAdmin(body) {
   const secret = process.env.KV_ADMIN_SECRET;
-  // Safer default: if secret isn't set, DO NOT allow writes.
   if (!secret) return false;
 
   const provided = asString(body?.admin_secret, "");
@@ -161,27 +199,27 @@ module.exports = async function handler(req, res) {
 
     const agent_id = asString(body?.agent_id, "");
     const client_id = asString(body?.client_id, "");
-    const plan = asString(body?.plan, ""); // optional
+    const plan = asString(body?.plan, "");
 
     if (!agent_id || !client_id) {
       return okJson(res, 400, { ok: false, error: "Missing agent_id or client_id" });
     }
 
     const mapKey = `agent:${agent_id}:client`;
-    const existing = await kv.get(mapKey);
-
-    // Prepare optional cal config write
-    const calConfig = extractCalConfig(body);
     const calKey = `client:${client_id}:cal`;
+
+    const existing = await kv.get(mapKey);
+    const prevCal = (await kv.get(calKey)) || {};
+    const calConfig = extractCalConfig(body, prevCal);
 
     // If already set to same client -> idempotent success
     if (existing && String(existing) === client_id) {
       if (plan) await kv.set(`plan:${agent_id}`, plan);
 
+      let mergedCal = null;
       if (calConfig) {
-        // Merge on top of existing cal config (don't wipe missing fields)
-        const prev = (await kv.get(calKey)) || {};
-        await kv.set(calKey, { ...prev, ...calConfig });
+        mergedCal = { ...prevCal, ...calConfig };
+        await kv.set(calKey, mergedCal);
       }
 
       return okJson(res, 200, {
@@ -192,6 +230,22 @@ module.exports = async function handler(req, res) {
         plan_set: !!plan,
         cal_set: !!calConfig,
         cal_key: calConfig ? calKey : undefined,
+        cal_fields: calConfig
+          ? {
+              username: !!mergedCal?.username,
+              eventTypeSlug: !!mergedCal?.eventTypeSlug,
+              eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
+              timeZone: !!mergedCal?.timeZone,
+            }
+          : undefined,
+        cal_preview: calConfig
+          ? {
+              username: mergedCal?.username || null,
+              eventTypeSlug: mergedCal?.eventTypeSlug || null,
+              eventTypeSlugs: mergedCal?.eventTypeSlugs || null,
+              timeZone: mergedCal?.timeZone || null,
+            }
+          : undefined,
       });
     }
 
@@ -211,9 +265,10 @@ module.exports = async function handler(req, res) {
 
     if (plan) await kv.set(`plan:${agent_id}`, plan);
 
+    let mergedCal = null;
     if (calConfig) {
-      const prev = (await kv.get(calKey)) || {};
-      await kv.set(calKey, { ...prev, ...calConfig });
+      mergedCal = { ...prevCal, ...calConfig };
+      await kv.set(calKey, mergedCal);
     }
 
     return okJson(res, 200, {
@@ -224,13 +279,20 @@ module.exports = async function handler(req, res) {
       plan_set: !!plan,
       cal_set: !!calConfig,
       cal_key: calConfig ? calKey : undefined,
-      // helpful debug: what fields were accepted
       cal_fields: calConfig
         ? {
-            username: !!calConfig.username,
-            eventTypeSlug: !!calConfig.eventTypeSlug,
-            eventTypeSlugs: !!calConfig.eventTypeSlugs,
-            timeZone: !!calConfig.timeZone,
+            username: !!mergedCal?.username,
+            eventTypeSlug: !!mergedCal?.eventTypeSlug,
+            eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
+            timeZone: !!mergedCal?.timeZone,
+          }
+        : undefined,
+      cal_preview: calConfig
+        ? {
+            username: mergedCal?.username || null,
+            eventTypeSlug: mergedCal?.eventTypeSlug || null,
+            eventTypeSlugs: mergedCal?.eventTypeSlugs || null,
+            timeZone: mergedCal?.timeZone || null,
           }
         : undefined,
     });
