@@ -338,7 +338,12 @@ async function handleOauthCallback(req, res, url) {
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
 
-  let username = asString(req.headers["x-cal-username"]);
+  let username = asString(
+    req.headers["x-cal-username"] ||
+      body.username ||
+      body.args?.username
+  );
+
   let eventTypeSlug = resolveEventTypeSlug(req, body);
 
   if (!username && resolved?.username) username = resolved.username;
@@ -407,7 +412,12 @@ async function handleAvailability(req, res, body) {
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
 
-  let username = asString(req.headers["x-cal-username"]);
+  let username = asString(
+    req.headers["x-cal-username"] ||
+      body.username ||
+      body.args?.username
+  );
+
   let eventTypeSlug = resolveEventTypeSlug(req, body);
 
   if (!username && resolved?.username) username = resolved.username;
