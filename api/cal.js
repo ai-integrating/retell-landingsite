@@ -1,5 +1,4 @@
 const axios = require("axios");
-const crypto = require("crypto");
 const { kv } = require("@vercel/kv");
 
 const CAL_API_VERSION = "2024-09-04";
@@ -40,79 +39,68 @@ function normalizeSlug(slug = "") {
   return String(slug).trim().toLowerCase().replace(/\s+/g, "-").replace(/_/g, "-");
 }
 
-function resolveEventTypeSlug(req, body) {
-  const args = body.args || body || {};
-  const chosen = args.eventTypeSlug || args.event_slug || args.eventSlug || args.slug || args.service_key || req.headers["x-cal-slug"] || "";
-  return normalizeSlug(chosen);
-}
-
-// -------------------- KV LOOKUP --------------------
+// -------------------- DYNAMIC KV LOOKUP --------------------
 async function resolveCalFromAgent(req, body) {
   const args = body.args || body || {};
-  const agentId = asString(req.headers["x-agent-id"] || body.agent_id || args.agent_id, "");
-  if (!agentId) return null;
-  const clientId = await kv.get(`agent:${agentId}:client`);
-  if (!clientId) return null;
-  const cal = await kv.get(`client:${clientId}:cal`);
-  return cal && typeof cal === "object" ? cal : null;
-}
+  
+  // Try to find Agent ID in every possible spot
+  const agentId = asString(
+    req.headers["x-agent-id"] || 
+    req.headers["agent-id"] || 
+    body.agent_id || 
+    args.agent_id, 
+    ""
+  );
 
-// -------------------- AVAILABILITY --------------------
-async function handleAvailability(req, res, body) {
-  const resolved = await resolveCalFromAgent(req, body);
-  let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username || resolved?.username);
-  let eventTypeSlug = resolveEventTypeSlug(req, body);
-
-  if (!username || !eventTypeSlug) return json(res, 400, { error: "Missing Config" });
-
-  const args = body.args || body || {};
-  const start = asString(args.start_date, new Date().toISOString().slice(0, 10));
-  const end = asString(args.end_date, new Date(Date.now() + 604800000).toISOString().slice(0, 10));
-
-  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+  if (!agentId) return { error: "no_agent_id_provided" };
 
   try {
-    const resp = await axios.get(url, { headers: { "cal-api-version": CAL_API_VERSION, Authorization: `Bearer ${process.env.CAL_API_KEY}` } });
-    const starts = Object.values(resp.data?.data || {}).flat().map((s) => s.start).filter(Boolean);
-    return json(res, 200, { ok: true, available_slots: starts });
-  } catch (err) {
-    return json(res, 500, { error: "Fetch failed", message: err.message });
+    const clientId = await kv.get(`agent:${agentId}:client`);
+    if (!clientId) return { error: `agent_${agentId}_not_mapped_to_client` };
+
+    const cal = await kv.get(`client:${clientId}:cal`);
+    if (!cal) return { error: `no_cal_config_for_client_${clientId}` };
+    
+    return cal;
+  } catch (e) {
+    return { error: "kv_error", message: e.message };
   }
 }
 
-// -------------------- BOOK (MATCHED TO OLD WORKING PAYLOAD) --------------------
+// -------------------- BOOKING LOGIC --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
-  const args = body.args || body; // Look specifically in args for Retell data
+  const args = body.args || body;
 
-  const username = asString(req.headers["x-cal-username"] || body.username || args.username || resolved?.username);
-  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  // 1. Resolve Identity (KV first, then fallback to your Hardcoded Headers)
+  const username = asString(resolved?.username || req.headers["x-cal-username"] || args.username || "");
+  const eventTypeSlug = normalizeSlug(resolved?.eventTypeSlug || req.headers["x-cal-slug"] || args.eventTypeSlug || args.slug || "");
   
-  // Extracting exactly as your old working code did
-  const start = asString(args.start || args.slot || args.selected_start);
+  // 2. Extract Attendee Info
+  const start = asString(args.start || args.slot || args.selected_start || args.time);
   const name = asString(args.name || args.attendee_name || args.customer_name);
   const email = asString(args.email || args.attendee_email || args.customer_email).toLowerCase();
 
-  // DEBUG: This will show up in Vercel logs so we can see the data flow
-  console.log("BOOKING ATTEMPT:", { username, eventTypeSlug, start, name, email });
-
+  // 3. Strict Validation with detailed debug output
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
       error: "Missing details", 
-      debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, hasUser: !!username, hasSlug: !!eventTypeSlug } 
+      debug: { 
+        hasStart: !!start, 
+        hasName: !!name, 
+        hasEmail: !!email, 
+        hasUser: !!username, 
+        hasSlug: !!eventTypeSlug,
+        agentLookupResult: resolved // This tells us exactly what KV found
+      } 
     });
   }
 
-  // The Exact Payload Structure Cal.com expects
   const payload = {
     username,
     eventTypeSlug,
     start,
-    attendee: {
-      name,
-      email,
-      timeZone: "America/New_York" 
-    }
+    attendee: { name, email, timeZone: "America/New_York" }
   };
 
   try {
@@ -125,7 +113,35 @@ async function handleBook(req, res, body) {
     });
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    return json(res, 500, { error: "Booking failed", detail: err.response?.data || err.message });
+    return json(res, 500, { 
+      error: "Booking failed", 
+      message: err.response?.data?.message || err.message,
+      cal_error_raw: err.response?.data 
+    });
+  }
+}
+
+// -------------------- AVAILABILITY (REUSE RESOLVE LOGIC) --------------------
+async function handleAvailability(req, res, body) {
+  const resolved = await resolveCalFromAgent(req, body);
+  const args = body.args || body;
+  
+  const username = asString(resolved?.username || req.headers["x-cal-username"] || "");
+  const eventTypeSlug = normalizeSlug(resolved?.eventTypeSlug || req.headers["x-cal-slug"] || args.slug || "");
+
+  if (!username || !eventTypeSlug) return json(res, 400, { error: "Config missing" });
+
+  const start = asString(args.start_date, new Date().toISOString().slice(0, 10));
+  const end = asString(args.end_date, new Date(Date.now() + 604800000).toISOString().slice(0, 10));
+
+  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+
+  try {
+    const resp = await axios.get(url, { headers: { "cal-api-version": "2024-09-04", Authorization: `Bearer ${process.env.CAL_API_KEY}` } });
+    const starts = Object.values(resp.data?.data || {}).flat().map((s) => s.start).filter(Boolean);
+    return json(res, 200, { ok: true, available_slots: starts });
+  } catch (err) {
+    return json(res, 500, { error: "Fetch failed", message: err.message });
   }
 }
 
