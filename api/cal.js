@@ -59,11 +59,6 @@ function resolveEventTypeSlug(req, body) {
   return normalizeSlug(chosen);
 }
 
-function tokenKeyForAgent(agentId) {
-  const a = asString(agentId);
-  return a ? `cal:tokens:agent:${a}` : "";
-}
-
 function getCalRedirectUri() {
   return process.env.CAL_OAUTH_REDIRECT_URI || process.env.CAL_REDIRECT_URI || "";
 }
@@ -83,13 +78,14 @@ async function resolveCalFromAgent(req, body) {
     return { agentId, clientId: String(clientId), error: "no_cal_config" };
   }
 
+  // UPDATED: Handle snake_case from your KV store
   return {
     agentId,
     clientId: String(clientId),
     username: asString(cal.username, ""),
-    eventTypeSlug: asString(cal.eventTypeSlug, ""),
-    eventTypeSlugs: cal.eventTypeSlugs && typeof cal.eventTypeSlugs === "object" ? cal.eventTypeSlugs : null,
-    timeZone: asString(cal.timeZone, "America/New_York")
+    eventTypeSlug: asString(cal.eventTypeSlug || cal.event_type_slug, ""),
+    eventTypeSlugs: cal.eventTypeSlugs || cal.event_type_slugs || null,
+    timeZone: asString(cal.timeZone || cal.time_zone, "America/New_York")
   };
 }
 
@@ -98,8 +94,8 @@ function pickResolvedSlug(body, resolved) {
   if (resolved.eventTypeSlug) return normalizeSlug(resolved.eventTypeSlug);
   const args = body.args || body || {};
   const serviceKey = normalizeServiceKey(args.service_key || args.serviceKey || args.service);
-  if (serviceKey && resolved.eventTypeSlugs && resolved.eventTypeSlugs[serviceKey]) {
-    return normalizeSlug(resolved.eventTypeSlugs[serviceKey]);
+  if (serviceKey && resolved.eventTypeSlugs && (resolved.eventTypeSlugs[serviceKey] || resolved.eventTypeSlugs[serviceKey.replace(/-/g, '_')])) {
+    return normalizeSlug(resolved.eventTypeSlugs[serviceKey] || resolved.eventTypeSlugs[serviceKey.replace(/-/g, '_')]);
   }
   return "";
 }
@@ -116,49 +112,6 @@ function extractCalError(err) {
   return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
 }
 
-// -------------------- OAUTH HANDLERS --------------------
-async function handleOauthStart(req, res, url) {
-  const agent_id = asString(url.searchParams.get("agent_id"));
-  const email = asString(url.searchParams.get("email"));
-  if (!agent_id) return json(res, 400, { error: "agent_id param required" });
-
-  const clientId = process.env.CAL_CLIENT_ID;
-  const redirectUri = getCalRedirectUri();
-  const nonce = crypto.randomBytes(16).toString("hex");
-  await kv.set(`cal:oauth:state:${nonce}`, { agent_id, email: email || "" }, { ex: 600 });
-
-  const authUrl = `https://app.cal.com/auth/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(nonce)}`;
-  res.writeHead(302, { Location: authUrl });
-  return res.end();
-}
-
-async function handleOauthCallback(req, res, url) {
-  const code = asString(url.searchParams.get("code"));
-  const state = asString(url.searchParams.get("state"));
-  const stateRecord = await kv.get(`cal:oauth:state:${state}`);
-  if (!stateRecord?.agent_id) return json(res, 400, { error: "Invalid state" });
-  await kv.del(`cal:oauth:state:${state}`);
-
-  try {
-    const tokenResp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
-      client_id: process.env.CAL_CLIENT_ID,
-      client_secret: process.env.CAL_CLIENT_SECRET,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: getCalRedirectUri()
-    }, { headers: { "Content-Type": "application/json", "cal-api-version": CAL_API_VERSION } });
-
-    const data = tokenResp.data || {};
-    const tokenPayload = { access_token: data.access_token, refresh_token: data.refresh_token };
-    await kv.set(tokenKeyForAgent(stateRecord.agent_id), tokenPayload);
-
-    res.writeHead(302, { Location: "https://app.cal.com/event-types" });
-    return res.end();
-  } catch (err) {
-    return json(res, 500, { error: "OAuth Exchange Failed", detail: extractCalError(err) });
-  }
-}
-
 // -------------------- AVAILABILITY (V2) --------------------
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
@@ -172,7 +125,7 @@ async function handleAvailability(req, res, body) {
   const timeZone = asString(args.timeZone || args.time_zone || body.timeZone) || resolved?.timeZone || "America/New_York";
 
   if (!username || !eventTypeSlug) {
-    return json(res, 400, { error: "Missing Client Config", debug: { agentId: resolved?.agentId || "not_found" } });
+    return json(res, 400, { error: "Missing Client Config", debug: { agentId: resolved?.agentId || "not_found", slug: eventTypeSlug } });
   }
 
   const start = asString(body.start_date || body.args?.start_date, ymd(Date.now()));
@@ -198,7 +151,6 @@ async function handleBook(req, res, body) {
   if (!eventTypeSlug) eventTypeSlug = pickResolvedSlug(body, resolved);
 
   const args = body.args || body || {};
-
   const start = asString(args.start || args.slot || args.selected_start || args.time);
   const name = asString(args.attendee_name || args.name || args.customer_name || args.full_name);
   const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
@@ -208,11 +160,10 @@ async function handleBook(req, res, body) {
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
       error: "Missing details", 
-      debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, hasUser: !!username, hasSlug: !!eventTypeSlug } 
+      debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, username, eventTypeSlug } 
     });
   }
 
-  // Flatter V1 payload
   const v1Payload = {
     start,
     name,
@@ -225,8 +176,7 @@ async function handleBook(req, res, body) {
     ...(phone ? { smsReminderNumber: phone } : {})
   };
 
-  // FIX: Properly handle eventTypeId to satisfy Cal V1 "Required" constraint
-  // We check args, then headers. If we find it, we force it to a Number.
+  // Check for numeric ID in all possible places
   const rawId = args.eventTypeId || args.event_type_id || req.headers["x-cal-event-id"];
   if (rawId && !isNaN(rawId)) {
     v1Payload.eventTypeId = Number(rawId);
@@ -236,7 +186,6 @@ async function handleBook(req, res, body) {
     const resp = await axios.post("https://api.cal.com/v1/bookings", v1Payload, {
       params: { apiKey: process.env.CAL_API_KEY }
     });
-
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
     const msg = extractCalError(err);
@@ -253,8 +202,6 @@ module.exports = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const action = url.searchParams.get("action")?.toLowerCase();
 
-  if (req.method === "GET" && action === "oauth_start") return await handleOauthStart(req, res, url);
-  if (req.method === "GET" && action === "oauth_callback") return await handleOauthCallback(req, res, url);
   if (req.method === "POST" && action === "availability") return await handleAvailability(req, res, body);
   if (req.method === "POST" && action === "book") return await handleBook(req, res, body);
 
