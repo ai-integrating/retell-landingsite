@@ -23,9 +23,6 @@ function json(res, status, payload) {
 // -------------------- HELPERS --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
-  if (req.body && typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
-  }
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
@@ -39,122 +36,65 @@ function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
-function ymd(d) {
-  return new Date(d).toISOString().slice(0, 10);
-}
-
 function normalizeSlug(slug = "") {
   return String(slug).trim().toLowerCase().replace(/\s+/g, "-").replace(/_/g, "-");
 }
 
-function normalizeServiceKey(v = "") {
-  return String(v).trim().toLowerCase().replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").replace(/_+/g, "_");
-}
-
 function resolveEventTypeSlug(req, body) {
   const args = body.args || body || {};
-  const bodySlug = args.eventTypeSlug || args.event_slug || args.eventSlug || args.slug || args.service_key || null;
-  const headerSlug = req.headers["x-cal-slug"] || null;
-  const chosen = bodySlug || headerSlug || "";
+  const chosen = args.eventTypeSlug || args.event_slug || args.eventSlug || args.slug || args.service_key || req.headers["x-cal-slug"] || "";
   return normalizeSlug(chosen);
 }
 
-// -------------------- AUTO-RESOLVE CAL CONFIG FROM AGENT --------------------
+// -------------------- KV LOOKUP --------------------
 async function resolveCalFromAgent(req, body) {
   const args = body.args || body || {};
-  const agentId = asString(req.headers["x-agent-id"] || body.agent_id || body.agentId || args.agent_id, "");
-
+  const agentId = asString(req.headers["x-agent-id"] || body.agent_id || args.agent_id, "");
   if (!agentId) return null;
-
   const clientId = await kv.get(`agent:${agentId}:client`);
-  if (!clientId) return { agentId, error: "no_client_mapping" };
-
+  if (!clientId) return null;
   const cal = await kv.get(`client:${clientId}:cal`);
-  if (!cal || typeof cal !== "object") {
-    return { agentId, clientId: String(clientId), error: "no_cal_config" };
-  }
-
-  return {
-    agentId,
-    clientId: String(clientId),
-    username: asString(cal.username, ""),
-    eventTypeSlug: asString(cal.eventTypeSlug, ""),
-    eventTypeSlugs: cal.eventTypeSlugs || null,
-    timeZone: asString(cal.timeZone, "America/New_York")
-  };
-}
-
-function pickResolvedSlug(body, resolved) {
-  if (!resolved) return "";
-  if (resolved.eventTypeSlug) return normalizeSlug(resolved.eventTypeSlug);
-  const args = body.args || body || {};
-  const serviceKey = normalizeServiceKey(args.service_key || args.serviceKey || args.service);
-  if (serviceKey && resolved.eventTypeSlugs && resolved.eventTypeSlugs[serviceKey]) {
-    return normalizeSlug(resolved.eventTypeSlugs[serviceKey]);
-  }
-  return "";
-}
-
-function getCalHeaders() {
-  return {
-    "Content-Type": "application/json",
-    "cal-api-version": CAL_API_VERSION,
-    Authorization: `Bearer ${process.env.CAL_API_KEY}`
-  };
-}
-
-function extractCalError(err) {
-  return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
+  return cal && typeof cal === "object" ? cal : null;
 }
 
 // -------------------- AVAILABILITY --------------------
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
-  let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
+  let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username || resolved?.username);
   let eventTypeSlug = resolveEventTypeSlug(req, body);
 
-  if (!username && resolved?.username) username = resolved.username;
-  if (!eventTypeSlug) eventTypeSlug = pickResolvedSlug(body, resolved);
+  if (!username || !eventTypeSlug) return json(res, 400, { error: "Missing Config" });
 
   const args = body.args || body || {};
-  const timeZone = asString(args.timeZone || args.time_zone || body.timeZone) || resolved?.timeZone || "America/New_York";
+  const start = asString(args.start_date, new Date().toISOString().slice(0, 10));
+  const end = asString(args.end_date, new Date(Date.now() + 604800000).toISOString().slice(0, 10));
 
-  if (!username || !eventTypeSlug) {
-    return json(res, 400, { error: "Missing Client Config", debug: { agentId: resolved?.agentId || "not_found" } });
-  }
-
-  const start = asString(body.start_date || body.args?.start_date, ymd(Date.now()));
-  const end = asString(body.end_date || body.args?.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
-  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&timeZone=${encodeURIComponent(timeZone)}`;
+  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
 
   try {
-    const resp = await axios.get(url, { headers: getCalHeaders() });
+    const resp = await axios.get(url, { headers: { "cal-api-version": CAL_API_VERSION, Authorization: `Bearer ${process.env.CAL_API_KEY}` } });
     const starts = Object.values(resp.data?.data || {}).flat().map((s) => s.start).filter(Boolean);
     return json(res, 200, { ok: true, available_slots: starts });
   } catch (err) {
-    return json(res, 500, { error: "Cal fetch failed", message: extractCalError(err) });
+    return json(res, 500, { error: "Fetch failed", message: err.message });
   }
 }
 
-// -------------------- BOOK (CORRECTED STRUCTURE) --------------------
+// -------------------- BOOK (MATCHED TO OLD WORKING PAYLOAD) --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
-  let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
-  let eventTypeSlug = resolveEventTypeSlug(req, body);
+  const args = body.args || body; // Look specifically in args for Retell data
 
-  if (!username && resolved?.username) username = resolved.username;
-  if (!eventTypeSlug) eventTypeSlug = pickResolvedSlug(body, resolved);
+  const username = asString(req.headers["x-cal-username"] || body.username || args.username || resolved?.username);
+  const eventTypeSlug = resolveEventTypeSlug(req, body);
+  
+  // Extracting exactly as your old working code did
+  const start = asString(args.start || args.slot || args.selected_start);
+  const name = asString(args.name || args.attendee_name || args.customer_name);
+  const email = asString(args.email || args.attendee_email || args.customer_email).toLowerCase();
 
-  const args = body.args || body || {};
-
-  // Extract variables with catch-all for different key names
-  const start = asString(args.start || args.slot || args.selected_start || args.time);
-  const name = asString(args.attendee_name || args.name || args.customer_name);
-  const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
-  const phone = asString(args.phone || args.phoneNumber || args.phone_number);
-  const attendeeTimeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
-
-  console.log("CAL BOOKING ATTEMPT:", { username, eventTypeSlug, start, name, email });
+  // DEBUG: This will show up in Vercel logs so we can see the data flow
+  console.log("BOOKING ATTEMPT:", { username, eventTypeSlug, start, name, email });
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
@@ -163,32 +103,29 @@ async function handleBook(req, res, body) {
     });
   }
 
-  // Payload structure matched exactly to your old working code
+  // The Exact Payload Structure Cal.com expects
   const payload = {
     username,
     eventTypeSlug,
     start,
-    attendee: { 
-      name, 
-      email, 
-      ...(phone ? { phoneNumber: phone } : {}), 
-      timeZone: attendeeTimeZone 
+    attendee: {
+      name,
+      email,
+      timeZone: "America/New_York" 
     }
   };
 
-  const headers = {
-    "Content-Type": "application/json",
-    "cal-api-version": "2024-09-04",
-    Authorization: `Bearer ${process.env.CAL_API_KEY}`
-  };
-
   try {
-    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers });
+    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, {
+      headers: { 
+        "Content-Type": "application/json", 
+        "cal-api-version": "2024-09-04", 
+        "Authorization": `Bearer ${process.env.CAL_API_KEY}` 
+      }
+    });
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    const errorMsg = extractCalError(err);
-    console.error("CAL.COM API ERROR:", errorMsg);
-    return json(res, 500, { error: "Booking failed", message: errorMsg });
+    return json(res, 500, { error: "Booking failed", detail: err.response?.data || err.message });
   }
 }
 
@@ -196,12 +133,11 @@ async function handleBook(req, res, body) {
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  const body = req.method === "POST" ? await readJsonBody(req) : {};
+  const body = await readJsonBody(req);
   const url = new URL(req.url, `http://${req.headers.host}`);
   const action = url.searchParams.get("action")?.toLowerCase();
 
-  if (req.method === "POST" && action === "availability") return await handleAvailability(req, res, body);
-  if (req.method === "POST" && action === "book") return await handleBook(req, res, body);
-
+  if (action === "availability") return await handleAvailability(req, res, body);
+  if (action === "book") return await handleBook(req, res, body);
   return json(res, 400, { error: "Unknown action" });
 };
