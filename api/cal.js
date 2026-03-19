@@ -123,19 +123,27 @@ async function resolveCalFromAgent(req, body) {
   const agentId = asString(
     req.headers["x-agent-id"] ||
       body.agent_id ||
+      body.agentId ||
       args.agent_id,
     ""
   );
 
-  if (!agentId) return null;
+  if (!agentId) {
+    console.log("CAL RESOLVE: No Agent ID found in request body or headers.");
+    return null;
+  }
 
   // 1. Get the Client ID mapped to this specific Agent
   const clientId = await kv.get(`agent:${agentId}:client`);
-  if (!clientId) return { agentId, error: "no_client_mapping" };
+  if (!clientId) {
+    console.log(`CAL RESOLVE: No client mapping for Agent ${agentId}`);
+    return { agentId, error: "no_client_mapping" };
+  }
 
   // 2. Get the Calendar Config for that Client
   const cal = await kv.get(`client:${clientId}:cal`);
   if (!cal || typeof cal !== "object") {
+    console.log(`CAL RESOLVE: No cal config for Client ${clientId}`);
     return {
       agentId,
       clientId: String(clientId),
@@ -152,7 +160,7 @@ async function resolveCalFromAgent(req, body) {
       cal.eventTypeSlugs && typeof cal.eventTypeSlugs === "object"
         ? cal.eventTypeSlugs
         : null,
-    timeZone: asString(cal.timeZone, "")
+    timeZone: asString(cal.timeZone, "America/New_York")
   };
 }
 
@@ -238,12 +246,6 @@ async function handleOauthStart(req, res, url) {
     `&client_id=${encodeURIComponent(clientId)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&state=${encodeURIComponent(nonce)}`;
-
-  console.log("CAL OAUTH START", {
-    agent_id,
-    email,
-    redirectUri
-  });
 
   res.writeHead(302, { Location: authUrl });
   return res.end();
@@ -334,13 +336,6 @@ async function handleOauthCallback(req, res, url) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    console.log("CAL OAUTH CALLBACK SUCCESS", {
-      agent_id,
-      emailLower: emailLower || null,
-      storedAgentKey: tokenKeyForAgent(agent_id),
-      storedEmailKey: emailLower ? tokenKeyForEmail(emailLower) : null
-    });
-
     // Fetch authenticated Cal profile to get username/timezone
     let calUsername = "";
     let calTimeZone = "";
@@ -353,24 +348,11 @@ async function handleOauthCallback(req, res, url) {
         }
       });
 
-      console.log("CAL /v2/me RESPONSE", JSON.stringify(meResp.data, null, 2));
-
       const me = meResp.data?.data || meResp.data || {};
-
-      calUsername =
-        asString(me.username) ||
-        asString(me?.user?.username) ||
-        "";
-
-      calTimeZone =
-        asString(me.timeZone) ||
-        asString(me?.user?.timeZone) ||
-        "";
+      calUsername = asString(me.username) || asString(me?.user?.username) || "";
+      calTimeZone = asString(me.timeZone) || asString(me?.user?.timeZone) || "";
     } catch (profileErr) {
-      console.log("CAL PROFILE FETCH ERROR", JSON.stringify({
-        agent_id,
-        message: extractCalError(profileErr)
-      }, null, 2));
+      console.log("CAL PROFILE FETCH ERROR", extractCalError(profileErr));
     }
 
     const mappedClientId = await kv.get(`agent:${agent_id}:client`);
@@ -384,13 +366,6 @@ async function handleOauthCallback(req, res, url) {
         username: calUsername,
         ...(calTimeZone ? { timeZone: calTimeZone } : {}),
         updated_at: new Date().toISOString()
-      });
-
-      console.log("CAL PROFILE STORED", {
-        agent_id,
-        client_id: String(mappedClientId),
-        username: calUsername,
-        timeZone: calTimeZone || null
       });
     }
 
@@ -435,24 +410,17 @@ async function handleAvailability(req, res, body) {
   if (!username || !eventTypeSlug) {
     return json(res, 400, {
       error: "Missing Client Config",
-      detail: "Agent mapping or Cal.com configuration could not be resolved.",
+      detail: "Ensure agent mapping and cal configuration are set in KV.",
       debug: {
-        agentId: resolved?.agentId || "not_passed",
+        agentId: resolved?.agentId || "not_found",
         hasUsername: !!username,
         hasSlug: !!eventTypeSlug
       }
     });
   }
 
-  const start = asString(
-    body.start_date || body.args?.start_date,
-    ymd(Date.now())
-  );
-
-  const end = asString(
-    body.end_date || body.args?.end_date,
-    ymd(Date.now() + 7 * 24 * 60 * 60 * 1000)
-  );
+  const start = asString(body.start_date || body.args?.start_date, ymd(Date.now()));
+  const end = asString(body.end_date || body.args?.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
   const url =
     `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}` +
@@ -502,7 +470,10 @@ async function handleBook(req, res, body) {
   const attendeeTimeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
-    return json(res, 400, { error: "Missing details", debug: { start: !!start, name: !!name, email: !!email, user: !!username, slug: !!eventTypeSlug } });
+    return json(res, 400, { 
+      error: "Missing details", 
+      debug: { start: !!start, name: !!name, email: !!email, user: !!username, slug: !!eventTypeSlug } 
+    });
   }
 
   const payload = {
