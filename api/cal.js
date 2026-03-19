@@ -63,16 +63,6 @@ function resolveEventTypeSlug(req, body) {
   return normalizeSlug(chosen);
 }
 
-function tokenKeyForAgent(agentId) {
-  const a = asString(agentId);
-  return a ? `cal:tokens:agent:${a}` : "";
-}
-
-function tokenKeyForEmail(email) {
-  const e = asString(email).toLowerCase();
-  return e ? `cal:tokens:${e}` : "";
-}
-
 function getCalRedirectUri() {
   return process.env.CAL_OAUTH_REDIRECT_URI || process.env.CAL_REDIRECT_URI || "";
 }
@@ -97,7 +87,7 @@ async function resolveCalFromAgent(req, body) {
     clientId: String(clientId),
     username: asString(cal.username, ""),
     eventTypeSlug: asString(cal.eventTypeSlug, ""),
-    eventTypeSlugs: cal.eventTypeSlugs && typeof cal.eventTypeSlugs === "object" ? cal.eventTypeSlugs : null,
+    eventTypeSlugs: cal.eventTypeSlugs || null,
     timeZone: asString(cal.timeZone, "America/New_York")
   };
 }
@@ -125,50 +115,7 @@ function extractCalError(err) {
   return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
 }
 
-// -------------------- OAUTH HANDLERS (Unchanged) --------------------
-async function handleOauthStart(req, res, url) {
-  const agent_id = asString(url.searchParams.get("agent_id"));
-  const email = asString(url.searchParams.get("email"));
-  if (!agent_id) return json(res, 400, { error: "agent_id param required" });
-
-  const clientId = process.env.CAL_CLIENT_ID;
-  const redirectUri = getCalRedirectUri();
-  const nonce = crypto.randomBytes(16).toString("hex");
-  await kv.set(`cal:oauth:state:${nonce}`, { agent_id, email: email || "" }, { ex: 600 });
-
-  const authUrl = `https://app.cal.com/auth/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(nonce)}`;
-  res.writeHead(302, { Location: authUrl });
-  return res.end();
-}
-
-async function handleOauthCallback(req, res, url) {
-  const code = asString(url.searchParams.get("code"));
-  const state = asString(url.searchParams.get("state"));
-  const stateRecord = await kv.get(`cal:oauth:state:${state}`);
-  if (!stateRecord?.agent_id) return json(res, 400, { error: "Invalid state" });
-  await kv.del(`cal:oauth:state:${state}`);
-
-  try {
-    const tokenResp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
-      client_id: process.env.CAL_CLIENT_ID,
-      client_secret: process.env.CAL_CLIENT_SECRET,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: getCalRedirectUri()
-    }, { headers: { "Content-Type": "application/json", "cal-api-version": CAL_API_VERSION } });
-
-    const data = tokenResp.data || {};
-    const tokenPayload = { access_token: data.access_token, refresh_token: data.refresh_token };
-    await kv.set(tokenKeyForAgent(stateRecord.agent_id), tokenPayload);
-
-    res.writeHead(302, { Location: "https://app.cal.com/event-types" });
-    return res.end();
-  } catch (err) {
-    return json(res, 500, { error: "OAuth Exchange Failed", detail: extractCalError(err) });
-  }
-}
-
-// -------------------- AVAILABILITY (REMAINS UNCHANGED) --------------------
+// -------------------- AVAILABILITY (STAYS SAME) --------------------
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -197,7 +144,7 @@ async function handleAvailability(req, res, body) {
   }
 }
 
-// -------------------- BOOK (IMPROVED ROBUSTNESS) --------------------
+// -------------------- BOOK (ROBUST FIX) --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -208,12 +155,15 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body || {};
 
-  // Robust parameter mapping for Retell
+  // Fix: Check multiple possible key names from Retell
   const start = asString(args.start || args.slot || args.selected_start || args.time);
   const name = asString(args.attendee_name || args.name || args.customer_name || args.full_name);
   const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
   const phone = asString(args.phone || args.phoneNumber || args.phone_number);
   const attendeeTimeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
+
+  // Debug logging to Vercel
+  console.log("BOOKING ATTEMPT DATA:", { username, eventTypeSlug, start, name, email });
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
@@ -233,7 +183,7 @@ async function handleBook(req, res, body) {
     const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers: getCalHeaders() });
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    console.error("CAL BOOK ERROR:", extractCalError(err));
+    console.error("CAL.COM API ERROR:", extractCalError(err));
     return json(res, 500, { error: "Booking failed", message: extractCalError(err) });
   }
 }
@@ -246,8 +196,6 @@ module.exports = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const action = url.searchParams.get("action")?.toLowerCase();
 
-  if (req.method === "GET" && action === "oauth_start") return await handleOauthStart(req, res, url);
-  if (req.method === "GET" && action === "oauth_callback") return await handleOauthCallback(req, res, url);
   if (req.method === "POST" && action === "availability") return await handleAvailability(req, res, body);
   if (req.method === "POST" && action === "book") return await handleBook(req, res, body);
 
