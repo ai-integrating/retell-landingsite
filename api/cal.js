@@ -39,10 +39,6 @@ function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
-}
-
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
@@ -66,11 +62,6 @@ function resolveEventTypeSlug(req, body) {
 function tokenKeyForAgent(agentId) {
   const a = asString(agentId);
   return a ? `cal:tokens:agent:${a}` : "";
-}
-
-function tokenKeyForEmail(email) {
-  const e = asString(email).toLowerCase();
-  return e ? `cal:tokens:${e}` : "";
 }
 
 function getCalRedirectUri() {
@@ -221,7 +212,7 @@ async function handleBook(req, res, body) {
     });
   }
 
-  // Constructing V1 Payload defensively
+  // Flatter V1 payload
   const v1Payload = {
     start,
     name,
@@ -234,9 +225,9 @@ async function handleBook(req, res, body) {
     ...(phone ? { smsReminderNumber: phone } : {})
   };
 
-  // Only add eventTypeId if it's a valid number. 
-  // This prevents the "invalid_type: Required" error caused by sending null.
-  const rawId = args.eventTypeId || req.headers["x-cal-event-id"];
+  // FIX: Properly handle eventTypeId to satisfy Cal V1 "Required" constraint
+  // We check args, then headers. If we find it, we force it to a Number.
+  const rawId = args.eventTypeId || args.event_type_id || req.headers["x-cal-event-id"];
   if (rawId && !isNaN(rawId)) {
     v1Payload.eventTypeId = Number(rawId);
   }
