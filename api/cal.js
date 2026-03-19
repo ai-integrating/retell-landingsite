@@ -221,7 +221,7 @@ async function handleBook(req, res, body) {
     });
   }
 
-  // V1 Payload structure is flatter than V2
+  // Constructing V1 Payload defensively
   const v1Payload = {
     start,
     name,
@@ -231,12 +231,17 @@ async function handleBook(req, res, body) {
     timeZone,
     language: "en",
     metadata: {},
-    // In V1, phone is often passed as smsReminderNumber
     ...(phone ? { smsReminderNumber: phone } : {})
   };
 
+  // Only add eventTypeId if it's a valid number. 
+  // This prevents the "invalid_type: Required" error caused by sending null.
+  const rawId = args.eventTypeId || req.headers["x-cal-event-id"];
+  if (rawId && !isNaN(rawId)) {
+    v1Payload.eventTypeId = Number(rawId);
+  }
+
   try {
-    // V1 handles auth via apiKey param or Bearer token
     const resp = await axios.post("https://api.cal.com/v1/bookings", v1Payload, {
       params: { apiKey: process.env.CAL_API_KEY }
     });
