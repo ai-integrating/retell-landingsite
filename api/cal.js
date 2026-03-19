@@ -125,7 +125,7 @@ function extractCalError(err) {
   return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
 }
 
-// -------------------- OAUTH HANDLERS (Unchanged) --------------------
+// -------------------- OAUTH HANDLERS --------------------
 async function handleOauthStart(req, res, url) {
   const agent_id = asString(url.searchParams.get("agent_id"));
   const email = asString(url.searchParams.get("email"));
@@ -168,7 +168,7 @@ async function handleOauthCallback(req, res, url) {
   }
 }
 
-// -------------------- AVAILABILITY (REMAINS UNCHANGED) --------------------
+// -------------------- AVAILABILITY (V2) --------------------
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -197,7 +197,7 @@ async function handleAvailability(req, res, body) {
   }
 }
 
-// -------------------- BOOK (IMPROVED ROBUSTNESS) --------------------
+// -------------------- BOOK (V1 STABLE) --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -208,12 +208,11 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body || {};
 
-  // Robust parameter mapping for Retell
   const start = asString(args.start || args.slot || args.selected_start || args.time);
   const name = asString(args.attendee_name || args.name || args.customer_name || args.full_name);
   const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
   const phone = asString(args.phone || args.phoneNumber || args.phone_number);
-  const attendeeTimeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
+  const timeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
@@ -222,19 +221,31 @@ async function handleBook(req, res, body) {
     });
   }
 
-  const payload = {
+  // V1 Payload structure is flatter than V2
+  const v1Payload = {
     start,
-    attendee: { name, email, ...(phone ? { phoneNumber: phone } : {}), timeZone: attendeeTimeZone, language: "en" },
+    name,
+    email,
+    username,
     eventTypeSlug,
-    username
+    timeZone,
+    language: "en",
+    metadata: {},
+    // In V1, phone is often passed as smsReminderNumber
+    ...(phone ? { smsReminderNumber: phone } : {})
   };
 
   try {
-    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers: getCalHeaders() });
+    // V1 handles auth via apiKey param or Bearer token
+    const resp = await axios.post("https://api.cal.com/v1/bookings", v1Payload, {
+      params: { apiKey: process.env.CAL_API_KEY }
+    });
+
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    console.error("CAL BOOK ERROR:", extractCalError(err));
-    return json(res, 500, { error: "Booking failed", message: extractCalError(err) });
+    const msg = extractCalError(err);
+    console.error("CAL V1 BOOK ERROR:", msg);
+    return json(res, 500, { error: "Booking failed", message: msg });
   }
 }
 
