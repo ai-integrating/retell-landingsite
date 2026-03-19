@@ -39,10 +39,6 @@ function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
-}
-
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
@@ -61,10 +57,6 @@ function resolveEventTypeSlug(req, body) {
   const headerSlug = req.headers["x-cal-slug"] || null;
   const chosen = bodySlug || headerSlug || "";
   return normalizeSlug(chosen);
-}
-
-function getCalRedirectUri() {
-  return process.env.CAL_OAUTH_REDIRECT_URI || process.env.CAL_REDIRECT_URI || "";
 }
 
 // -------------------- AUTO-RESOLVE CAL CONFIG FROM AGENT --------------------
@@ -115,7 +107,7 @@ function extractCalError(err) {
   return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
 }
 
-// -------------------- AVAILABILITY (STAYS SAME) --------------------
+// -------------------- AVAILABILITY --------------------
 async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -144,7 +136,7 @@ async function handleAvailability(req, res, body) {
   }
 }
 
-// -------------------- BOOK (ROBUST FIX) --------------------
+// -------------------- BOOK (CORRECTED STRUCTURE) --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   let username = asString(req.headers["x-cal-username"] || body.username || body.args?.username);
@@ -155,15 +147,14 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body || {};
 
-  // Fix: Check multiple possible key names from Retell
+  // Extract variables with catch-all for different key names
   const start = asString(args.start || args.slot || args.selected_start || args.time);
-  const name = asString(args.attendee_name || args.name || args.customer_name || args.full_name);
+  const name = asString(args.attendee_name || args.name || args.customer_name);
   const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
   const phone = asString(args.phone || args.phoneNumber || args.phone_number);
   const attendeeTimeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
 
-  // Debug logging to Vercel
-  console.log("BOOKING ATTEMPT DATA:", { username, eventTypeSlug, start, name, email });
+  console.log("CAL BOOKING ATTEMPT:", { username, eventTypeSlug, start, name, email });
 
   if (!start || !name || !email || !username || !eventTypeSlug) {
     return json(res, 400, { 
@@ -172,19 +163,32 @@ async function handleBook(req, res, body) {
     });
   }
 
+  // Payload structure matched exactly to your old working code
   const payload = {
-    start,
-    attendee: { name, email, ...(phone ? { phoneNumber: phone } : {}), timeZone: attendeeTimeZone, language: "en" },
+    username,
     eventTypeSlug,
-    username
+    start,
+    attendee: { 
+      name, 
+      email, 
+      ...(phone ? { phoneNumber: phone } : {}), 
+      timeZone: attendeeTimeZone 
+    }
+  };
+
+  const headers = {
+    "Content-Type": "application/json",
+    "cal-api-version": "2024-09-04",
+    Authorization: `Bearer ${process.env.CAL_API_KEY}`
   };
 
   try {
-    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers: getCalHeaders() });
+    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, { headers });
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    console.error("CAL.COM API ERROR:", extractCalError(err));
-    return json(res, 500, { error: "Booking failed", message: extractCalError(err) });
+    const errorMsg = extractCalError(err);
+    console.error("CAL.COM API ERROR:", errorMsg);
+    return json(res, 500, { error: "Booking failed", message: errorMsg });
   }
 }
 
