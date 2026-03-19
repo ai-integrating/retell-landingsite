@@ -34,7 +34,7 @@ function asString(v, fallback = "") {
 
 // -------------------- IDENTITY RESOLUTION --------------------
 async function getCalConfig(req, body) {
-  const args = body.args || {};
+  const args = body.args || body;
   const agentId = req.headers["x-agent-id"] || body.agent_id || args.agent_id || "";
   
   let kvConfig = null;
@@ -47,14 +47,13 @@ async function getCalConfig(req, body) {
     }
   }
 
-  // PRIORITY: KV Store -> Headers (Hardcoded in Retell) -> Request Body
   return {
-    username: asString(kvConfig?.username || req.headers["x-cal-username"] || body.username || args.username),
-    eventTypeSlug: asString(kvConfig?.eventTypeSlug || req.headers["x-cal-slug"] || body.event_slug || args.event_slug || args.eventTypeSlug)
+    username: asString(kvConfig?.username || req.headers["x-cal-username"] || args.username || body.username),
+    eventTypeSlug: asString(kvConfig?.eventTypeSlug || req.headers["x-cal-slug"] || args.event_slug || args.eventTypeSlug || body.event_slug)
   };
 }
 
-// -------------------- MAIN HANDLERS --------------------
+// -------------------- AVAILABILITY (FIXED URL) --------------------
 async function handleAvailability(req, res, body) {
   const config = await getCalConfig(req, body);
   const args = body.args || body;
@@ -63,27 +62,37 @@ async function handleAvailability(req, res, body) {
     return json(res, 400, { error: "Missing Config", debug: config });
   }
 
+  // Ensure dates are just YYYY-MM-DD
   const start = asString(args.start_date || body.start_date, new Date().toISOString().slice(0, 10));
-  const end = asString(args.end_date || body.end_date, new Date(Date.now() + 604800000).toISOString().slice(0, 10));
+  const end = asString(args.end_date || body.end_date, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
 
+  // The API expects these as clear query params
   const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(config.username)}&eventTypeSlug=${encodeURIComponent(config.eventTypeSlug)}&start=${start}&end=${end}`;
 
   try {
     const resp = await axios.get(url, { 
       headers: { "cal-api-version": CAL_API_VERSION, Authorization: `Bearer ${process.env.CAL_API_KEY}` } 
     });
-    const starts = Object.values(resp.data?.data || {}).flat().map(s => s.start).filter(Boolean);
+    
+    // Extracting slots from the data object
+    const slots = resp.data?.data || {};
+    const starts = Object.values(slots).flat().map(s => s.start).filter(Boolean);
+
     return json(res, 200, { ok: true, available_slots: starts });
   } catch (err) {
-    return json(res, 500, { error: "Availability failed", message: err.message });
+    return json(res, 500, { 
+      error: "Availability failed", 
+      message: err.response?.data?.message || err.message,
+      debug: err.response?.data 
+    });
   }
 }
 
+// -------------------- BOOKING --------------------
 async function handleBook(req, res, body) {
   const config = await getCalConfig(req, body);
   const args = body.args || body;
 
-  // Search for attendee details in both root and args
   const start = asString(args.start || body.start || args.start_time || body.start_time);
   const name = asString(args.name || body.name || args.attendee_name || body.attendee_name);
   const email = asString(args.email || body.email || args.attendee_email || body.attendee_email).toLowerCase();
@@ -91,14 +100,7 @@ async function handleBook(req, res, body) {
   if (!start || !name || !email || !config.username || !config.eventTypeSlug) {
     return json(res, 400, { 
       error: "Missing details", 
-      debug: { 
-        hasStart: !!start, 
-        hasName: !!name, 
-        hasEmail: !!email, 
-        hasUser: !!config.username, 
-        hasSlug: !!config.eventTypeSlug,
-        retrievedConfig: config
-      } 
+      debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, config } 
     });
   }
 
