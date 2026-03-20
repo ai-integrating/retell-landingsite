@@ -74,14 +74,6 @@ function normalizeServiceKey(v = "") {
     .replace(/_+/g, "_");
 }
 
-function getCalHeaders() {
-  return {
-    "Content-Type": "application/json",
-    "cal-api-version": CAL_API_VERSION,
-    Authorization: `Bearer ${process.env.CAL_API_KEY}`,
-  };
-}
-
 function extractCalError(err) {
   return (
     err?.response?.data?.error?.message ||
@@ -109,6 +101,49 @@ function getCalRedirectUri() {
     process.env.CAL_OAUTH_REDIRECT_URL ||
     ""
   );
+}
+
+// -------------------- TOKEN HELPERS --------------------
+async function getCalAccessTokenForAgent(agentId) {
+  const key = tokenKeyForAgent(agentId);
+  if (!key) return null;
+
+  const tokenRecord = await kv.get(key);
+  if (!tokenRecord || typeof tokenRecord !== "object") return null;
+
+  const accessToken = asString(tokenRecord.access_token);
+  if (!accessToken) return null;
+
+  return {
+    accessToken,
+    refreshToken: asString(tokenRecord.refresh_token),
+    tokenType: asString(tokenRecord.token_type, "bearer"),
+    expiresAt: Number(tokenRecord.expires_at || 0),
+  };
+}
+
+async function getCalHeadersForAgent(agentId) {
+  const token = await getCalAccessTokenForAgent(agentId);
+
+  if (token?.accessToken) {
+    return {
+      headers: {
+        "Content-Type": "application/json",
+        "cal-api-version": CAL_API_VERSION,
+        Authorization: `Bearer ${token.accessToken}`,
+      },
+      authMode: "oauth_token",
+    };
+  }
+
+  return {
+    headers: {
+      "Content-Type": "application/json",
+      "cal-api-version": CAL_API_VERSION,
+      Authorization: `Bearer ${process.env.CAL_API_KEY}`,
+    },
+    authMode: "api_key",
+  };
 }
 
 // -------------------- OAUTH HANDLERS --------------------
@@ -417,7 +452,10 @@ async function handleAvailability(req, res, body) {
   )}&end=${encodeURIComponent(end)}&timeZone=${encodeURIComponent(timeZone)}`;
 
   try {
-    const resp = await axios.get(url, { headers: getCalHeaders() });
+    const { headers, authMode } = await getCalHeadersForAgent(resolved?.agentId);
+
+    const resp = await axios.get(url, { headers });
+
     const starts = Object.values(resp.data?.data || {})
       .flat()
       .map((s) => s.start)
@@ -426,18 +464,23 @@ async function handleAvailability(req, res, body) {
     return json(res, 200, {
       ok: true,
       available_slots: starts,
-      debug: { username, eventTypeSlug, timeZone },
+      debug: { username, eventTypeSlug, timeZone, authMode },
     });
   } catch (err) {
     return json(res, 500, {
       error: "Cal fetch failed",
       message: extractCalError(err),
-      debug: { username, eventTypeSlug, timeZone },
+      debug: {
+        username,
+        eventTypeSlug,
+        timeZone,
+        agentId: resolved?.agentId || null,
+      },
     });
   }
 }
 
-// -------------------- BOOK (V1 STABLE) --------------------
+// -------------------- BOOK (V1 STABLE, OAUTH-AWARE) --------------------
 async function handleBook(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   const args = body.args || body || {};
@@ -494,14 +537,31 @@ async function handleBook(req, res, body) {
   }
 
   try {
-    const resp = await axios.post("https://api.cal.com/v1/bookings", v1Payload, {
-      params: { apiKey: process.env.CAL_API_KEY },
-    });
+    const token = await getCalAccessTokenForAgent(resolved?.agentId);
+
+    const requestConfig = token?.accessToken
+      ? {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token.accessToken}`,
+          },
+        }
+      : {
+          params: { apiKey: process.env.CAL_API_KEY },
+        };
+
+    const authMode = token?.accessToken ? "oauth_token" : "api_key";
+
+    const resp = await axios.post(
+      "https://api.cal.com/v1/bookings",
+      v1Payload,
+      requestConfig
+    );
 
     return json(res, 200, {
       ok: true,
       booking: resp.data,
-      debug: { username, eventTypeSlug, eventTypeId },
+      debug: { username, eventTypeSlug, eventTypeId, authMode },
     });
   } catch (err) {
     const msg = extractCalError(err);
@@ -511,12 +571,18 @@ async function handleBook(req, res, body) {
       eventTypeSlug,
       eventTypeId,
       start,
+      agentId: resolved?.agentId || null,
     });
 
     return json(res, 500, {
       error: "Booking failed",
       message: msg,
-      debug: { username, eventTypeSlug, eventTypeId },
+      debug: {
+        username,
+        eventTypeSlug,
+        eventTypeId,
+        agentId: resolved?.agentId || null,
+      },
     });
   }
 }
