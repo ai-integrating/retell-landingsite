@@ -1,4 +1,5 @@
 const axios = require("axios");
+const crypto = require("crypto");
 const { kv } = require("@vercel/kv");
 
 const CAL_API_VERSION = "2024-09-04";
@@ -22,6 +23,7 @@ function json(res, status, payload) {
 // -------------------- HELPERS --------------------
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
+
   if (req.body && typeof req.body === "string") {
     try {
       return JSON.parse(req.body);
@@ -29,6 +31,7 @@ async function readJsonBody(req) {
       return {};
     }
   }
+
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
@@ -46,12 +49,20 @@ function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
+}
+
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
 function normalizeSlug(slug = "") {
-  return String(slug).trim().toLowerCase().replace(/\s+/g, "-").replace(/_/g, "-");
+  return String(slug)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-");
 }
 
 function normalizeServiceKey(v = "") {
@@ -78,6 +89,191 @@ function extractCalError(err) {
     err?.message ||
     "Unknown Cal.com error"
   );
+}
+
+function tokenKeyForAgent(agentId) {
+  const a = asString(agentId);
+  return a ? `cal:tokens:agent:${a}` : "";
+}
+
+function tokenKeyForEmail(email) {
+  const e = asString(email).toLowerCase();
+  return e ? `cal:tokens:${e}` : "";
+}
+
+// IMPORTANT: preserve old working redirect lookup order
+function getCalRedirectUri() {
+  return (
+    process.env.CAL_OAUTH_REDIRECT_URI ||
+    process.env.CAL_REDIRECT_URI ||
+    process.env.CAL_OAUTH_REDIRECT_URL ||
+    ""
+  );
+}
+
+// -------------------- OAUTH HANDLERS --------------------
+async function handleOauthStart(req, res, url) {
+  const agent_id = asString(url.searchParams.get("agent_id"));
+  const email = asString(url.searchParams.get("email"));
+
+  if (!agent_id) {
+    return json(res, 400, { error: "agent_id param required" });
+  }
+
+  if (email && !isValidEmail(email)) {
+    return json(res, 400, { error: "If provided, email must be valid" });
+  }
+
+  const clientId = process.env.CAL_CLIENT_ID;
+  const redirectUri = getCalRedirectUri();
+
+  if (!clientId || !redirectUri) {
+    return json(res, 500, {
+      error: "Missing CAL_CLIENT_ID or CAL_OAUTH_REDIRECT_URI",
+      debug: {
+        hasClientId: !!clientId,
+        hasRedirectUri: !!redirectUri,
+      },
+    });
+  }
+
+  const nonce = crypto.randomBytes(16).toString("hex");
+
+  await kv.set(
+    `cal:oauth:state:${nonce}`,
+    { agent_id, email: email || "" },
+    { ex: 600 }
+  );
+
+  const authUrl =
+    `https://app.cal.com/auth/oauth2/authorize` +
+    `?response_type=code` +
+    `&client_id=${encodeURIComponent(clientId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${encodeURIComponent(nonce)}`;
+
+  console.log("CAL OAUTH START", {
+    agent_id,
+    email,
+    redirectUri,
+  });
+
+  res.writeHead(302, { Location: authUrl });
+  return res.end();
+}
+
+async function handleOauthCallback(req, res, url) {
+  const code = asString(url.searchParams.get("code"));
+  const state = asString(url.searchParams.get("state"));
+  const error = asString(url.searchParams.get("error"));
+  const error_description = asString(url.searchParams.get("error_description"));
+
+  if (error) {
+    const loc =
+      "https://retell-landingsite-iota.vercel.app/cal-error" +
+      `?error=${encodeURIComponent(error)}` +
+      `&desc=${encodeURIComponent(error_description)}`;
+    res.writeHead(302, { Location: loc });
+    return res.end();
+  }
+
+  if (!code || !state) {
+    return json(res, 400, { error: "Missing code/state" });
+  }
+
+  const stateRecord = await kv.get(`cal:oauth:state:${state}`);
+  if (!stateRecord?.agent_id) {
+    return json(res, 400, { error: "Invalid or expired state" });
+  }
+
+  await kv.del(`cal:oauth:state:${state}`);
+
+  const clientId = process.env.CAL_CLIENT_ID;
+  const clientSecret = process.env.CAL_CLIENT_SECRET;
+  const redirectUri = getCalRedirectUri();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    return json(res, 500, {
+      error: "Missing CAL_CLIENT_ID / CAL_CLIENT_SECRET / CAL_OAUTH_REDIRECT_URI",
+      debug: {
+        hasClientId: !!clientId,
+        hasClientSecret: !!clientSecret,
+        hasRedirectUri: !!redirectUri,
+      },
+    });
+  }
+
+  try {
+    const tokenResp = await axios.post(
+      "https://api.cal.com/v2/auth/oauth2/token",
+      {
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const data = tokenResp.data || {};
+    const agent_id = asString(stateRecord.agent_id);
+    const emailLower = asString(stateRecord.email).toLowerCase();
+
+    const tokenPayload = {
+      access_token: asString(data.access_token),
+      refresh_token: asString(data.refresh_token),
+      token_type: asString(data.token_type, "bearer"),
+      expires_at: data.expires_in
+        ? Date.now() + Number(data.expires_in) * 1000
+        : 0,
+    };
+
+    if (!tokenPayload.access_token) {
+      return json(res, 500, {
+        error: "OAuth Exchange Failed",
+        detail: "No access_token returned from Cal.com",
+      });
+    }
+
+    await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
+
+    if (emailLower && isValidEmail(emailLower)) {
+      await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
+    }
+
+    console.log("CAL OAUTH CALLBACK SUCCESS", {
+      agent_id,
+      emailLower: emailLower || null,
+      storedAgentKey: tokenKeyForAgent(agent_id),
+      storedEmailKey: emailLower ? tokenKeyForEmail(emailLower) : null,
+    });
+
+    res.writeHead(302, { Location: "https://app.cal.com/event-types" });
+    return res.end();
+  } catch (err) {
+    console.log(
+      "CAL OAUTH CALLBACK ERROR",
+      JSON.stringify(
+        {
+          responseStatus: err.response?.status,
+          responseData: err.response?.data,
+          message: err.message,
+        },
+        null,
+        2
+      )
+    );
+
+    return json(res, 500, {
+      error: "OAuth Exchange Failed",
+      detail: err.response?.data || err.message,
+    });
+  }
 }
 
 // -------------------- AUTO-RESOLVE CAL CONFIG FROM AGENT --------------------
@@ -137,7 +333,6 @@ function resolveEventTypeSlug(req, body, resolved) {
     if (mapped) return normalizeSlug(mapped);
   }
 
-  // fallback so old flows still work if service_key is basically the slug
   if (serviceKey) {
     return normalizeSlug(serviceKey);
   }
@@ -185,7 +380,7 @@ async function handleAvailability(req, res, body) {
   const resolved = await resolveCalFromAgent(req, body);
   const args = body.args || body || {};
 
-  let username = asString(
+  const username = asString(
     req.headers["x-cal-username"] || body.username || args.username || resolved?.username
   );
 
@@ -255,10 +450,17 @@ async function handleBook(req, res, body) {
   const eventTypeId = resolveEventTypeId(body, resolved, req);
 
   const start = asString(args.start || args.slot || args.selected_start || args.time);
-  const name = asString(args.attendee_name || args.name || args.customer_name || args.full_name);
-  const email = asString(args.attendee_email || args.email || args.customer_email).toLowerCase();
+  const name = asString(
+    args.attendee_name || args.name || args.customer_name || args.full_name
+  );
+  const email = asString(
+    args.attendee_email || args.email || args.customer_email
+  ).toLowerCase();
   const phone = asString(args.phone || args.phoneNumber || args.phone_number);
-  const timeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
+  const timeZone =
+    asString(args.timeZone || args.time_zone) ||
+    resolved?.timeZone ||
+    "America/New_York";
 
   if (!start || !name || !email || !username || (!eventTypeSlug && !eventTypeId)) {
     return json(res, 400, {
@@ -303,6 +505,7 @@ async function handleBook(req, res, body) {
     });
   } catch (err) {
     const msg = extractCalError(err);
+
     console.error("CAL V1 BOOK ERROR:", msg, {
       username,
       eventTypeSlug,
@@ -331,6 +534,14 @@ module.exports = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const action = url.searchParams.get("action")?.toLowerCase();
 
+  if (req.method === "GET" && action === "oauth_start") {
+    return await handleOauthStart(req, res, url);
+  }
+
+  if (req.method === "GET" && action === "oauth_callback") {
+    return await handleOauthCallback(req, res, url);
+  }
+
   if (req.method === "POST" && action === "availability") {
     return await handleAvailability(req, res, body);
   }
@@ -339,5 +550,9 @@ module.exports = async (req, res) => {
     return await handleBook(req, res, body);
   }
 
-  return json(res, 400, { error: "Unknown action" });
+  return json(res, 400, {
+    error: "Unknown action",
+    received_action: action || null,
+    method: req.method,
+  });
 };
