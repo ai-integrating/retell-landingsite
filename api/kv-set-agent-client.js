@@ -1,13 +1,4 @@
 // /api/kv-set-agent-client.js
-// Sets agent->client mapping (and optionally plan + client cal config) in Vercel KV.
-// Designed to be IDEMPOTENT:
-// - If mapping already matches, returns 200 ok (no conflict).
-// - If mapping exists but differs, returns 409 with details.
-//
-// AUTH (no headers required):
-// - Provide { admin_secret: "<KV_ADMIN_SECRET>" } in the JSON body.
-// - KV_ADMIN_SECRET must be set in Vercel env vars (Production).
-
 const { kv } = require("@vercel/kv");
 
 // -------------------- CORS --------------------
@@ -70,12 +61,21 @@ function normalizeServiceKey(v = "") {
     .replace(/_+/g, "_");
 }
 
-// Shallow-clean an object map:
-// - Only keep string values
-// - Trim
-// - Drop empty values
+function tryParseJson(value) {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function cleanStringMap(obj) {
-  if (!obj || typeof obj !== "object") return null;
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
   const out = {};
   for (const k of Object.keys(obj)) {
     const key = normalizeServiceKey(k);
@@ -87,13 +87,30 @@ function cleanStringMap(obj) {
   return Object.keys(out).length ? out : null;
 }
 
+function cleanIdMap(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const out = {};
+  for (const k of Object.keys(obj)) {
+    const key = normalizeServiceKey(k);
+    if (!key) continue;
+
+    const raw = obj[k];
+    if (raw === undefined || raw === null || raw === "") continue;
+
+    const num = Number(raw);
+    if (!Number.isFinite(num)) continue;
+
+    out[key] = num;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Accept cal config in multiple shapes:
-// - body.cal = { username, eventTypeSlug, eventTypeSlugs, timeZone }
-// - OR flat keys: cal_username, cal_event_slug, cal_eventTypeSlug, cal_timezone
-// - OR mapping at body.cal_eventTypeSlugs (object)
-// - OR additional common aliases: username, calUsername, eventTypeSlug, event_slug, timeZone
+// - body.cal as object OR JSON string
+// - flat fields
+// - eventTypeSlugs / eventTypeIds as object OR JSON string
 function extractCalConfig(body, existingCal = {}) {
-  const calObj = body?.cal && typeof body.cal === "object" ? body.cal : {};
+  const calObj = tryParseJson(body?.cal) || {};
 
   const username = asString(
     calObj.username,
@@ -146,6 +163,8 @@ function extractCalConfig(body, existingCal = {}) {
     (calObj.eventTypeSlugs && typeof calObj.eventTypeSlugs === "object"
       ? calObj.eventTypeSlugs
       : null) ||
+    tryParseJson(body?.cal_eventTypeSlugs) ||
+    tryParseJson(body?.eventTypeSlugs) ||
     (body?.cal_eventTypeSlugs && typeof body.cal_eventTypeSlugs === "object"
       ? body.cal_eventTypeSlugs
       : null) ||
@@ -155,15 +174,32 @@ function extractCalConfig(body, existingCal = {}) {
     existingCal?.eventTypeSlugs ||
     null;
 
-  const eventTypeSlugs = cleanStringMap(eventTypeSlugsRaw);
+  const eventTypeIdsRaw =
+    (calObj.eventTypeIds && typeof calObj.eventTypeIds === "object"
+      ? calObj.eventTypeIds
+      : null) ||
+    tryParseJson(body?.cal_eventTypeIds) ||
+    tryParseJson(body?.eventTypeIds) ||
+    (body?.cal_eventTypeIds && typeof body.cal_eventTypeIds === "object"
+      ? body.cal_eventTypeIds
+      : null) ||
+    (body?.eventTypeIds && typeof body.eventTypeIds === "object"
+      ? body.eventTypeIds
+      : null) ||
+    existingCal?.eventTypeIds ||
+    null;
 
-  const hasAny = !!(username || eventTypeSlug || eventTypeSlugs || timeZone);
+  const eventTypeSlugs = cleanStringMap(eventTypeSlugsRaw);
+  const eventTypeIds = cleanIdMap(eventTypeIdsRaw);
+
+  const hasAny = !!(username || eventTypeSlug || eventTypeSlugs || eventTypeIds || timeZone);
   if (!hasAny) return null;
 
   return {
     username: username || undefined,
     eventTypeSlug: eventTypeSlug || undefined,
     eventTypeSlugs: eventTypeSlugs || undefined,
+    eventTypeIds: eventTypeIds || undefined,
     timeZone: timeZone || undefined,
     updated_at: new Date().toISOString(),
   };
@@ -192,8 +228,10 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJsonBody(req);
+    console.log("KV BODY:", JSON.stringify(body, null, 2));
 
     if (!isAdmin(body)) {
+      console.log("KV AUTH FAILED");
       return okJson(res, 401, { ok: false, error: "Unauthorized" });
     }
 
@@ -201,7 +239,10 @@ module.exports = async function handler(req, res) {
     const client_id = asString(body?.client_id, "");
     const plan = asString(body?.plan, "");
 
+    console.log("AGENT/CLIENT:", { agent_id, client_id, plan });
+
     if (!agent_id || !client_id) {
+      console.log("MISSING AGENT OR CLIENT ID");
       return okJson(res, 400, { ok: false, error: "Missing agent_id or client_id" });
     }
 
@@ -212,13 +253,18 @@ module.exports = async function handler(req, res) {
     const prevCal = (await kv.get(calKey)) || {};
     const calConfig = extractCalConfig(body, prevCal);
 
-    // If already set to same client -> idempotent success
+    console.log("EXISTING MAP:", existing);
+    console.log("PREV CAL:", JSON.stringify(prevCal, null, 2));
+    console.log("EXTRACTED CAL CONFIG:", JSON.stringify(calConfig, null, 2));
+    console.log("CAL KEY:", calKey);
+
     if (existing && String(existing) === client_id) {
       if (plan) await kv.set(`plan:${agent_id}`, plan);
 
-      let mergedCal = null;
+      let mergedCal = prevCal;
       if (calConfig) {
         mergedCal = { ...prevCal, ...calConfig };
+        console.log("MERGED CAL TO SAVE:", JSON.stringify(mergedCal, null, 2));
         await kv.set(calKey, mergedCal);
       }
 
@@ -230,26 +276,17 @@ module.exports = async function handler(req, res) {
         plan_set: !!plan,
         cal_set: !!calConfig,
         cal_key: calConfig ? calKey : undefined,
-        cal_fields: calConfig
-          ? {
-              username: !!mergedCal?.username,
-              eventTypeSlug: !!mergedCal?.eventTypeSlug,
-              eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
-              timeZone: !!mergedCal?.timeZone,
-            }
-          : undefined,
-        cal_preview: calConfig
-          ? {
-              username: mergedCal?.username || null,
-              eventTypeSlug: mergedCal?.eventTypeSlug || null,
-              eventTypeSlugs: mergedCal?.eventTypeSlugs || null,
-              timeZone: mergedCal?.timeZone || null,
-            }
-          : undefined,
+        cal_fields: {
+          username: !!mergedCal?.username,
+          eventTypeSlug: !!mergedCal?.eventTypeSlug,
+          eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
+          eventTypeIds: !!mergedCal?.eventTypeIds,
+          timeZone: !!mergedCal?.timeZone,
+        },
+        cal_preview: mergedCal || null,
       });
     }
 
-    // If set to DIFFERENT client -> conflict
     if (existing && String(existing) !== client_id) {
       return okJson(res, 409, {
         ok: false,
@@ -260,14 +297,14 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Otherwise set mapping
     await kv.set(mapKey, client_id);
 
     if (plan) await kv.set(`plan:${agent_id}`, plan);
 
-    let mergedCal = null;
+    let mergedCal = prevCal;
     if (calConfig) {
       mergedCal = { ...prevCal, ...calConfig };
+      console.log("MERGED CAL TO SAVE:", JSON.stringify(mergedCal, null, 2));
       await kv.set(calKey, mergedCal);
     }
 
@@ -279,22 +316,14 @@ module.exports = async function handler(req, res) {
       plan_set: !!plan,
       cal_set: !!calConfig,
       cal_key: calConfig ? calKey : undefined,
-      cal_fields: calConfig
-        ? {
-            username: !!mergedCal?.username,
-            eventTypeSlug: !!mergedCal?.eventTypeSlug,
-            eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
-            timeZone: !!mergedCal?.timeZone,
-          }
-        : undefined,
-      cal_preview: calConfig
-        ? {
-            username: mergedCal?.username || null,
-            eventTypeSlug: mergedCal?.eventTypeSlug || null,
-            eventTypeSlugs: mergedCal?.eventTypeSlugs || null,
-            timeZone: mergedCal?.timeZone || null,
-          }
-        : undefined,
+      cal_fields: {
+        username: !!mergedCal?.username,
+        eventTypeSlug: !!mergedCal?.eventTypeSlug,
+        eventTypeSlugs: !!mergedCal?.eventTypeSlugs,
+        eventTypeIds: !!mergedCal?.eventTypeIds,
+        timeZone: !!mergedCal?.timeZone,
+      },
+      cal_preview: mergedCal || null,
     });
   } catch (err) {
     console.error("kv-set-agent-client: ERROR", err);
