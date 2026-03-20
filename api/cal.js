@@ -10,7 +10,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug"
+    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug, X-Cal-Event-Id"
   );
 }
 
@@ -53,7 +53,13 @@ function normalizeServiceKey(v = "") {
 
 function resolveEventTypeSlug(req, body) {
   const args = body.args || body || {};
-  const bodySlug = args.eventTypeSlug || args.event_slug || args.eventSlug || args.slug || args.service_key || null;
+  const bodySlug =
+    args.eventTypeSlug ||
+    args.event_slug ||
+    args.eventSlug ||
+    args.slug ||
+    null;
+
   const headerSlug = req.headers["x-cal-slug"] || null;
   const chosen = bodySlug || headerSlug || "";
   return normalizeSlug(chosen);
@@ -66,7 +72,10 @@ function getCalRedirectUri() {
 // -------------------- AUTO-RESOLVE CAL CONFIG FROM AGENT --------------------
 async function resolveCalFromAgent(req, body) {
   const args = body.args || body || {};
-  const agentId = asString(req.headers["x-agent-id"] || body.agent_id || body.agentId || args.agent_id, "");
+  const agentId = asString(
+    req.headers["x-agent-id"] || body.agent_id || body.agentId || args.agent_id,
+    ""
+  );
 
   if (!agentId) return null;
 
@@ -78,13 +87,13 @@ async function resolveCalFromAgent(req, body) {
     return { agentId, clientId: String(clientId), error: "no_cal_config" };
   }
 
-  // UPDATED: Handle snake_case from your KV store
   return {
     agentId,
     clientId: String(clientId),
     username: asString(cal.username, ""),
     eventTypeSlug: asString(cal.eventTypeSlug || cal.event_type_slug, ""),
     eventTypeSlugs: cal.eventTypeSlugs || cal.event_type_slugs || null,
+    eventTypeIds: cal.eventTypeIds || cal.event_type_ids || null,
     timeZone: asString(cal.timeZone || cal.time_zone, "America/New_York")
   };
 }
@@ -92,12 +101,57 @@ async function resolveCalFromAgent(req, body) {
 function pickResolvedSlug(body, resolved) {
   if (!resolved) return "";
   if (resolved.eventTypeSlug) return normalizeSlug(resolved.eventTypeSlug);
+
   const args = body.args || body || {};
-  const serviceKey = normalizeServiceKey(args.service_key || args.serviceKey || args.service);
-  if (serviceKey && resolved.eventTypeSlugs && (resolved.eventTypeSlugs[serviceKey] || resolved.eventTypeSlugs[serviceKey.replace(/-/g, '_')])) {
-    return normalizeSlug(resolved.eventTypeSlugs[serviceKey] || resolved.eventTypeSlugs[serviceKey.replace(/-/g, '_')]);
+  const serviceKey = normalizeServiceKey(
+    args.service_key || args.serviceKey || args.service
+  );
+
+  if (
+    serviceKey &&
+    resolved.eventTypeSlugs &&
+    (resolved.eventTypeSlugs[serviceKey] ||
+      resolved.eventTypeSlugs[serviceKey.replace(/-/g, "_")])
+  ) {
+    return normalizeSlug(
+      resolved.eventTypeSlugs[serviceKey] ||
+      resolved.eventTypeSlugs[serviceKey.replace(/-/g, "_")]
+    );
   }
+
   return "";
+}
+
+function pickResolvedEventTypeId(body, resolved) {
+  if (!resolved) return null;
+
+  const args = body.args || body || {};
+
+  const direct =
+    args.eventTypeId ||
+    args.event_type_id ||
+    body.eventTypeId ||
+    body.event_type_id;
+
+  if (direct !== undefined && direct !== null && direct !== "") {
+    const num = Number(direct);
+    if (Number.isFinite(num)) return num;
+  }
+
+  const serviceKey = normalizeServiceKey(
+    args.service_key || args.serviceKey || args.service || ""
+  );
+
+  if (
+    serviceKey &&
+    resolved.eventTypeIds &&
+    Object.prototype.hasOwnProperty.call(resolved.eventTypeIds, serviceKey)
+  ) {
+    const num = Number(resolved.eventTypeIds[serviceKey]);
+    if (Number.isFinite(num)) return num;
+  }
+
+  return null;
 }
 
 function getCalHeaders() {
@@ -109,7 +163,12 @@ function getCalHeaders() {
 }
 
 function extractCalError(err) {
-  return err?.response?.data?.error?.message || err?.response?.data?.message || err?.message || "Unknown Cal.com error";
+  return (
+    err?.response?.data?.error?.message ||
+    err?.response?.data?.message ||
+    err?.message ||
+    "Unknown Cal.com error"
+  );
 }
 
 // -------------------- AVAILABILITY (V2) --------------------
@@ -122,22 +181,47 @@ async function handleAvailability(req, res, body) {
   if (!eventTypeSlug) eventTypeSlug = pickResolvedSlug(body, resolved);
 
   const args = body.args || body || {};
-  const timeZone = asString(args.timeZone || args.time_zone || body.timeZone) || resolved?.timeZone || "America/New_York";
+  const timeZone =
+    asString(args.timeZone || args.time_zone || body.timeZone) ||
+    resolved?.timeZone ||
+    "America/New_York";
 
   if (!username || !eventTypeSlug) {
-    return json(res, 400, { error: "Missing Client Config", debug: { agentId: resolved?.agentId || "not_found", slug: eventTypeSlug } });
+    return json(res, 400, {
+      error: "Missing Client Config",
+      debug: {
+        agentId: resolved?.agentId || "not_found",
+        slug: eventTypeSlug,
+        username
+      }
+    });
   }
 
   const start = asString(body.start_date || body.args?.start_date, ymd(Date.now()));
-  const end = asString(body.end_date || body.args?.end_date, ymd(Date.now() + 7 * 24 * 60 * 60 * 1000));
-  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(username)}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&timeZone=${encodeURIComponent(timeZone)}`;
+  const end = asString(
+    body.end_date || body.args?.end_date,
+    ymd(Date.now() + 7 * 24 * 60 * 60 * 1000)
+  );
+
+  const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(
+    username
+  )}&eventTypeSlug=${encodeURIComponent(eventTypeSlug)}&start=${encodeURIComponent(
+    start
+  )}&end=${encodeURIComponent(end)}&timeZone=${encodeURIComponent(timeZone)}`;
 
   try {
     const resp = await axios.get(url, { headers: getCalHeaders() });
-    const starts = Object.values(resp.data?.data || {}).flat().map((s) => s.start).filter(Boolean);
+    const starts = Object.values(resp.data?.data || {})
+      .flat()
+      .map((s) => s.start)
+      .filter(Boolean);
+
     return json(res, 200, { ok: true, available_slots: starts });
   } catch (err) {
-    return json(res, 500, { error: "Cal fetch failed", message: extractCalError(err) });
+    return json(res, 500, {
+      error: "Cal fetch failed",
+      message: extractCalError(err)
+    });
   }
 }
 
@@ -157,10 +241,25 @@ async function handleBook(req, res, body) {
   const phone = asString(args.phone || args.phoneNumber || args.phone_number);
   const timeZone = asString(args.timeZone || args.time_zone) || resolved?.timeZone || "America/New_York";
 
-  if (!start || !name || !email || !username || !eventTypeSlug) {
-    return json(res, 400, { 
-      error: "Missing details", 
-      debug: { hasStart: !!start, hasName: !!name, hasEmail: !!email, username, eventTypeSlug } 
+  const eventTypeId =
+    pickResolvedEventTypeId(body, resolved) ||
+    (() => {
+      const rawId = req.headers["x-cal-event-id"];
+      const num = Number(rawId);
+      return Number.isFinite(num) ? num : null;
+    })();
+
+  if (!start || !name || !email || !username || (!eventTypeSlug && !eventTypeId)) {
+    return json(res, 400, {
+      error: "Missing details",
+      debug: {
+        hasStart: !!start,
+        hasName: !!name,
+        hasEmail: !!email,
+        username,
+        eventTypeSlug,
+        eventTypeId
+      }
     });
   }
 
@@ -169,17 +268,16 @@ async function handleBook(req, res, body) {
     name,
     email,
     username,
-    eventTypeSlug,
     timeZone,
     language: "en",
     metadata: {},
     ...(phone ? { smsReminderNumber: phone } : {})
   };
 
-  // Check for numeric ID in all possible places
-  const rawId = args.eventTypeId || args.event_type_id || req.headers["x-cal-event-id"];
-  if (rawId && !isNaN(rawId)) {
-    v1Payload.eventTypeId = Number(rawId);
+  if (eventTypeId) {
+    v1Payload.eventTypeId = eventTypeId;
+  } else if (eventTypeSlug) {
+    v1Payload.eventTypeSlug = eventTypeSlug;
   }
 
   try {
@@ -189,8 +287,18 @@ async function handleBook(req, res, body) {
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
     const msg = extractCalError(err);
-    console.error("CAL V1 BOOK ERROR:", msg);
-    return json(res, 500, { error: "Booking failed", message: msg });
+    console.error("CAL V1 BOOK ERROR:", msg, {
+      username,
+      eventTypeSlug,
+      eventTypeId,
+      start
+    });
+
+    return json(res, 500, {
+      error: "Booking failed",
+      message: msg,
+      debug: { username, eventTypeSlug, eventTypeId }
+    });
   }
 }
 
@@ -198,6 +306,7 @@ async function handleBook(req, res, body) {
 module.exports = async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
   const body = req.method === "POST" ? await readJsonBody(req) : {};
   const url = new URL(req.url, `http://${req.headers.host}`);
   const action = url.searchParams.get("action")?.toLowerCase();
