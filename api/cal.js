@@ -195,6 +195,8 @@ async function handleOauthStart(req, res, url) {
 
   res.writeHead(302, { Location: authUrl });
   return res.end();
+}
+
 async function handleOauthCallback(req, res, url) {
   const code = asString(url.searchParams.get("code"));
   const state = asString(url.searchParams.get("state"));
@@ -279,109 +281,62 @@ async function handleOauthCallback(req, res, url) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    // -------------------- NEW: BUILD / UPDATE CLIENT CAL CONFIG --------------------
-    let mappedClientId = await kv.get(`agent:${agent_id}:client`);
-    mappedClientId = asString(mappedClientId);
-
+    // -------------------- SAFE: BUILD / UPDATE CLIENT CAL CONFIG --------------------
+    let mappedClientId = "";
     let username = "";
     let timeZone = "America/New_York";
-    let eventTypeSlugs = {};
-    let eventTypeIds = {};
 
-    const calHeaders = {
-      Authorization: `Bearer ${tokenPayload.access_token}`,
-      "Content-Type": "application/json",
-      "cal-api-version": CAL_API_VERSION,
-    };
-
-    // 1) Fetch current Cal user profile
     try {
-      const meResp = await axios.get("https://api.cal.com/v2/me", {
-        headers: calHeaders,
-      });
+      mappedClientId = asString(await kv.get(`agent:${agent_id}:client`), "");
 
-      const me = meResp.data?.data || {};
-      username = asString(me.username, "");
-      timeZone = asString(
-        me.timeZone || me.timezone || me.defaultTimezone,
-        "America/New_York"
-      );
-    } catch (meErr) {
-      console.log(
-        "CAL OAUTH CALLBACK /v2/me ERROR",
-        JSON.stringify(
-          {
-            responseStatus: meErr.response?.status,
-            responseData: meErr.response?.data,
-            message: meErr.message,
-          },
-          null,
-          2
-        )
-      );
-    }
+      if (mappedClientId) {
+        const calHeaders = {
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+          "Content-Type": "application/json",
+          "cal-api-version": CAL_API_VERSION,
+        };
 
-    // 2) Fetch event types and build service-key maps
-    try {
-      const eventTypesResp = await axios.get("https://api.cal.com/v2/event-types", {
-        headers: calHeaders,
-      });
+        const meResp = await axios.get("https://api.cal.com/v2/me", {
+          headers: calHeaders,
+        });
 
-      const items = eventTypesResp.data?.data || [];
-      const arr = Array.isArray(items) ? items : [];
+        const me = meResp?.data?.data || {};
+        username = asString(me.username, "");
+        timeZone = asString(
+          me.timeZone || me.timezone || me.defaultTimezone,
+          "America/New_York"
+        );
 
-      for (const item of arr) {
-        const slug = asString(item.slug || item.eventTypeSlug || "");
-        const id = Number(item.id);
+        const calKey = `client:${mappedClientId}:cal`;
+        const prevCalRaw = await kv.get(calKey);
+        const prevCal =
+          prevCalRaw && typeof prevCalRaw === "object" && !Array.isArray(prevCalRaw)
+            ? prevCalRaw
+            : {};
 
-        if (!slug) continue;
+        const nextCal = {
+          ...prevCal,
+          ...(username ? { username } : {}),
+          ...(timeZone ? { timeZone } : {}),
+          updated_at: new Date().toISOString(),
+        };
 
-        const serviceKey = normalizeServiceKey(slug);
-
-        eventTypeSlugs[serviceKey] = slug;
-
-        if (Number.isFinite(id)) {
-          eventTypeIds[serviceKey] = id;
-        }
+        await kv.set(calKey, nextCal);
       }
-    } catch (etErr) {
+    } catch (cfgErr) {
       console.log(
-        "CAL OAUTH CALLBACK /v2/event-types ERROR",
+        "CAL OAUTH CALLBACK CONFIG SAVE ERROR",
         JSON.stringify(
           {
-            responseStatus: etErr.response?.status,
-            responseData: etErr.response?.data,
-            message: etErr.message,
+            mappedClientId,
+            message: cfgErr?.message,
+            responseStatus: cfgErr?.response?.status,
+            responseData: cfgErr?.response?.data,
           },
           null,
           2
         )
       );
-    }
-
-    // 3) Save client config if this agent is already mapped to a client
-    if (mappedClientId) {
-      const existingCal = (await kv.get(`client:${mappedClientId}:cal`)) || {};
-
-      const mergedEventTypeSlugs = {
-        ...(existingCal.eventTypeSlugs || {}),
-        ...eventTypeSlugs,
-      };
-
-      const mergedEventTypeIds = {
-        ...(existingCal.eventTypeIds || {}),
-        ...eventTypeIds,
-      };
-
-      const calConfig = {
-        ...existingCal,
-        username: username || asString(existingCal.username, ""),
-        timeZone: timeZone || asString(existingCal.timeZone, "America/New_York"),
-        eventTypeSlugs: mergedEventTypeSlugs,
-        eventTypeIds: mergedEventTypeIds,
-      };
-
-      await kv.set(`client:${mappedClientId}:cal`, calConfig);
     }
 
     console.log("CAL OAUTH CALLBACK SUCCESS", {
@@ -391,8 +346,7 @@ async function handleOauthCallback(req, res, url) {
       storedEmailKey: emailLower ? tokenKeyForEmail(emailLower) : null,
       mappedClientId: mappedClientId || null,
       username: username || null,
-      eventTypeSlugCount: Object.keys(eventTypeSlugs).length,
-      eventTypeIdCount: Object.keys(eventTypeIds).length,
+      timeZone: timeZone || null,
     });
 
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
