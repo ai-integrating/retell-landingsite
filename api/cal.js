@@ -75,7 +75,6 @@ function tokenKeyForEmail(email) {
   return e ? `cal:tokens:${e}` : "";
 }
 
-// IMPORTANT: old working flow used CAL_OAUTH_REDIRECT_URI
 function getCalRedirectUri() {
   return (
     process.env.CAL_OAUTH_REDIRECT_URI ||
@@ -83,6 +82,17 @@ function getCalRedirectUri() {
     process.env.CAL_OAUTH_REDIRECT_URL ||
     ""
   );
+}
+
+function extractEventTypeRows(payload) {
+  if (Array.isArray(payload)) return payload;
+
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.data?.eventTypes)) return payload.data.eventTypes;
+  if (Array.isArray(payload?.eventTypes)) return payload.eventTypes;
+  if (Array.isArray(payload?.collection)) return payload.collection;
+
+  return [];
 }
 
 async function resolveCalContext(req, body) {
@@ -138,7 +148,7 @@ async function resolveCalContext(req, body) {
   };
 }
 
-// -------------------- OAUTH HANDLERS (FROM OLD WORKING FLOW) --------------------
+// -------------------- OAUTH HANDLERS --------------------
 async function handleOauthStart(req, res, url) {
   const agent_id = asString(url.searchParams.get("agent_id"));
   const email = asString(url.searchParams.get("email"));
@@ -287,25 +297,41 @@ async function handleOauthCallback(req, res, url) {
       const username = asString(meResp.data?.data?.username);
 
       if (client_id && username) {
-        const etResp = await axios.get("https://api.cal.com/v2/event-types", {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "cal-api-version": CAL_API_VERSION
-          },
-          params: { username }
-        });
-
-        const rows = Array.isArray(etResp.data?.data) ? etResp.data.data : [];
-        const eventTypeSlugs = {};
-
-        for (const et of rows) {
-          if (et?.slug) {
-            const key = normalizeServiceKey(et.slug);
-            eventTypeSlugs[key] = et.slug;
-          }
-        }
-
         const existingConfig = (await kv.get(`client:${client_id}:cal`)) || {};
+
+        let eventTypeSlugs = existingConfig.eventTypeSlugs || {};
+
+        try {
+          const etResp = await axios.get("https://api.cal.com/v2/event-types", {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "cal-api-version": CAL_API_VERSION
+            }
+          });
+
+          console.log("CAL EVENT TYPES RAW", JSON.stringify(etResp.data, null, 2));
+
+          const rows = extractEventTypeRows(etResp.data);
+          const builtMap = {};
+
+          for (const et of rows) {
+            const slug = asString(et?.slug);
+            if (!slug) continue;
+
+            const key = normalizeServiceKey(slug);
+            builtMap[key] = slug;
+          }
+
+          if (Object.keys(builtMap).length > 0) {
+            eventTypeSlugs = builtMap;
+          }
+        } catch (eventTypeErr) {
+          console.log("CAL EVENT TYPES FETCH ERROR", JSON.stringify({
+            responseStatus: eventTypeErr.response?.status,
+            responseData: eventTypeErr.response?.data,
+            message: eventTypeErr.message
+          }, null, 2));
+        }
 
         await kv.set(`client:${client_id}:cal`, {
           ...existingConfig,
