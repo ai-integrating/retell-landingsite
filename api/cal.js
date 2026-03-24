@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { kv } = require("@vercel/kv");
 
 const CAL_API_VERSION = "2024-09-04";
+const CAL_EVENT_TYPES_API_VERSION = "2024-06-14";
 
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
@@ -107,9 +108,14 @@ function extractTeamRows(payload) {
 }
 
 async function fetchAllEventTypeSlugs(accessToken) {
-  const headers = {
+  const defaultHeaders = {
     Authorization: `Bearer ${accessToken}`,
     "cal-api-version": CAL_API_VERSION
+  };
+
+  const eventTypeHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "cal-api-version": CAL_EVENT_TYPES_API_VERSION
   };
 
   const slugMap = {};
@@ -125,7 +131,7 @@ async function fetchAllEventTypeSlugs(accessToken) {
   // 1) Personal event types
   try {
     const etResp = await axios.get("https://api.cal.com/v2/event-types", {
-      headers
+      headers: eventTypeHeaders
     });
 
     console.log("CAL PERSONAL EVENT TYPES RAW", JSON.stringify(etResp.data, null, 2));
@@ -141,7 +147,7 @@ async function fetchAllEventTypeSlugs(accessToken) {
   // 2) Team fallback
   try {
     const teamsResp = await axios.get("https://api.cal.com/v2/teams", {
-      headers
+      headers: defaultHeaders
     });
 
     console.log("CAL TEAMS RAW", JSON.stringify(teamsResp.data, null, 2));
@@ -155,7 +161,7 @@ async function fetchAllEventTypeSlugs(accessToken) {
       try {
         const teamEtResp = await axios.get(
           `https://api.cal.com/v2/teams/${teamId}/event-types`,
-          { headers }
+          { headers: defaultHeaders }
         );
 
         console.log(
