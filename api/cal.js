@@ -287,7 +287,14 @@ async function handleOauthCallback(req, res, url) {
     let timeZone = "America/New_York";
 
     try {
-      mappedClientId = asString(await kv.get(`agent:${agent_id}:client`), "");
+      const lookupKey = `agent:${agent_id}:client`;
+      console.log("OAUTH LOOKUP KEY", lookupKey);
+
+      const mappedClientIdRaw = await kv.get(lookupKey);
+      console.log("OAUTH LOOKUP RAW RESULT", mappedClientIdRaw);
+
+      mappedClientId = asString(mappedClientIdRaw, "");
+      console.log("OAUTH LOOKUP FINAL RESULT", mappedClientId);
 
       if (mappedClientId) {
         const calHeaders = {
@@ -308,7 +315,11 @@ async function handleOauthCallback(req, res, url) {
         );
 
         const calKey = `client:${mappedClientId}:cal`;
+        console.log("CAL KEY", calKey);
+
         const prevCalRaw = await kv.get(calKey);
+        console.log("PREV CAL RAW", prevCalRaw);
+
         const prevCal =
           prevCalRaw && typeof prevCalRaw === "object" && !Array.isArray(prevCalRaw)
             ? prevCalRaw
@@ -320,6 +331,8 @@ async function handleOauthCallback(req, res, url) {
           ...(timeZone ? { timeZone } : {}),
           updated_at: new Date().toISOString(),
         };
+
+        console.log("NEXT CAL TO SAVE", nextCal);
 
         await kv.set(calKey, nextCal);
       }
