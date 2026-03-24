@@ -95,6 +95,95 @@ function extractEventTypeRows(payload) {
   return [];
 }
 
+function extractTeamRows(payload) {
+  if (Array.isArray(payload)) return payload;
+
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.data?.teams)) return payload.data.teams;
+  if (Array.isArray(payload?.teams)) return payload.teams;
+  if (Array.isArray(payload?.collection)) return payload.collection;
+
+  return [];
+}
+
+async function fetchAllEventTypeSlugs(accessToken) {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "cal-api-version": CAL_API_VERSION
+  };
+
+  const slugMap = {};
+
+  const addRows = (rows = []) => {
+    for (const et of rows) {
+      const slug = asString(et?.slug);
+      if (!slug) continue;
+      slugMap[normalizeServiceKey(slug)] = slug;
+    }
+  };
+
+  // 1) Personal event types
+  try {
+    const etResp = await axios.get("https://api.cal.com/v2/event-types", {
+      headers
+    });
+
+    console.log("CAL PERSONAL EVENT TYPES RAW", JSON.stringify(etResp.data, null, 2));
+    addRows(extractEventTypeRows(etResp.data));
+  } catch (err) {
+    console.log("CAL PERSONAL EVENT TYPES ERROR", JSON.stringify({
+      responseStatus: err.response?.status,
+      responseData: err.response?.data,
+      message: err.message
+    }, null, 2));
+  }
+
+  // 2) Team fallback
+  try {
+    const teamsResp = await axios.get("https://api.cal.com/v2/teams", {
+      headers
+    });
+
+    console.log("CAL TEAMS RAW", JSON.stringify(teamsResp.data, null, 2));
+
+    const teamRows = extractTeamRows(teamsResp.data);
+
+    for (const team of teamRows) {
+      const teamId = team?.id;
+      if (!teamId) continue;
+
+      try {
+        const teamEtResp = await axios.get(
+          `https://api.cal.com/v2/teams/${teamId}/event-types`,
+          { headers }
+        );
+
+        console.log(
+          `CAL TEAM EVENT TYPES RAW teamId=${teamId}`,
+          JSON.stringify(teamEtResp.data, null, 2)
+        );
+
+        addRows(extractEventTypeRows(teamEtResp.data));
+      } catch (teamErr) {
+        console.log("CAL TEAM EVENT TYPES ERROR", JSON.stringify({
+          teamId,
+          responseStatus: teamErr.response?.status,
+          responseData: teamErr.response?.data,
+          message: teamErr.message
+        }, null, 2));
+      }
+    }
+  } catch (teamsErr) {
+    console.log("CAL TEAMS FETCH ERROR", JSON.stringify({
+      responseStatus: teamsErr.response?.status,
+      responseData: teamsErr.response?.data,
+      message: teamsErr.message
+    }, null, 2));
+  }
+
+  return slugMap;
+}
+
 async function resolveCalContext(req, body) {
   const args = body.args || body || {};
   const agentId = asString(
@@ -300,37 +389,10 @@ async function handleOauthCallback(req, res, url) {
         const existingConfig = (await kv.get(`client:${client_id}:cal`)) || {};
 
         let eventTypeSlugs = existingConfig.eventTypeSlugs || {};
+        const fetchedSlugs = await fetchAllEventTypeSlugs(accessToken);
 
-        try {
-          const etResp = await axios.get("https://api.cal.com/v2/event-types", {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "cal-api-version": CAL_API_VERSION
-            }
-          });
-
-          console.log("CAL EVENT TYPES RAW", JSON.stringify(etResp.data, null, 2));
-
-          const rows = extractEventTypeRows(etResp.data);
-          const builtMap = {};
-
-          for (const et of rows) {
-            const slug = asString(et?.slug);
-            if (!slug) continue;
-
-            const key = normalizeServiceKey(slug);
-            builtMap[key] = slug;
-          }
-
-          if (Object.keys(builtMap).length > 0) {
-            eventTypeSlugs = builtMap;
-          }
-        } catch (eventTypeErr) {
-          console.log("CAL EVENT TYPES FETCH ERROR", JSON.stringify({
-            responseStatus: eventTypeErr.response?.status,
-            responseData: eventTypeErr.response?.data,
-            message: eventTypeErr.message
-          }, null, 2));
+        if (Object.keys(fetchedSlugs).length > 0) {
+          eventTypeSlugs = fetchedSlugs;
         }
 
         await kv.set(`client:${client_id}:cal`, {
