@@ -5,6 +5,7 @@ const { kv } = require("@vercel/kv");
 
 const CAL_API_VERSION = "2024-09-04";
 const CAL_EVENT_TYPES_API_VERSION = "2024-06-14";
+const CAL_BOOKINGS_API_VERSION = "2026-02-25";
 
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
@@ -557,7 +558,7 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body;
 
-  const start = asString(
+  const rawStart = asString(
     args.start ||
     args.slot ||
     args.selected_start
@@ -567,12 +568,12 @@ async function handleBook(req, res, body) {
   const email = asString(args.attendee_email || args.email);
   const phone = asString(args.phone);
 
-  if (!start || !name || !email || !ctx.username || !ctx.eventTypeSlug) {
+  if (!rawStart || !name || !email || !ctx.username || !ctx.eventTypeSlug) {
     return json(res, 400, {
       error: "Missing details",
       version: "AUTOMATED_AGENT_CONTEXT_V1",
       debug: {
-        hasStart: !!start,
+        hasStart: !!rawStart,
         hasName: !!name,
         hasEmail: !!email,
         hasUser: !!ctx.username,
@@ -584,6 +585,17 @@ async function handleBook(req, res, body) {
       }
     });
   }
+
+  const parsedStart = new Date(rawStart);
+  if (Number.isNaN(parsedStart.getTime())) {
+    return json(res, 400, {
+      error: "Invalid start datetime",
+      version: "AUTOMATED_AGENT_CONTEXT_V1",
+      debug: { rawStart }
+    });
+  }
+
+  const start = parsedStart.toISOString();
 
   const payload = {
     username: ctx.username,
@@ -600,7 +612,7 @@ async function handleBook(req, res, body) {
 
   const headers = {
     "Content-Type": "application/json",
-    "cal-api-version": CAL_API_VERSION,
+    "cal-api-version": CAL_BOOKINGS_API_VERSION,
     Authorization: `Bearer ${ctx.accessToken}`
   };
 
@@ -609,6 +621,8 @@ async function handleBook(req, res, body) {
     agentId: ctx.agentId,
     clientId: ctx.clientId,
     serviceKey: ctx.serviceKey,
+    rawStart,
+    utcStart: start,
     payload
   }, null, 2));
 
@@ -630,6 +644,8 @@ async function handleBook(req, res, body) {
       agentId: ctx.agentId,
       clientId: ctx.clientId,
       serviceKey: ctx.serviceKey,
+      rawStart,
+      utcStart: start,
       payload,
       responseStatus: err.response?.status,
       responseData: err.response?.data,
@@ -641,6 +657,8 @@ async function handleBook(req, res, body) {
       version: "AUTOMATED_AGENT_CONTEXT_V1",
       message: err.response?.data || err.message,
       debug: {
+        rawStart,
+        utcStart: start,
         payload
       }
     });
