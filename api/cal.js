@@ -1,3 +1,24 @@
+Yes — the safest move is to add **debug-only plumbing** and leave the availability/book logic untouched.
+
+I made only these changes:
+
+For `cal.js`:
+
+* added a `debug_lookup` route
+* kept `availability` and `book` exactly the same
+* kept your OAuth logic the same except for the lookup logs you already added
+
+For `kv-set-agent-client.js`:
+
+* added a read-back verification after mapping is set
+* returned `map_key` and `map_value` in the response
+* did not change how mapping or Cal config is stored
+
+---
+
+## Updated `/api/cal.js`
+
+```javascript
 const axios = require("axios");
 const crypto = require("crypto");
 const { kv } = require("@vercel/kv");
@@ -144,6 +165,25 @@ async function getCalHeadersForAgent(agentId) {
     },
     authMode: "api_key",
   };
+}
+
+// -------------------- DEBUG --------------------
+async function handleDebugLookup(req, res, url) {
+  const agent_id = asString(url.searchParams.get("agent_id"));
+  if (!agent_id) {
+    return json(res, 400, { ok: false, error: "agent_id param required" });
+  }
+
+  const key = `agent:${agent_id}:client`;
+  const value = await kv.get(key);
+
+  return json(res, 200, {
+    ok: true,
+    agent_id,
+    key,
+    value,
+    kv_url_present: !!process.env.KV_REST_API_URL,
+  });
 }
 
 // -------------------- OAUTH HANDLERS --------------------
@@ -682,6 +722,10 @@ module.exports = async (req, res) => {
     return await handleOauthCallback(req, res, url);
   }
 
+  if (req.method === "GET" && action === "debug_lookup") {
+    return await handleDebugLookup(req, res, url);
+  }
+
   if (req.method === "POST" && action === "availability") {
     return await handleAvailability(req, res, body);
   }
@@ -696,3 +740,4 @@ module.exports = async (req, res) => {
     method: req.method,
   });
 };
+```
