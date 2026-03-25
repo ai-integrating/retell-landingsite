@@ -110,6 +110,8 @@ function replaceAgentIdInTools(tools, agentId) {
 
     return cloned;
   });
+}
+
 async function updateRetellLlmTools(llmId, generalTools) {
   if (!llmId || !Array.isArray(generalTools)) return;
 
@@ -124,7 +126,6 @@ async function updateRetellLlmTools(llmId, generalTools) {
     }
   );
 }
-
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
