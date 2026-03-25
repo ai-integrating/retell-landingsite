@@ -191,6 +191,55 @@ async function fetchAllEventTypeSlugs(accessToken) {
   return slugMap;
 }
 
+async function refreshAccessTokenForAgent(agentId) {
+  const existing = await kv.get(tokenKeyForAgent(agentId));
+  const refreshToken = asString(existing?.refresh_token);
+
+  if (!refreshToken) {
+    throw new Error("No refresh token available");
+  }
+
+  const clientId = process.env.CAL_CLIENT_ID;
+  const clientSecret = process.env.CAL_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    throw new Error("Missing CAL_CLIENT_ID or CAL_CLIENT_SECRET");
+  }
+
+  const resp = await axios.post(
+    "https://api.cal.com/v2/auth/oauth2/token",
+    {
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken
+    },
+    {
+      headers: {
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  const data = resp.data || {};
+
+  const refreshed = {
+    access_token: asString(data.access_token),
+    refresh_token: asString(data.refresh_token || refreshToken),
+    token_type: asString(data.token_type, "bearer"),
+    expires_at: data.expires_in
+      ? Date.now() + Number(data.expires_in) * 1000
+      : 0
+  };
+
+  if (!refreshed.access_token) {
+    throw new Error("Refresh succeeded but no access_token returned");
+  }
+
+  await kv.set(tokenKeyForAgent(agentId), refreshed);
+  return refreshed;
+}
+
 async function resolveCalContext(req, body) {
   const args = body.args || body || {};
   const agentId = asString(
@@ -639,6 +688,8 @@ async function handleBook(req, res, body) {
       booking: resp.data
     });
   } catch (err) {
+    const status = err.response?.status;
+
     console.log("CAL BOOKING ERROR", JSON.stringify({
       version: "AUTOMATED_AGENT_CONTEXT_V1",
       agentId: ctx.agentId,
@@ -647,10 +698,61 @@ async function handleBook(req, res, body) {
       rawStart,
       utcStart: start,
       payload,
-      responseStatus: err.response?.status,
+      responseStatus: status,
       responseData: err.response?.data,
       message: err.message
     }, null, 2));
+
+    if (status === 401) {
+      try {
+        console.log("TOKEN EXPIRED → REFRESHING");
+
+        const refreshed = await refreshAccessTokenForAgent(ctx.agentId);
+
+        const retryResp = await axios.post(
+          "https://api.cal.com/v2/bookings",
+          payload,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "cal-api-version": CAL_BOOKINGS_API_VERSION,
+              Authorization: `Bearer ${refreshed.access_token}`
+            }
+          }
+        );
+
+        return json(res, 200, {
+          ok: true,
+          version: "AUTOMATED_AGENT_CONTEXT_V1",
+          booking: retryResp.data,
+          token_refreshed: true
+        });
+      } catch (retryErr) {
+        console.log("CAL BOOKING RETRY ERROR", JSON.stringify({
+          version: "AUTOMATED_AGENT_CONTEXT_V1",
+          agentId: ctx.agentId,
+          clientId: ctx.clientId,
+          serviceKey: ctx.serviceKey,
+          rawStart,
+          utcStart: start,
+          payload,
+          responseStatus: retryErr.response?.status,
+          responseData: retryErr.response?.data,
+          message: retryErr.message
+        }, null, 2));
+
+        return json(res, 500, {
+          error: "Booking failed after token refresh",
+          version: "AUTOMATED_AGENT_CONTEXT_V1",
+          message: retryErr.response?.data || retryErr.message,
+          debug: {
+            rawStart,
+            utcStart: start,
+            payload
+          }
+        });
+      }
+    }
 
     return json(res, 500, {
       error: "Booking failed",
