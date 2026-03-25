@@ -47,6 +47,13 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
 }
 
+function normalizeEmailInput(email = "") {
+  return String(email || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
@@ -129,7 +136,6 @@ async function fetchAllEventTypeSlugs(accessToken) {
     }
   };
 
-  // 1) Personal event types
   try {
     const etResp = await axios.get("https://api.cal.com/v2/event-types", {
       headers: eventTypeHeaders
@@ -145,7 +151,6 @@ async function fetchAllEventTypeSlugs(accessToken) {
     }, null, 2));
   }
 
-  // 2) Team fallback
   try {
     const teamsResp = await axios.get("https://api.cal.com/v2/teams", {
       headers: defaultHeaders
@@ -427,7 +432,6 @@ async function handleOauthCallback(req, res, url) {
       await kv.set(tokenKeyForEmail(emailLower), tokenPayload);
     }
 
-    // -------------------- AUTO ENRICH CLIENT CONFIG --------------------
     try {
       const accessToken = tokenPayload.access_token;
       const client_id = await kv.get(`agent:${agent_id}:client`);
@@ -614,7 +618,8 @@ async function handleBook(req, res, body) {
   );
 
   const name = asString(args.attendee_name || args.name);
-  const email = asString(args.attendee_email || args.email);
+  const rawEmail = asString(args.attendee_email || args.email);
+  const email = normalizeEmailInput(rawEmail);
   const phone = asString(args.phone);
 
   if (!rawStart || !name || !email || !ctx.username || !ctx.eventTypeSlug) {
@@ -630,7 +635,20 @@ async function handleBook(req, res, body) {
         agentId: ctx.agentId,
         clientId: ctx.clientId,
         serviceKey: ctx.serviceKey,
+        rawEmail,
+        normalizedEmail: email,
         body
+      }
+    });
+  }
+
+  if (!isValidEmail(email)) {
+    return json(res, 400, {
+      error: "Invalid attendee email",
+      version: "AUTOMATED_AGENT_CONTEXT_V1",
+      debug: {
+        rawEmail,
+        normalizedEmail: email
       }
     });
   }
@@ -672,6 +690,8 @@ async function handleBook(req, res, body) {
     serviceKey: ctx.serviceKey,
     rawStart,
     utcStart: start,
+    rawEmail,
+    normalizedEmail: email,
     payload
   }, null, 2));
 
@@ -697,6 +717,8 @@ async function handleBook(req, res, body) {
       serviceKey: ctx.serviceKey,
       rawStart,
       utcStart: start,
+      rawEmail,
+      normalizedEmail: email,
       payload,
       responseStatus: status,
       responseData: err.response?.data,
@@ -735,6 +757,8 @@ async function handleBook(req, res, body) {
           serviceKey: ctx.serviceKey,
           rawStart,
           utcStart: start,
+          rawEmail,
+          normalizedEmail: email,
           payload,
           responseStatus: retryErr.response?.status,
           responseData: retryErr.response?.data,
@@ -748,6 +772,8 @@ async function handleBook(req, res, body) {
           debug: {
             rawStart,
             utcStart: start,
+            rawEmail,
+            normalizedEmail: email,
             payload
           }
         });
@@ -761,6 +787,8 @@ async function handleBook(req, res, body) {
       debug: {
         rawStart,
         utcStart: start,
+        rawEmail,
+        normalizedEmail: email,
         payload
       }
     });
