@@ -110,15 +110,12 @@ function replaceAgentIdInTools(tools, agentId) {
 
     return cloned;
   });
-}
-
 async function updateRetellLlmTools(llmId, generalTools) {
   if (!llmId || !Array.isArray(generalTools)) return;
 
-  await axios.post(
-    `${RETELL_BASE}/update-retell-llm`,
+  await axios.patch(
+    `${RETELL_BASE}/update-retell-llm/${encodeURIComponent(llmId)}`,
     {
-      llm_id: llmId,
       general_tools: generalTools,
     },
     {
