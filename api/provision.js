@@ -92,6 +92,42 @@ async function getTemplateLlmTools(templateLlmId) {
   return Array.isArray(tools) && tools.length ? tools : null;
 }
 
+function replaceAgentIdInTools(tools, agentId) {
+  if (!Array.isArray(tools) || !agentId) return tools;
+
+  return tools.map((tool) => {
+    const cloned = JSON.parse(JSON.stringify(tool));
+
+    if (Array.isArray(cloned?.api?.headers)) {
+      cloned.api.headers = cloned.api.headers.map((h) => {
+        const key = String(h?.key || "").toLowerCase();
+        if (key === "x-agent-id") {
+          return { ...h, value: agentId };
+        }
+        return h;
+      });
+    }
+
+    return cloned;
+  });
+}
+
+async function updateRetellLlmTools(llmId, generalTools) {
+  if (!llmId || !Array.isArray(generalTools)) return;
+
+  await axios.post(
+    `${RETELL_BASE}/update-retell-llm`,
+    {
+      llm_id: llmId,
+      general_tools: generalTools,
+    },
+    {
+      headers: retellHeaders(),
+      timeout: 20000,
+    }
+  );
+}
+
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
@@ -801,11 +837,12 @@ module.exports = async (req, res) => {
     const baseUrl = getBaseUrl(req);
     const schedulingCapable = roleKey !== "emergency";
 
-    // ✅ Optional: clone tools from a working template LLM if provided
-    const templateLlmId = pick(body, ["template_llm_id", "retell_template_llm_id"], "");
-    const templateTools = templateLlmId
-      ? await getTemplateLlmTools(templateLlmId)
-      : null;
+    // Always use functions from the shared template LLM unless explicitly overridden
+    const templateLlmId =
+      pick(body, ["template_llm_id", "retell_template_llm_id"], "") ||
+      "llm_18a432fcc18b235399fc298809ef";
+
+    const templateTools = await getTemplateLlmTools(templateLlmId);
 
     const llmPayload = {
       general_prompt: promptToUse,
@@ -840,6 +877,13 @@ module.exports = async (req, res) => {
     );
 
     const agentId = agentResp.data.agent_id || agentResp.data.id;
+
+    // After the new agent exists, replace any template X-Agent-Id headers
+    // so the cloned functions point to this specific provisioned agent.
+    if (templateTools && templateTools.length) {
+      const toolsWithNewAgentId = replaceAgentIdInTools(templateTools, agentId);
+      await updateRetellLlmTools(llmId, toolsWithNewAgentId);
+    }
 
     // -------------------- SAVE CALENDAR CONFIG FOR THIS AGENT --------------------
     const calendarConfig = extractCalendarConfig(body);
