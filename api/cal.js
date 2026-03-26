@@ -43,6 +43,13 @@ function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
 
+function cleanAgentId(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/\s+class=.*$/i, "")
+    .trim();
+}
+
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(asString(email));
 }
@@ -112,13 +119,15 @@ function extractTeamRows(payload) {
 }
 
 async function fetchAllEventTypeSlugs(accessToken) {
+  const defaultHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "cal-api-version": CAL_API_VERSION
+  };
   const eventTypeHeaders = {
     Authorization: `Bearer ${accessToken}`,
-    "cal-api-version": CAL_EVENT_TYPES_API_VERSION,
+    "cal-api-version": CAL_EVENT_TYPES_API_VERSION
   };
-
   const slugMap = {};
-
   const addRows = (rows = []) => {
     for (const et of rows) {
       const slug = asString(et?.slug);
@@ -126,16 +135,14 @@ async function fetchAllEventTypeSlugs(accessToken) {
       slugMap[normalizeServiceKey(slug)] = slug;
     }
   };
-
   try {
     const etResp = await axios.get("https://api.cal.com/v2/event-types", {
-      headers: eventTypeHeaders,
+      headers: eventTypeHeaders
     });
     addRows(extractEventTypeRows(etResp.data));
   } catch (err) {
     console.log("CAL EVENT TYPES FETCH ERROR", err.message);
   }
-
   return slugMap;
 }
 
@@ -143,35 +150,31 @@ async function refreshAccessTokenForAgent(agentId) {
   const existing = await kv.get(tokenKeyForAgent(agentId));
   const refreshToken = asString(existing?.refresh_token);
   if (!refreshToken) throw new Error("No refresh token available");
-
   const clientId = process.env.CAL_CLIENT_ID;
   const clientSecret = process.env.CAL_CLIENT_SECRET;
-
   const resp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
     client_id: clientId,
     client_secret: clientSecret,
     grant_type: "refresh_token",
-    refresh_token: refreshToken,
+    refresh_token: refreshToken
   });
-
   const data = resp.data || {};
   const refreshed = {
     access_token: asString(data.access_token),
     refresh_token: asString(data.refresh_token || refreshToken),
     token_type: asString(data.token_type, "bearer"),
-    expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
+    expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0
   };
-
   await kv.set(tokenKeyForAgent(agentId), refreshed);
   return refreshed;
 }
 
-// -------------------- CONTEXT RESOLUTION --------------------
+// -------------------- THE KEY UPDATE --------------------
 async function resolveCalContext(req, body) {
   const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
   const args = body.args || body || {};
 
-  const agentId = asString(
+  const agentId = cleanAgentId(
     url.searchParams.get("agent_id") ||
       req.headers["x-agent-id"] ||
       body.agent_id ||
@@ -182,9 +185,7 @@ async function resolveCalContext(req, body) {
   if (!agentId) return { error: "Missing agent_id" };
 
   const clientId = await kv.get(`agent:${agentId}:client`);
-  if (!clientId) {
-    return { error: "No client_id found for agent", agentId };
-  }
+  if (!clientId) return { error: "No client_id found for agent", agentId };
 
   const calConfig = await kv.get(`client:${clientId}:cal`);
   if (!calConfig || !calConfig.username) {
@@ -217,35 +218,25 @@ async function resolveCalContext(req, body) {
     eventTypeSlug,
     accessToken: asString(token.access_token),
     serviceKey,
-    calConfig,
+    calConfig
   };
 }
 
 // -------------------- OAUTH HANDLERS --------------------
 async function handleOauthStart(req, res, url) {
-  const agent_id = asString(url.searchParams.get("agent_id"));
+  const agent_id = cleanAgentId(url.searchParams.get("agent_id"));
   const email = asString(url.searchParams.get("email"));
-
-  if (!agent_id) {
-    return json(res, 400, { error: "agent_id param required" });
-  }
+  if (!agent_id) return json(res, 400, { error: "agent_id param required" });
 
   const clientId = process.env.CAL_CLIENT_ID;
   const redirectUri = getCalRedirectUri();
   const nonce = crypto.randomBytes(16).toString("hex");
 
-  await kv.set(
-    `cal:oauth:state:${nonce}`,
-    { agent_id, email: email || "" },
-    { ex: 600 }
-  );
+  await kv.set(`cal:oauth:state:${nonce}`, { agent_id, email: email || "" }, { ex: 600 });
 
   const authUrl = `https://app.cal.com/auth/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(
     clientId
-  )}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(
-    nonce
-  )}`;
-
+  )}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(nonce)}`;
   res.writeHead(302, { Location: authUrl });
   return res.end();
 }
@@ -253,88 +244,64 @@ async function handleOauthStart(req, res, url) {
 async function handleOauthCallback(req, res, url) {
   const code = asString(url.searchParams.get("code"));
   const state = asString(url.searchParams.get("state"));
-
   const stateRecord = await kv.get(`cal:oauth:state:${state}`);
   if (!stateRecord?.agent_id) {
     return json(res, 400, { error: "Invalid or expired state" });
   }
 
   await kv.del(`cal:oauth:state:${state}`);
-
-  const clientIdEnv = process.env.CAL_CLIENT_ID;
+  const clientId = process.env.CAL_CLIENT_ID;
   const clientSecret = process.env.CAL_CLIENT_SECRET;
   const redirectUri = getCalRedirectUri();
 
   try {
     const tokenResp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
-      client_id: clientIdEnv,
+      client_id: clientId,
       client_secret: clientSecret,
       grant_type: "authorization_code",
       code,
-      redirect_uri: redirectUri,
+      redirect_uri: redirectUri
     });
 
     const data = tokenResp.data || {};
-    const agent_id = asString(stateRecord.agent_id);
-
+    const agent_id = cleanAgentId(stateRecord.agent_id);
     const tokenPayload = {
       access_token: asString(data.access_token),
       refresh_token: asString(data.refresh_token),
       token_type: asString(data.token_type, "bearer"),
-      expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0,
+      expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0
     };
 
     await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
-
     const client_id = await kv.get(`agent:${agent_id}:client`);
-    if (!client_id) {
-      return json(res, 400, {
-        error: "OAuth succeeded but no client_id mapping found for agent",
-        agent_id,
-      });
-    }
-
     const meResp = await axios.get("https://api.cal.com/v2/me", {
       headers: {
         Authorization: `Bearer ${tokenPayload.access_token}`,
-        "cal-api-version": CAL_API_VERSION,
-      },
+        "cal-api-version": CAL_API_VERSION
+      }
     });
-
     const username = asString(meResp.data?.data?.username);
-    if (!username) {
-      return json(res, 400, {
-        error: "OAuth succeeded but no Cal username was returned",
-        agent_id,
-        client_id,
+
+    if (client_id && username) {
+      const existingConfig = (await kv.get(`client:${client_id}:cal`)) || {};
+      const fetchedSlugs = await fetchAllEventTypeSlugs(tokenPayload.access_token);
+      await kv.set(`client:${client_id}:cal`, {
+        ...existingConfig,
+        username,
+        eventTypeSlugs:
+          Object.keys(fetchedSlugs).length > 0
+            ? fetchedSlugs
+            : existingConfig.eventTypeSlugs,
+        updated_at: new Date().toISOString()
       });
     }
-
-    const existingConfig = (await kv.get(`client:${client_id}:cal`)) || {};
-    const fetchedSlugs = await fetchAllEventTypeSlugs(tokenPayload.access_token);
-
-    await kv.set(`client:${client_id}:cal`, {
-      ...existingConfig,
-      username,
-      timeZone: asString(
-        existingConfig.timeZone || meResp.data?.data?.timeZone,
-        "America/New_York"
-      ),
-      eventTypeSlugs:
-        Object.keys(fetchedSlugs).length > 0
-          ? fetchedSlugs
-          : existingConfig.eventTypeSlugs || {},
-      updated_at: new Date().toISOString(),
-    });
 
     res.writeHead(302, { Location: "https://app.cal.com/event-types" });
     return res.end();
   } catch (err) {
-    console.error("OAUTH CALLBACK ERROR", err?.response?.data || err.message);
-
     return json(res, 500, {
-      error: "OAuth failed",
-      details: err?.response?.data || err.message,
+      error: "OAuth Exchange Failed",
+      detail: err.message
     });
   }
 }
@@ -365,22 +332,17 @@ async function handleAvailability(req, res, body) {
     const resp = await axios.get(url, {
       headers: {
         "cal-api-version": CAL_API_VERSION,
-        Authorization: `Bearer ${ctx.accessToken}`,
-      },
+        Authorization: `Bearer ${ctx.accessToken}`
+      }
     });
-
     const slotsByDate = resp.data?.data || {};
     const starts = Object.values(slotsByDate)
       .flat()
       .map((s) => s.start)
       .filter(Boolean);
-
     return json(res, 200, { ok: true, available_slots: starts });
   } catch (err) {
-    return json(res, 500, {
-      error: "Cal fetch failed",
-      message: err.message,
-    });
+    return json(res, 500, { error: "Cal fetch failed", message: err.message });
   }
 }
 
@@ -399,7 +361,7 @@ async function handleBook(req, res, body) {
     username: ctx.username,
     eventTypeSlug: ctx.eventTypeSlug,
     start,
-    attendee: { name, email, timeZone: ctx.timeZone, language: "en" },
+    attendee: { name, email, timeZone: ctx.timeZone, language: "en" }
   };
 
   try {
@@ -407,10 +369,9 @@ async function handleBook(req, res, body) {
       headers: {
         "Content-Type": "application/json",
         "cal-api-version": CAL_BOOKINGS_API_VERSION,
-        Authorization: `Bearer ${ctx.accessToken}`,
-      },
+        Authorization: `Bearer ${ctx.accessToken}`
+      }
     });
-
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
     return json(res, 500, { error: "Booking failed", message: err.message });
