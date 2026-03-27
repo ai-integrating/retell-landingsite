@@ -217,7 +217,6 @@ async function resolveCalContext(req, body) {
   // SMART FALLBACK MATCHING
   if (!eventTypeSlug && calConfig?.eventTypeSlugs) {
     const keys = Object.keys(calConfig.eventTypeSlugs);
-
     const compactServiceKey = serviceKey.replace(/_/g, "");
 
     const match = keys.find((k) =>
@@ -256,11 +255,18 @@ async function handleOauthStart(req, res, url) {
   const redirectUri = getCalRedirectUri();
   const nonce = crypto.randomBytes(16).toString("hex");
 
-  await kv.set(`cal:oauth:state:${nonce}`, { agent_id, email: email || "" }, { ex: 600 });
+  await kv.set(
+    `cal:oauth:state:${nonce}`,
+    { agent_id, email: email || "" },
+    { ex: 600 }
+  );
 
   const authUrl = `https://app.cal.com/auth/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(
     clientId
-  )}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(nonce)}`;
+  )}&redirect_uri=${encodeURIComponent(
+    redirectUri
+  )}&state=${encodeURIComponent(nonce)}`;
+
   res.writeHead(302, { Location: authUrl });
   return res.end();
 }
@@ -269,26 +275,32 @@ async function handleOauthCallback(req, res, url) {
   const code = asString(url.searchParams.get("code"));
   const state = asString(url.searchParams.get("state"));
   const stateRecord = await kv.get(`cal:oauth:state:${state}`);
+
   if (!stateRecord?.agent_id) {
     return json(res, 400, { error: "Invalid or expired state" });
   }
 
   await kv.del(`cal:oauth:state:${state}`);
+
   const clientId = process.env.CAL_CLIENT_ID;
   const clientSecret = process.env.CAL_CLIENT_SECRET;
   const redirectUri = getCalRedirectUri();
 
   try {
-    const tokenResp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri
-    });
+    const tokenResp = await axios.post(
+      "https://api.cal.com/v2/auth/oauth2/token",
+      {
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri
+      }
+    );
 
     const data = tokenResp.data || {};
     const agent_id = cleanAgentId(stateRecord.agent_id);
+
     const tokenPayload = {
       access_token: asString(data.access_token),
       refresh_token: asString(data.refresh_token),
@@ -299,17 +311,20 @@ async function handleOauthCallback(req, res, url) {
     await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
 
     const client_id = await kv.get(`agent:${agent_id}:client`);
+
     const meResp = await axios.get("https://api.cal.com/v2/me", {
       headers: {
         Authorization: `Bearer ${tokenPayload.access_token}`,
         "cal-api-version": CAL_API_VERSION
       }
     });
+
     const username = asString(meResp.data?.data?.username);
 
     if (client_id && username) {
       const existingConfig = (await kv.get(`client:${client_id}:cal`)) || {};
       const fetchedSlugs = await fetchAllEventTypeSlugs(tokenPayload.access_token);
+
       await kv.set(`client:${client_id}:cal`, {
         ...existingConfig,
         username,
@@ -420,23 +435,53 @@ async function handleBook(req, res, body) {
     }
   };
 
+  const bookingUrl = "https://api.cal.com/v2/bookings";
+
   try {
-    const resp = await axios.post("https://api.cal.com/v2/bookings", payload, {
+    const resp = await axios.post(bookingUrl, payload, {
       headers: {
         "Content-Type": "application/json",
         "cal-api-version": CAL_BOOKINGS_API_VERSION,
-        Authorization: `Bearer ${ctx.accessToken}`,
-        "x-cal-client-id": process.env.CAL_CLIENT_ID,
-        "x-cal-secret-key": process.env.CAL_CLIENT_SECRET
+        Authorization: `Bearer ${ctx.accessToken}`
       }
     });
 
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
+    const status = err?.response?.status || null;
+
+    if (status === 401) {
+      try {
+        const refreshed = await refreshAccessTokenForAgent(ctx.agentId);
+
+        const retryResp = await axios.post(bookingUrl, payload, {
+          headers: {
+            "Content-Type": "application/json",
+            "cal-api-version": CAL_BOOKINGS_API_VERSION,
+            Authorization: `Bearer ${refreshed.access_token}`
+          }
+        });
+
+        return json(res, 200, {
+          ok: true,
+          booking: retryResp.data,
+          token_refreshed: true
+        });
+      } catch (retryErr) {
+        return json(res, 500, {
+          error: "Booking failed after token refresh",
+          message: retryErr.message,
+          status: retryErr?.response?.status || null,
+          detail: retryErr?.response?.data || null,
+          payloadSent: payload
+        });
+      }
+    }
+
     return json(res, 500, {
       error: "Booking failed",
       message: err.message,
-      status: err?.response?.status || null,
+      status,
       detail: err?.response?.data || null,
       payloadSent: payload
     });
