@@ -385,17 +385,39 @@ async function handleBook(req, res, body) {
   if (ctx.error) return json(res, 400, { error: ctx.error });
 
   const args = body.args || body;
-  const start = new Date(
-    asString(args.start || args.slot || args.selected_start)
-  ).toISOString();
+  const rawStart = asString(args.start || args.slot || args.selected_start);
+  if (!rawStart) {
+    return json(res, 400, { error: "Missing selected start time" });
+  }
+
   const name = asString(args.attendee_name || args.name);
   const email = normalizeEmailInput(args.attendee_email || args.email);
+  const phone = asString(args.phone || args.attendee_phone || "");
+
+  if (!name) {
+    return json(res, 400, { error: "Missing attendee name" });
+  }
+
+  if (!isValidEmail(email)) {
+    return json(res, 400, {
+      error: "Invalid attendee email",
+      received: email
+    });
+  }
+
+  const start = new Date(rawStart).toISOString();
 
   const payload = {
-    username: ctx.username,
-    eventTypeSlug: ctx.eventTypeSlug,
     start,
-    attendee: { name, email, timeZone: ctx.timeZone, language: "en" }
+    eventTypeSlug: ctx.eventTypeSlug,
+    username: ctx.username,
+    attendee: {
+      name,
+      email,
+      timeZone: ctx.timeZone,
+      language: "en",
+      ...(phone ? { phoneNumber: phone } : {})
+    }
   };
 
   try {
@@ -403,12 +425,21 @@ async function handleBook(req, res, body) {
       headers: {
         "Content-Type": "application/json",
         "cal-api-version": CAL_BOOKINGS_API_VERSION,
-        Authorization: `Bearer ${ctx.accessToken}`
+        Authorization: `Bearer ${ctx.accessToken}`,
+        "x-cal-client-id": process.env.CAL_CLIENT_ID,
+        "x-cal-secret-key": process.env.CAL_CLIENT_SECRET
       }
     });
+
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
-    return json(res, 500, { error: "Booking failed", message: err.message });
+    return json(res, 500, {
+      error: "Booking failed",
+      message: err.message,
+      status: err?.response?.status || null,
+      detail: err?.response?.data || null,
+      payloadSent: payload
+    });
   }
 }
 
