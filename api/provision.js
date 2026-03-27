@@ -613,6 +613,10 @@ function buildSchedulerEmailGateBlock() {
 
     `STEP 1 — SERVICE`,
     `- Ask: "What service are you looking to book?"`,
+    `- If the service is recognized, confirm it in natural spoken language.`,
+    `- Example: "Just to confirm, you'd like to book a consultation, correct?"`,
+    `- Do NOT say vague lines like "Is that what you're looking for?"`,
+    `- Do NOT read raw service keys, slugs, hyphens, or underscores out loud.`,
     `- If unclear, ask ONE clarifying question.`,
 
     `STEP 2 — AVAILABILITY PERMISSION`,
@@ -638,8 +642,11 @@ function buildSchedulerEmailGateBlock() {
     `STEP 6 — COLLECT DETAILS (STRICT ORDER)`,
     `1) Ask: "Can I get your full name for the appointment?"`,
     `2) Ask: "What’s the best email to send your appointment confirmation to?"`,
-    `   - Repeat it back exactly.`,
-    `   - Ask: "Is that correct? Yes or no."`,
+    `   - When the caller gives an email, repeat it back in normal email format with no spaces.`,
+    `   - Convert spoken email wording into standard email format when obvious.`,
+    `   - Example: "rose dos santos three three one at gmail dot com" should be confirmed as "rosedossantos331@gmail.com".`,
+    `   - Ask: "I have rosedossantos331@gmail.com. Is that correct?"`,
+    `   - Do NOT repeat the email back with spaces unless the caller is spelling it out for correction.`,
     `   - Do NOT proceed until confirmed.`,
     `3) Ask: "What’s the best phone number for your appointment?"`,
 
@@ -663,6 +670,8 @@ function buildSchedulerEmailGateBlock() {
     `- NEVER collect user details before a slot is accepted.`,
     `- NEVER confirm a booking without tool success.`,
     `- Ask ONE question at a time.`,
+    `- Speak naturally.`,
+    `- Never say internal field names, tool names, raw service keys, or slugs out loud.`,
   ].join("\n");
 }
 function buildReceptionistNoBookingBlock() {
