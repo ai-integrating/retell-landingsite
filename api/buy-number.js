@@ -83,6 +83,25 @@ function retellHeaders() {
   return { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 }
 
+function buildAgentBindingPayload(agentId) {
+  return {
+    inbound_agents: [
+      {
+        agent_id: agentId,
+        agent_version: 3,
+        weight: 1,
+      },
+    ],
+    outbound_agents: [
+      {
+        agent_id: agentId,
+        agent_version: 3,
+        weight: 1,
+      },
+    ],
+  };
+}
+
 // --- Retell helpers ---
 async function createPhoneNumber({ areaCode, nickname }) {
   const resp = await axios.post(
@@ -96,13 +115,14 @@ async function createPhoneNumber({ areaCode, nickname }) {
 async function bindPhoneNumberToAgent({ phoneData, agentId }) {
   const phoneNumber = phoneData.phone_number || phoneData.e164 || phoneData.number || null;
   const phoneId = phoneData.phone_number_id || phoneData.id || null;
+  const bindingPayload = buildAgentBindingPayload(agentId);
 
   // Try binding by phone number (common)
   if (phoneNumber) {
     try {
       await axios.patch(
         `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneNumber)}`,
-        { inbound_agent_id: agentId, outbound_agent_id: agentId },
+        bindingPayload,
         { headers: retellHeaders(), timeout: 7000 }
       );
       return { phone_number: phoneNumber, phone_number_id: phoneId || null };
@@ -113,7 +133,7 @@ async function bindPhoneNumberToAgent({ phoneData, agentId }) {
   if (phoneId) {
     await axios.patch(
       `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneId)}`,
-      { inbound_agent_id: agentId, outbound_agent_id: agentId },
+      bindingPayload,
       { headers: retellHeaders(), timeout: 7000 }
     );
     return { phone_number: phoneNumber || "(assigned)", phone_number_id: phoneId };
@@ -271,7 +291,7 @@ module.exports = async (req, res) => {
       phone_number_id: bound.phone_number_id || phoneData.phone_number_id || phoneData.id || null,
 
       requested_area_code: areaCode,
-      area_code: usedAreaCode, // ✅ actual one used
+      area_code: usedAreaCode,
       number_tier: numberTier,
       idempotency_key: idempotencyKey || null,
     });
