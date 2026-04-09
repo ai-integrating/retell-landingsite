@@ -15,7 +15,8 @@ function getGoogleAuth() {
 
   privateKey = String(privateKey)
     .replace(/^"(.*)"$/s, "$1")
-    .replace(/\r/g, "")
+    .replace(/\r\n/g, "\n")   // 🔥 normalize Windows line endings
+    .replace(/\r/g, "")       // 🔥 remove stray carriage returns
     .replace(/\\n/g, "\n")
     .trim();
 
