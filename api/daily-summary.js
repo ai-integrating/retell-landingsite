@@ -5,7 +5,6 @@ const { google } = require("googleapis");
 const DEFAULT_TAB_NAME = process.env.DAILY_SUMMARY_TAB_NAME || "Call Summaries";
 const MAX_ROWS_TO_READ = Number(process.env.DAILY_SUMMARY_MAX_ROWS || 25);
 
-// 🔥 FIXED AUTH FUNCTION
 function getGoogleAuth() {
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
   let privateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -14,10 +13,10 @@ function getGoogleAuth() {
     throw new Error("Missing GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY");
   }
 
-  // 🔑 normalize the key (THIS FIXES YOUR ERROR)
-  privateKey = privateKey
-    .replace(/^"(.*)"$/s, "$1")   // remove accidental wrapping quotes
-    .replace(/\\n/g, "\n")        // handle escaped newlines
+  privateKey = String(privateKey)
+    .replace(/^"(.*)"$/s, "$1")
+    .replace(/\r/g, "")
+    .replace(/\\n/g, "\n")
     .trim();
 
   return new google.auth.JWT(
@@ -83,6 +82,11 @@ function pickField(row, candidates) {
   return "";
 }
 
+function isTrueLike(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v === "true" || v === "yes" || v === "1";
+}
+
 function summarizeRows(rows, clientId) {
   if (!rows.length) {
     return `I found the sheet for client ${clientId}, but there are no call summary rows yet.`;
@@ -93,40 +97,37 @@ function summarizeRows(rows, clientId) {
   let urgentCount = 0;
   let callbackCount = 0;
   let bookingCount = 0;
-  let totalCalls = recent.length;
+  const totalCalls = recent.length;
 
   const notable = [];
 
   for (const row of recent) {
-    const urgent =
-      String(
-        pickField(row, [
-          "urgent",
-          "isurgent",
-          "urgentmatter",
-          "needsurgentattention",
-        ]) || ""
-      ).toLowerCase() === "true";
+    const urgent = isTrueLike(
+      pickField(row, [
+        "urgent",
+        "isurgent",
+        "urgentmatter",
+        "needsurgentattention",
+      ])
+    );
 
-    const callback =
-      String(
-        pickField(row, [
-          "callbackneeded",
-          "needscallback",
-          "callbackrequested",
-          "callneeded",
-        ]) || ""
-      ).toLowerCase() === "true";
+    const callback = isTrueLike(
+      pickField(row, [
+        "callbackneeded",
+        "needscallback",
+        "callbackrequested",
+        "callneeded",
+      ])
+    );
 
-    const booking =
-      String(
-        pickField(row, [
-          "needsbooking",
-          "bookingrequested",
-          "appointmentrequested",
-          "bookappointment",
-        ]) || ""
-      ).toLowerCase() === "true";
+    const booking = isTrueLike(
+      pickField(row, [
+        "needsbooking",
+        "bookingrequested",
+        "appointmentrequested",
+        "bookappointment",
+      ])
+    );
 
     if (urgent) urgentCount += 1;
     if (callback) callbackCount += 1;
@@ -178,7 +179,7 @@ function summarizeRows(rows, clientId) {
     callbackCount === 1 ? "request" : "requests"
   }, and ${bookingCount} booking ${
     bookingCount === 1 ? "request" : "requests"
-  }.`; 
+  }.`;
 
   if (notable.length) {
     const top = notable.slice(-3).reverse();
@@ -265,6 +266,7 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({
       summary: "",
       error: "Failed to generate summary",
+      details: error?.message || "Unknown error",
     });
   }
 };
