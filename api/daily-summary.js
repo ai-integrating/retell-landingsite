@@ -15,16 +15,17 @@ module.exports = async function handler(req, res) {
     const agentId =
       req.body?.agent_id ||
       req.body?.call?.agent_id ||
+      req.body?.data?.agent_id ||
       req.body?.CallAgentId ||
-      req.headers?.agentid;
+      req.headers?.agentid ||
+      null;
 
     if (!agentId) {
       return res.status(400).json({
-        error: "Missing agent_id",
+        error: "Missing agent_id"
       });
     }
 
-    // 🔥 NEW: Pull from KV
     const clientId = await kv.get(`agent:${agentId}:client`);
     const sheetId = clientId
       ? await kv.get(`client:${clientId}:sheet`)
@@ -32,15 +33,13 @@ module.exports = async function handler(req, res) {
 
     console.log("KV lookup:", { agentId, clientId, sheetId });
 
-    // TEMP response so we can confirm it works
     const summary = clientId && sheetId
       ? `I found client ${clientId} and sheet ${sheetId}.`
       : `I couldn't find the client or sheet for this agent yet.`;
 
     return res.status(200).json({
       summary,
-      execution_message:
-        "Sure thing, one moment while I read my notes.",
+      execution_message: "Sure thing, one moment while I read my notes."
     });
 
   } catch (error) {
@@ -48,7 +47,7 @@ module.exports = async function handler(req, res) {
 
     return res.status(500).json({
       summary: "",
-      error: "Failed to generate summary",
+      error: "Failed to generate summary"
     });
   }
 };
