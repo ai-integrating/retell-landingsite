@@ -35,6 +35,7 @@ function getGoogleAuth() {
     ["https://www.googleapis.com/auth/spreadsheets.readonly"]
   );
 }
+
 async function readSheetRows(spreadsheetId, tabName) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
@@ -95,9 +96,9 @@ function isTrueLike(value) {
   return v === "true" || v === "yes" || v === "1";
 }
 
-function summarizeRows(rows, clientId) {
+function summarizeRows(rows) {
   if (!rows.length) {
-    return `I found the sheet for client ${clientId}, but there are no call summary rows yet.`;
+    return "There haven’t been any calls yet today.";
   }
 
   const recent = rows.slice(-MAX_ROWS_TO_READ);
@@ -137,9 +138,9 @@ function summarizeRows(rows, clientId) {
       ])
     );
 
-    if (urgent) urgentCount += 1;
-    if (callback) callbackCount += 1;
-    if (booking) bookingCount += 1;
+    if (urgent) urgentCount++;
+    if (callback) callbackCount++;
+    if (booking) bookingCount++;
 
     const caller =
       pickField(row, [
@@ -161,50 +162,46 @@ function summarizeRows(rows, clientId) {
       ]) || "";
 
     if (urgent || callback || booking) {
-      notable.push({
-        caller,
-        reason,
-        urgent,
-        callback,
-        booking,
-      });
+      notable.push({ caller, reason, urgent, callback, booking });
     }
   }
 
-  let summary = `I reviewed the latest ${totalCalls} call summaries for client ${clientId}. `;
-
-  if (!urgentCount && !callbackCount && !bookingCount) {
-    summary +=
-      "There are no urgent issues, callback requests, or booking requests in the most recent entries.";
-    return summary;
-  }
-
-  summary += `There ${
-    urgentCount === 1 ? "was" : "were"
-  } ${urgentCount} urgent ${
-    urgentCount === 1 ? "issue" : "issues"
-  }, ${callbackCount} callback ${
-    callbackCount === 1 ? "request" : "requests"
-  }, and ${bookingCount} booking ${
-    bookingCount === 1 ? "request" : "requests"
-  }.`;
+  let summary = `You had ${totalCalls} ${totalCalls === 1 ? "call" : "calls"} come in recently. `;
 
   if (notable.length) {
     const top = notable.slice(-3).reverse();
-    const details = top.map((item) => {
+
+    const highlights = top.map((item) => {
       const flags = [];
       if (item.urgent) flags.push("urgent");
-      if (item.callback) flags.push("callback needed");
-      if (item.booking) flags.push("booking requested");
+      if (item.callback) flags.push("needs a callback");
+      if (item.booking) flags.push("booking request");
 
-      const reasonText = item.reason ? ` Reason: ${item.reason}.` : "";
-      return `${item.caller}: ${flags.join(", ")}.${reasonText}`;
+      const reasonText = item.reason ? ` about ${item.reason}` : "";
+      return `${item.caller} (${flags.join(", ")})${reasonText}`;
     });
 
-    summary += ` Most recent notable items: ${details.join(" ")}`;
+    summary += `A few highlights: ${highlights.join(", ")}. `;
   }
 
-  return summary;
+  if (!urgentCount && !callbackCount && !bookingCount) {
+    summary += "Nothing urgent came up, and there’s nothing that needs follow-up right now.";
+    return summary;
+  }
+
+  if (urgentCount) {
+    summary += `${urgentCount} ${urgentCount === 1 ? "call needs" : "calls need"} urgent attention. `;
+  }
+
+  if (callbackCount) {
+    summary += `${callbackCount} ${callbackCount === 1 ? "person needs" : "people need"} a callback. `;
+  }
+
+  if (bookingCount) {
+    summary += `${bookingCount} ${bookingCount === 1 ? "booking request was made" : "booking requests were made"}.`;
+  }
+
+  return summary.trim();
 }
 
 module.exports = async function handler(req, res) {
@@ -256,7 +253,7 @@ module.exports = async function handler(req, res) {
       rowCount: rows.length,
     });
 
-    const summary = summarizeRows(rows, clientId);
+    const summary = summarizeRows(rows);
 
     return res.status(200).json({
       summary,
