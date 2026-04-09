@@ -5,13 +5,20 @@ const { google } = require("googleapis");
 const DEFAULT_TAB_NAME = process.env.DAILY_SUMMARY_TAB_NAME || "Call Summaries";
 const MAX_ROWS_TO_READ = Number(process.env.DAILY_SUMMARY_MAX_ROWS || 25);
 
+// 🔥 FIXED AUTH FUNCTION
 function getGoogleAuth() {
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
-  const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
 
   if (!clientEmail || !privateKey) {
     throw new Error("Missing GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY");
   }
+
+  // 🔑 normalize the key (THIS FIXES YOUR ERROR)
+  privateKey = privateKey
+    .replace(/^"(.*)"$/s, "$1")   // remove accidental wrapping quotes
+    .replace(/\\n/g, "\n")        // handle escaped newlines
+    .trim();
 
   return new google.auth.JWT(
     clientEmail,
@@ -171,7 +178,7 @@ function summarizeRows(rows, clientId) {
     callbackCount === 1 ? "request" : "requests"
   }, and ${bookingCount} booking ${
     bookingCount === 1 ? "request" : "requests"
-  }.`;
+  }.`; 
 
   if (notable.length) {
     const top = notable.slice(-3).reverse();
