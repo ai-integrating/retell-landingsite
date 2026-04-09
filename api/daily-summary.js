@@ -6,28 +6,35 @@ const DEFAULT_TAB_NAME = process.env.DAILY_SUMMARY_TAB_NAME || "Call Summaries";
 const MAX_ROWS_TO_READ = Number(process.env.DAILY_SUMMARY_MAX_ROWS || 25);
 
 function getGoogleAuth() {
-  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
-  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
-  if (!clientEmail || !privateKey) {
-    throw new Error("Missing GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY");
+  if (!raw) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
   }
 
-  privateKey = String(privateKey)
-    .replace(/^"(.*)"$/s, "$1")
-    .replace(/\r\n/g, "\n")   // 🔥 normalize Windows line endings
-    .replace(/\r/g, "")       // 🔥 remove stray carriage returns
-    .replace(/\\n/g, "\n")
+  let creds;
+  try {
+    creds = JSON.parse(raw);
+  } catch (err) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
+  }
+
+  if (!creds.client_email || !creds.private_key) {
+    throw new Error("Service account JSON missing client_email or private_key");
+  }
+
+  const privateKey = String(creds.private_key)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "")
     .trim();
 
   return new google.auth.JWT(
-    clientEmail,
+    creds.client_email,
     null,
     privateKey,
     ["https://www.googleapis.com/auth/spreadsheets.readonly"]
   );
 }
-
 async function readSheetRows(spreadsheetId, tabName) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
