@@ -1,6 +1,12 @@
 // /api/daily-summary.js
 
 module.exports = async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({
+      error: "Method not allowed. Use POST."
+    });
+  }
+
   try {
     const agentId =
       req.body?.agent_id ||
@@ -13,7 +19,6 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // TEMP summary (we’ll replace this with real data next)
     const summary =
       "Today you had 5 calls, 2 urgent matters, and 1 callback needed.";
 
@@ -23,7 +28,7 @@ module.exports = async function handler(req, res) {
         "Sure thing, one moment while I read my notes.",
     });
   } catch (error) {
-    console.error(error);
+    console.error("daily-summary error:", error);
 
     return res.status(500).json({
       summary: "",
