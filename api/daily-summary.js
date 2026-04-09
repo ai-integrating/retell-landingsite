@@ -1,9 +1,10 @@
 // /api/daily-summary.js
+const { kv } = require("@vercel/kv");
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({
-      error: "Method not allowed. Use POST."
+      error: "Method not allowed. Use POST"
     });
   }
 
@@ -23,14 +24,25 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const summary =
-      "Today you had 5 calls, 2 urgent matters, and 1 callback needed.";
+    // 🔥 NEW: Pull from KV
+    const clientId = await kv.get(`agent:${agentId}:client`);
+    const sheetId = clientId
+      ? await kv.get(`client:${clientId}:sheet`)
+      : null;
+
+    console.log("KV lookup:", { agentId, clientId, sheetId });
+
+    // TEMP response so we can confirm it works
+    const summary = clientId && sheetId
+      ? `I found client ${clientId} and sheet ${sheetId}.`
+      : `I couldn't find the client or sheet for this agent yet.`;
 
     return res.status(200).json({
       summary,
       execution_message:
         "Sure thing, one moment while I read my notes.",
     });
+
   } catch (error) {
     console.error("daily-summary error:", error);
 
