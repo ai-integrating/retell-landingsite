@@ -186,6 +186,7 @@ module.exports = async function handler(req, res) {
     const agent_id = asString(body?.agent_id);
     const client_id = asString(body?.client_id);
     const plan = asString(body?.plan);
+    const sheet_id = asString(body?.sheet_id); // NEW
 
     if (!agent_id || !client_id) {
       return okJson(res, 400, {
@@ -196,6 +197,7 @@ module.exports = async function handler(req, res) {
 
     const mapKey = `agent:${agent_id}:client`;
     const calKey = `client:${client_id}:cal`;
+    const sheetKey = `client:${client_id}:sheet`; // NEW
 
     const existing = await kv.get(mapKey);
     const prevCal = (await kv.get(calKey)) || {};
@@ -211,9 +213,14 @@ module.exports = async function handler(req, res) {
         await kv.set(calKey, mergedCal);
       }
 
-      // ✅ VERIFY
+      if (sheet_id) {
+        await kv.set(sheetKey, sheet_id);
+      }
+
       const verify = await kv.get(mapKey);
+      const verifySheet = sheet_id ? await kv.get(sheetKey) : null;
       console.log("VERIFY MAP AFTER SET (existing):", verify);
+      console.log("VERIFY SHEET AFTER SET (existing):", verifySheet);
 
       return okJson(res, 200, {
         ok: true,
@@ -222,6 +229,8 @@ module.exports = async function handler(req, res) {
         already_set: true,
         map_key: mapKey,
         map_value: verify,
+        sheet_key: sheetKey,
+        sheet_value: verifySheet,
         cal_preview: mergedCal,
       });
     }
@@ -245,9 +254,14 @@ module.exports = async function handler(req, res) {
       await kv.set(calKey, mergedCal);
     }
 
-    // ✅ VERIFY
+    if (sheet_id) {
+      await kv.set(sheetKey, sheet_id);
+    }
+
     const verify = await kv.get(mapKey);
+    const verifySheet = sheet_id ? await kv.get(sheetKey) : null;
     console.log("VERIFY MAP AFTER SET:", verify);
+    console.log("VERIFY SHEET AFTER SET:", verifySheet);
 
     return okJson(res, 200, {
       ok: true,
@@ -256,6 +270,8 @@ module.exports = async function handler(req, res) {
       set: true,
       map_key: mapKey,
       map_value: verify,
+      sheet_key: sheetKey,
+      sheet_value: verifySheet,
       cal_preview: mergedCal,
     });
   } catch (err) {
