@@ -8,10 +8,14 @@ module.exports = async function handler(req, res) {
   }
 
   try {
+    console.log("daily-summary body:", req.body);
+    console.log("daily-summary headers:", req.headers);
+
     const agentId =
       req.body?.agent_id ||
       req.body?.call?.agent_id ||
-      req.body?.CallAgentId;
+      req.body?.CallAgentId ||
+      req.headers?.agentid;
 
     if (!agentId) {
       return res.status(400).json({
