@@ -82,7 +82,7 @@ function getAvailabilityValue(row) {
   return (
     pickField(row, [
       "availableforsale",
-      "availableforsaleyesno", // 👈 THIS FIXES YOUR SHEET
+      "availableforsaleyesno",
       "availableforsal",
       "available",
       "forsale",
@@ -327,7 +327,7 @@ module.exports = async function handler(req, res) {
       null;
 
     const args = req.body?.args || {};
-    const action = args.action || "get_summary";
+    const action = args.action;
     const species = args.species || "";
     const buyerName = args.buyer_name || "";
     const quantityLbs = args.quantity_lbs;
@@ -336,6 +336,13 @@ module.exports = async function handler(req, res) {
     if (!agentId) {
       return res.status(400).json({
         error: "Missing agent_id",
+        summary: "",
+      });
+    }
+
+    if (!action) {
+      return res.status(400).json({
+        error: "Missing action",
         summary: "",
       });
     }
