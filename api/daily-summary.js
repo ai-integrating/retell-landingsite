@@ -30,10 +30,11 @@ function getGoogleAuth() {
     throw new Error("Service account JSON missing client_email or private_key");
   }
 
-const privateKey = String(creds.private_key)
-  .replace(/\\n/g, "\n")   // 
-  .replace(/\r/g, "")
-  .trim();
+  const privateKey = String(creds.private_key)
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "")
+    .trim();
 
   return new google.auth.JWT(
     creds.client_email,
@@ -62,7 +63,22 @@ function safeNumber(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
-async function readSheetRows(spreadsheetId, tabName) {
+function pickField(row, candidates) {
+  for (const key of Object.keys(row)) {
+    const normalized = normalizeKey(key);
+    for (const candidate of candidates) {
+      if (normalized === candidate) return row[key];
+    }
+  }
+  return "";
+}
+
+function isTrueLike(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v === "true" || v === "yes" || v === "1";
+}
+
+async function readSheetRows(spreadsheetId, preferredTabName) {
   const sheets = await getSheetsClient();
 
   const meta = await sheets.spreadsheets.get({
@@ -72,9 +88,17 @@ async function readSheetRows(spreadsheetId, tabName) {
   const availableTabs =
     meta.data.sheets?.map((s) => s.properties?.title).filter(Boolean) || [];
 
-  const selectedTab = availableTabs.includes(tabName)
-    ? tabName
-    : availableTabs[0];
+  let selectedTab = preferredTabName;
+
+  if (!availableTabs.includes(selectedTab)) {
+    const normalizedPreferred = normalizeKey(preferredTabName);
+    selectedTab =
+      availableTabs.find((tab) => normalizeKey(tab) === normalizedPreferred) ||
+      availableTabs.find((tab) =>
+        normalizeKey(tab).includes(normalizedPreferred)
+      ) ||
+      availableTabs[0];
+  }
 
   if (!selectedTab) {
     throw new Error("No tabs found in spreadsheet");
@@ -104,21 +128,6 @@ async function readSheetRows(spreadsheetId, tabName) {
   });
 
   return { tabName: selectedTab, rows };
-}
-
-function pickField(row, candidates) {
-  for (const key of Object.keys(row)) {
-    const normalized = normalizeKey(key);
-    for (const candidate of candidates) {
-      if (normalized === candidate) return row[key];
-    }
-  }
-  return "";
-}
-
-function isTrueLike(value) {
-  const v = String(value || "").trim().toLowerCase();
-  return v === "true" || v === "yes" || v === "1";
 }
 
 function summarizeRows(rows) {
@@ -283,21 +292,18 @@ module.exports = async function handler(req, res) {
     console.log("daily-summary body:", req.body);
     console.log("daily-summary headers:", req.headers);
 
-    const args = req.body?.args || req.body || {};
-
-    // IMPORTANT:
-    // Prefer live Retell call metadata first, just like your old working version.
-    // Only use args.agent_id as a last fallback.
+    // Keep this exactly like the older working logic first
     const agentId =
       req.body?.call?.agent_id ||
       req.body?.agent_id ||
       req.body?.data?.agent_id ||
       req.body?.CallAgentId ||
       req.headers?.agentid ||
-      args.agent_id ||
       null;
 
-    const action = args.action || null;
+    // Action + args for seafood logic
+    const args = req.body?.args || {};
+    const action = args.action || "get_summary";
     const species = args.species || "";
     const buyerName = args.buyer_name || "";
     const quantityLbs = args.quantity_lbs;
@@ -306,13 +312,6 @@ module.exports = async function handler(req, res) {
     if (!agentId) {
       return res.status(400).json({
         error: "Missing agent_id",
-        summary: "",
-      });
-    }
-
-    if (!action) {
-      return res.status(400).json({
-        error: "Missing action",
         summary: "",
       });
     }
@@ -400,10 +399,14 @@ module.exports = async function handler(req, res) {
         "available",
       ]);
 
-      const summary =
-        normalizeText(availableForSale) === "yes"
-          ? `${speciesName} is available for sale. There are ${poundsAvailable} pounds available at ${pricePerPound} per pound from ${port}. Status is ${status}. Last updated ${lastUpdated}.`
-          : `${speciesName} is currently not available for sale. There are ${poundsAvailable} pounds listed. Status is ${status}. Last updated ${lastUpdated}.`;
+      const isAvailable =
+        normalizeText(availableForSale) === "yes" ||
+        normalizeText(availableForSale) === "true" ||
+        normalizeText(availableForSale) === "available";
+
+      const summary = isAvailable
+        ? `${speciesName} is available for sale. There are ${poundsAvailable} pounds available at ${pricePerPound} per pound${port ? ` from ${port}` : ""}.${status ? ` Status is ${status}.` : ""}${lastUpdated ? ` Last updated ${lastUpdated}.` : ""}`
+        : `${speciesName} is currently not available for sale.${poundsAvailable ? ` There are ${poundsAvailable} pounds listed.` : ""}${status ? ` Status is ${status}.` : ""}${lastUpdated ? ` Last updated ${lastUpdated}.` : ""}`;
 
       return res.status(200).json({
         summary,
@@ -467,9 +470,13 @@ module.exports = async function handler(req, res) {
       const dateUpdated = pickField(match, ["dateupdated", "updated"]);
       const auctionNotes = pickField(match, ["auctionnotes", "notes"]);
 
-      const summary = `${speciesName} has an average market price of ${averagePrice}, with a low of ${minimumPrice} and a high of ${maximumPrice}. Source: ${source}. Updated ${dateUpdated}. Notes: ${
-        auctionNotes || "none"
-      }.`;
+      const summary = `${speciesName} has an average market price of ${averagePrice}${
+        minimumPrice ? `, with a low of ${minimumPrice}` : ""
+      }${
+        maximumPrice ? ` and a high of ${maximumPrice}` : ""
+      }.${source ? ` Source: ${source}.` : ""}${
+        dateUpdated ? ` Updated ${dateUpdated}.` : ""
+      }${auctionNotes ? ` Notes: ${auctionNotes}.` : ""}`;
 
       return res.status(200).json({
         summary,
@@ -551,7 +558,12 @@ module.exports = async function handler(req, res) {
         "available",
       ]);
 
-      if (normalizeText(availableForSale) !== "yes") {
+      const isAvailable =
+        normalizeText(availableForSale) === "yes" ||
+        normalizeText(availableForSale) === "true" ||
+        normalizeText(availableForSale) === "available";
+
+      if (!isAvailable) {
         return res.status(200).json({
           summary: `${speciesName} is not currently available for sale.`,
           execution_message: "One moment while I log this order.",
