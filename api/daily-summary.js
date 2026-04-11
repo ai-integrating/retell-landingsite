@@ -78,6 +78,29 @@ function isTrueLike(value) {
   return v === "true" || v === "yes" || v === "1";
 }
 
+function getAvailabilityValue(row) {
+  return (
+    pickField(row, [
+      "availableforsale",
+      "availableforsal",
+      "available",
+      "forsale",
+      "saleavailable",
+    ]) || ""
+  );
+}
+
+function isAvailableForSale(row) {
+  const value = normalizeText(getAvailabilityValue(row));
+  return (
+    value === "yes" ||
+    value === "true" ||
+    value === "available" ||
+    value === "y" ||
+    value === "1"
+  );
+}
+
 async function readSheetRows(spreadsheetId, preferredTabName) {
   const sheets = await getSheetsClient();
 
@@ -252,19 +275,21 @@ function summarizeRows(rows) {
 function findRowMatch(rows, species) {
   if (!species) return null;
 
-  const target = normalizeText(species);
+  const target = normalizeKey(species);
 
   return (
-    rows.find((row) =>
-      normalizeText(
+    rows.find((row) => {
+      const value = normalizeKey(
         pickField(row, ["speciessize", "species", "item", "product"])
-      ) === target
-    ) ||
-    rows.find((row) =>
-      normalizeText(
+      );
+      return value === target;
+    }) ||
+    rows.find((row) => {
+      const value = normalizeKey(
         pickField(row, ["speciessize", "species", "item", "product"])
-      ).includes(target)
-    )
+      );
+      return value.includes(target) || target.includes(value);
+    })
   );
 }
 
@@ -292,7 +317,6 @@ module.exports = async function handler(req, res) {
     console.log("daily-summary body:", req.body);
     console.log("daily-summary headers:", req.headers);
 
-    // Keep this exactly like the older working logic first
     const agentId =
       req.body?.call?.agent_id ||
       req.body?.agent_id ||
@@ -301,7 +325,6 @@ module.exports = async function handler(req, res) {
       req.headers?.agentid ||
       null;
 
-    // Action + args for seafood logic
     const args = req.body?.args || {};
     const action = args.action || "get_summary";
     const species = args.species || "";
@@ -362,8 +385,34 @@ module.exports = async function handler(req, res) {
       }
 
       if (!species) {
+        const availableItems = rows
+          .map((row) => {
+            const speciesName = pickField(row, [
+              "speciessize",
+              "species",
+              "item",
+              "product",
+            ]);
+            const poundsAvailable = pickField(row, [
+              "poundsavailable",
+              "availablelbs",
+              "quantityavailable",
+            ]);
+
+            if (!speciesName || !isAvailableForSale(row)) return null;
+
+            return poundsAvailable
+              ? `${speciesName} (${poundsAvailable} pounds available)`
+              : speciesName;
+          })
+          .filter(Boolean);
+
+        const summary = availableItems.length
+          ? `Today we have ${availableItems.join(", ")}.`
+          : "I do not see any seafood marked available for sale right now.";
+
         return res.status(200).json({
-          summary: "Please specify which seafood item you want me to check.",
+          summary,
           execution_message: "One moment while I check inventory.",
           debug: { clientId, sheetId, tabName, rowCount: rows.length },
         });
@@ -379,7 +428,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const speciesName = pickField(match, ["speciessize", "species", "item"]);
+      const speciesName = pickField(match, [
+        "speciessize",
+        "species",
+        "item",
+        "product",
+      ]);
       const poundsAvailable = pickField(match, [
         "poundsavailable",
         "availablelbs",
@@ -393,20 +447,20 @@ module.exports = async function handler(req, res) {
       const port = pickField(match, ["port", "location"]);
       const status = pickField(match, ["status"]);
       const lastUpdated = pickField(match, ["lastupdated", "updated"]);
-      const availableForSale = pickField(match, [
-        "availableforsale",
-        "forsale",
-        "available",
-      ]);
-
-      const isAvailable =
-        normalizeText(availableForSale) === "yes" ||
-        normalizeText(availableForSale) === "true" ||
-        normalizeText(availableForSale) === "available";
+      const availableForSale = getAvailabilityValue(match);
+      const isAvailable = isAvailableForSale(match);
 
       const summary = isAvailable
-        ? `${speciesName} is available for sale. There are ${poundsAvailable} pounds available at ${pricePerPound} per pound${port ? ` from ${port}` : ""}.${status ? ` Status is ${status}.` : ""}${lastUpdated ? ` Last updated ${lastUpdated}.` : ""}`
-        : `${speciesName} is currently not available for sale.${poundsAvailable ? ` There are ${poundsAvailable} pounds listed.` : ""}${status ? ` Status is ${status}.` : ""}${lastUpdated ? ` Last updated ${lastUpdated}.` : ""}`;
+        ? `${speciesName} is available for sale. There are ${poundsAvailable} pounds available at ${pricePerPound} per pound${
+            port ? ` from ${port}` : ""
+          }.${status ? ` Status is ${status}.` : ""}${
+            lastUpdated ? ` Last updated ${lastUpdated}.` : ""
+          }`
+        : `${speciesName} is currently not available for sale.${
+            poundsAvailable ? ` There are ${poundsAvailable} pounds listed.` : ""
+          }${status ? ` Status is ${status}.` : ""}${
+            lastUpdated ? ` Last updated ${lastUpdated}.` : ""
+          }`;
 
       return res.status(200).json({
         summary,
@@ -425,6 +479,7 @@ module.exports = async function handler(req, res) {
           sheetId,
           tabName,
           rowCount: rows.length,
+          matchedRow: match,
         },
       });
     }
@@ -458,7 +513,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const speciesName = pickField(match, ["speciessize", "species", "item"]);
+      const speciesName = pickField(match, [
+        "speciessize",
+        "species",
+        "item",
+        "product",
+      ]);
       const averagePrice = pickField(match, [
         "averageprice",
         "avgprice",
@@ -495,6 +555,7 @@ module.exports = async function handler(req, res) {
           sheetId,
           tabName,
           rowCount: rows.length,
+          matchedRow: match,
         },
       });
     }
@@ -538,7 +599,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const speciesName = pickField(match, ["speciessize", "species", "item"]);
+      const speciesName = pickField(match, [
+        "speciessize",
+        "species",
+        "item",
+        "product",
+      ]);
       const poundsAvailable = safeNumber(
         pickField(match, [
           "poundsavailable",
@@ -552,22 +618,21 @@ module.exports = async function handler(req, res) {
         "priceperlb",
       ]);
       const pricePerPound = safeNumber(pricePerPoundRaw);
-      const availableForSale = pickField(match, [
-        "availableforsale",
-        "forsale",
-        "available",
-      ]);
-
-      const isAvailable =
-        normalizeText(availableForSale) === "yes" ||
-        normalizeText(availableForSale) === "true" ||
-        normalizeText(availableForSale) === "available";
+      const availableForSale = getAvailabilityValue(match);
+      const isAvailable = isAvailableForSale(match);
 
       if (!isAvailable) {
         return res.status(200).json({
           summary: `${speciesName} is not currently available for sale.`,
           execution_message: "One moment while I log this order.",
-          debug: { clientId, sheetId, tabName, rowCount: rows.length },
+          debug: {
+            clientId,
+            sheetId,
+            inventoryTab: tabName,
+            rowCount: rows.length,
+            matchedRow: match,
+            available_for_sale: availableForSale,
+          },
         });
       }
 
@@ -575,7 +640,13 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({
           summary: `There are only ${poundsAvailable} pounds of ${speciesName} available, so I could not log an order for ${requestedQty} pounds.`,
           execution_message: "One moment while I log this order.",
-          debug: { clientId, sheetId, tabName, rowCount: rows.length },
+          debug: {
+            clientId,
+            sheetId,
+            inventoryTab: tabName,
+            rowCount: rows.length,
+            matchedRow: match,
+          },
         });
       }
 
@@ -618,6 +689,8 @@ module.exports = async function handler(req, res) {
           sheetId,
           inventoryTab: tabName,
           rowCount: rows.length,
+          matchedRow: match,
+          available_for_sale: availableForSale,
         },
       });
     }
