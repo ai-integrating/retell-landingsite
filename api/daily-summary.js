@@ -30,10 +30,10 @@ function getGoogleAuth() {
     throw new Error("Service account JSON missing client_email or private_key");
   }
 
-  const privateKey = String(creds.private_key)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "")
-    .trim();
+const privateKey = String(creds.private_key)
+  .replace(/\\n/g, "\n")   // 
+  .replace(/\r/g, "")
+  .trim();
 
   return new google.auth.JWT(
     creds.client_email,
