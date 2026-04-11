@@ -82,6 +82,7 @@ function getAvailabilityValue(row) {
   return (
     pickField(row, [
       "availableforsale",
+      "availableforsaleyesno", // 👈 THIS FIXES YOUR SHEET
       "availableforsal",
       "available",
       "forsale",
