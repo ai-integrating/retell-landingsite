@@ -273,10 +273,6 @@ function summarizeRows(rows) {
   return summary.trim();
 }
 
-function getSpeciesName(row) {
-  return pickField(row, ["speciessize", "species", "item", "product"]);
-}
-
 function findRowMatch(rows, species) {
   if (!species) return null;
 
@@ -284,41 +280,18 @@ function findRowMatch(rows, species) {
 
   return (
     rows.find((row) => {
-      const value = normalizeKey(getSpeciesName(row));
+      const value = normalizeKey(
+        pickField(row, ["speciessize", "species", "item", "product"])
+      );
       return value === target;
     }) ||
     rows.find((row) => {
-      const value = normalizeKey(getSpeciesName(row));
+      const value = normalizeKey(
+        pickField(row, ["speciessize", "species", "item", "product"])
+      );
       return value.includes(target) || target.includes(value);
     })
   );
-}
-
-function findAllRowMatches(rows, species) {
-  if (!species) return [];
-
-  const target = normalizeKey(species);
-
-  return rows.filter((row) => {
-    const value = normalizeKey(getSpeciesName(row));
-    if (!value) return false;
-    return value.includes(target) || target.includes(value);
-  });
-}
-
-function isGenericCategory(species) {
-  const target = normalizeKey(species);
-  return [
-    "scallop",
-    "scallops",
-    "cod",
-    "haddock",
-    "pollock",
-    "hake",
-    "halibut",
-    "cusk",
-    "fish",
-  ].includes(target);
 }
 
 async function appendOrderRow(spreadsheetId, values) {
@@ -422,7 +395,12 @@ module.exports = async function handler(req, res) {
       if (!species) {
         const availableItems = rows
           .map((row) => {
-            const speciesName = getSpeciesName(row);
+            const speciesName = pickField(row, [
+              "speciessize",
+              "species",
+              "item",
+              "product",
+            ]);
             const poundsAvailable = pickField(row, [
               "poundsavailable",
               "availablelbs",
@@ -448,43 +426,6 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const allMatches = findAllRowMatches(rows, species).filter((row) =>
-        isAvailableForSale(row)
-      );
-
-      if (isGenericCategory(species) && allMatches.length > 1) {
-        const items = allMatches.map((row) => {
-          const speciesName = getSpeciesName(row);
-          const poundsAvailable = pickField(row, [
-            "poundsavailable",
-            "availablelbs",
-            "quantityavailable",
-          ]);
-          const pricePerPound = pickField(row, [
-            "priceperpound",
-            "price",
-            "priceperlb",
-          ]);
-
-          let text = speciesName;
-          if (poundsAvailable) text += ` (${poundsAvailable} pounds available)`;
-          if (pricePerPound) text += ` at ${pricePerPound} per pound`;
-          return text;
-        });
-
-        return res.status(200).json({
-          summary: `Today we have these ${species}: ${items.join(", ")}.`,
-          execution_message: "One moment while I check inventory.",
-          debug: {
-            clientId,
-            sheetId,
-            tabName,
-            rowCount: rows.length,
-            matchedRows: allMatches,
-          },
-        });
-      }
-
       const match = findRowMatch(rows, species);
 
       if (!match) {
@@ -495,7 +436,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const speciesName = getSpeciesName(match);
+      const speciesName = pickField(match, [
+        "speciessize",
+        "species",
+        "item",
+        "product",
+      ]);
       const poundsAvailable = pickField(match, [
         "poundsavailable",
         "availablelbs",
@@ -771,3 +717,4 @@ module.exports = async function handler(req, res) {
     });
   }
 };
+
