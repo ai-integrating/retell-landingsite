@@ -1,4 +1,3 @@
-// /api/daily-summary.js
 const { kv } = require("@vercel/kv");
 const { google } = require("googleapis");
 
@@ -24,6 +23,7 @@ function getGoogleAuth() {
   }
 
   const privateKey = String(creds.private_key)
+    .replace(/\\n/g, "\n")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "")
     .trim();
@@ -40,22 +40,22 @@ async function readSheetRows(spreadsheetId, tabName) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
 
-  const meta = await sheets.spreadsheets.get({
-    spreadsheetId,
-  });
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
 
   const availableTabs =
     meta.data.sheets?.map((s) => s.properties?.title).filter(Boolean) || [];
 
-  const selectedTab = availableTabs.includes(tabName)
-    ? tabName
-    : availableTabs[0];
-
-  if (!selectedTab) {
+  if (!availableTabs.length) {
     throw new Error("No tabs found in spreadsheet");
   }
 
-  const range = `${selectedTab}!A:Z`;
+  if (!availableTabs.includes(tabName)) {
+    throw new Error(
+      `Tab "${tabName}" not found in spreadsheet. Available tabs: ${availableTabs.join(", ")}`
+    );
+  }
+
+  const range = `${tabName}!A:Z`;
 
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -64,7 +64,7 @@ async function readSheetRows(spreadsheetId, tabName) {
 
   const values = resp.data.values || [];
   if (!values.length) {
-    return { tabName: selectedTab, rows: [] };
+    return { tabName, rows: [] };
   }
 
   const headers = values[0].map((h) => String(h || "").trim());
@@ -78,12 +78,16 @@ async function readSheetRows(spreadsheetId, tabName) {
     return obj;
   });
 
-  return { tabName: selectedTab, rows };
+  return { tabName, rows };
+}
+
+function normalizeKey(value = "") {
+  return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function pickField(row, candidates) {
-  for (const key of Object.keys(row)) {
-    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  for (const key of Object.keys(row || {})) {
+    const normalized = normalizeKey(key);
     for (const candidate of candidates) {
       if (normalized === candidate) return row[key];
     }
@@ -96,18 +100,53 @@ function isTrueLike(value) {
   return v === "true" || v === "yes" || v === "1";
 }
 
+function isRealCallRow(row) {
+  const caller = pickField(row, [
+    "callername",
+    "name",
+    "clientname",
+    "customername",
+    "fullname",
+  ]);
+
+  const reason = pickField(row, [
+    "reasonforcall",
+    "callreason",
+    "summary",
+    "notes",
+    "message",
+    "callsummary",
+  ]);
+
+  const phone = pickField(row, [
+    "callbacknumber",
+    "phonenumber",
+    "phone",
+    "callerphone",
+    "bestnumber",
+  ]);
+
+  return Boolean(
+    String(caller || "").trim() ||
+      String(reason || "").trim() ||
+      String(phone || "").trim()
+  );
+}
+
 function summarizeRows(rows) {
-  if (!rows.length) {
-    return "There haven’t been any calls yet today.";
+  const realRows = rows.filter(isRealCallRow);
+
+  if (!realRows.length) {
+    return "There haven’t been any call summaries yet.";
   }
 
-  const recent = rows.slice(-MAX_ROWS_TO_READ);
+  const recent = realRows.slice(-MAX_ROWS_TO_READ);
 
   let urgentCount = 0;
   let callbackCount = 0;
   let bookingCount = 0;
-  const totalCalls = recent.length;
 
+  const totalCalls = recent.length;
   const notable = [];
 
   for (const row of recent) {
@@ -117,6 +156,7 @@ function summarizeRows(rows) {
         "isurgent",
         "urgentmatter",
         "needsurgentattention",
+        "urgencylevel",
       ])
     );
 
@@ -135,6 +175,7 @@ function summarizeRows(rows) {
         "bookingrequested",
         "appointmentrequested",
         "bookappointment",
+        "bookingcompleted",
       ])
     );
 
@@ -166,7 +207,7 @@ function summarizeRows(rows) {
     }
   }
 
-  let summary = `You had ${totalCalls} ${totalCalls === 1 ? "call" : "calls"} come in recently. `;
+  let summary = `You had ${totalCalls} ${totalCalls === 1 ? "call" : "calls"} in the most recent summaries. `;
 
   if (notable.length) {
     const top = notable.slice(-3).reverse();
@@ -186,7 +227,7 @@ function summarizeRows(rows) {
 
   if (!urgentCount && !callbackCount && !bookingCount) {
     summary += "Nothing urgent came up, and there’s nothing that needs follow-up right now.";
-    return summary;
+    return summary.trim();
   }
 
   if (urgentCount) {
@@ -212,8 +253,8 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    console.log("daily-summary body:", req.body);
-    console.log("daily-summary headers:", req.headers);
+    console.log("client-daily-summary body:", req.body);
+    console.log("client-daily-summary headers:", req.headers);
 
     const agentId =
       req.body?.call?.agent_id ||
@@ -226,13 +267,12 @@ module.exports = async function handler(req, res) {
     if (!agentId) {
       return res.status(400).json({
         error: "Missing agent_id",
+        summary: "",
       });
     }
 
     const clientId = await kv.get(`agent:${agentId}:client`);
-    const sheetId = clientId
-      ? await kv.get(`client:${clientId}:sheet`)
-      : null;
+    const sheetId = clientId ? await kv.get(`client:${clientId}:sheet`) : null;
 
     console.log("KV lookup:", { agentId, clientId, sheetId });
 
@@ -245,7 +285,7 @@ module.exports = async function handler(req, res) {
 
     const { tabName, rows } = await readSheetRows(sheetId, DEFAULT_TAB_NAME);
 
-    console.log("daily-summary rows found:", {
+    console.log("summary rows found:", {
       agentId,
       clientId,
       sheetId,
@@ -263,10 +303,11 @@ module.exports = async function handler(req, res) {
         sheetId,
         tabName,
         rowCount: rows.length,
+        realRowCount: rows.filter(isRealCallRow).length,
       },
     });
   } catch (error) {
-    console.error("daily-summary error:", error);
+    console.error("client-daily-summary error:", error);
 
     return res.status(500).json({
       summary: "",
@@ -275,4 +316,3 @@ module.exports = async function handler(req, res) {
     });
   }
 };
-
