@@ -644,8 +644,40 @@ module.exports = async function handler(req, res) {
       req.headers?.agentid ||
       null;
 
-    const args = req.body?.args || {};
-    const action = args.action;
+  const body = req.body || {};
+const args = body.args || {};
+
+const clean = (v) => String(v || "").trim();
+
+const action =
+  clean(args.action) ||
+  clean(body.args_action) ||
+  clean(body.action);
+
+const species =
+  clean(args.species) ||
+  clean(body.species);
+
+const buyerName =
+  clean(args.buyer_name) ||
+  clean(body.buyer_name);
+
+const quantityLbs = safeNumber(
+  args.quantity_lbs ?? body.quantity_lbs
+);
+
+const shippingDestination =
+  clean(args.shipping_destination) ||
+  clean(body.shipping_destination);
+
+const sellerName =
+  clean(args.seller_name) ||
+  clean(body.seller_name) ||
+  "AI";
+
+const notes =
+  clean(args.notes) ||
+  clean(body.notes);
 
     if (!agentId) {
       return res.status(400).json({
