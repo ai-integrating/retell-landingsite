@@ -157,6 +157,15 @@ function toArray(value) {
   return [value];
 }
 
+function clean(value) {
+  return String(value || "").trim();
+}
+
+function normalizeShippingDestination(value) {
+  const v = clean(value);
+  return v.toLowerCase() === "pickup" ? "pickup" : v;
+}
+
 async function readSheetRows(spreadsheetId, preferredTabName) {
   const sheets = await getSheetsClient();
 
@@ -549,7 +558,10 @@ async function getAvailableInventoryForSpecies(clientId, species) {
 
   return lots
     .filter(Boolean)
-    .filter((lot) => lot.active !== false && safeNumber(lot.remaining_quantity_lbs) > 0)
+    .filter(
+      (lot) =>
+        lot.active !== false && safeNumber(lot.remaining_quantity_lbs) > 0
+    )
     .sort((a, b) => safeNumber(a.price_per_pound) - safeNumber(b.price_per_pound));
 }
 
@@ -644,40 +656,46 @@ module.exports = async function handler(req, res) {
       req.headers?.agentid ||
       null;
 
-  const body = req.body || {};
-const args = body.args || {};
+    const body = req.body || {};
+    const args = body.args || {};
 
-const clean = (v) => String(v || "").trim();
+    const action =
+      clean(args.action) ||
+      clean(body.args_action) ||
+      clean(body.action);
 
-const action =
-  clean(args.action) ||
-  clean(body.args_action) ||
-  clean(body.action);
+    const species =
+      clean(args.species) ||
+      clean(body.args_species) ||
+      clean(body.species);
 
-const species =
-  clean(args.species) ||
-  clean(body.species);
+    const buyerName =
+      clean(args.buyer_name) ||
+      clean(body.args_buyer_name) ||
+      clean(body.buyer_name);
 
-const buyerName =
-  clean(args.buyer_name) ||
-  clean(body.buyer_name);
+    const quantityLbs = safeNumber(
+      args.quantity_lbs ??
+        body.args_quantity_lbs ??
+        body.quantity_lbs
+    );
 
-const quantityLbs = safeNumber(
-  args.quantity_lbs ?? body.quantity_lbs
-);
+    const shippingDestination = normalizeShippingDestination(
+      args.shipping_destination ||
+        body.args_shipping_destination ||
+        body.shipping_destination
+    );
 
-const shippingDestination =
-  clean(args.shipping_destination) ||
-  clean(body.shipping_destination);
+    const sellerName =
+      clean(args.seller_name) ||
+      clean(body.args_seller_name) ||
+      clean(body.seller_name) ||
+      "AI";
 
-const sellerName =
-  clean(args.seller_name) ||
-  clean(body.seller_name) ||
-  "AI";
-
-const notes =
-  clean(args.notes) ||
-  clean(body.notes);
+    const notes =
+      clean(args.notes) ||
+      clean(body.args_notes) ||
+      clean(body.notes);
 
     if (!agentId) {
       return res.status(400).json({
@@ -726,7 +744,7 @@ const notes =
       const entries = Array.isArray(args.entries) ? args.entries : [];
 
       if (!entries.length) {
-        return res.status(400).json({
+        return res.status(200).json({
           summary:
             "To load inventory, I need a list of seafood entries with species, pounds, and price.",
           execution_message: "One moment while I load today's inventory.",
@@ -761,7 +779,7 @@ const notes =
     }
 
     if (action === "get_inventory") {
-      const species = args.species || "";
+      const inventorySpecies = species;
       const lots = await getAllInventoryLots(clientId);
 
       if (!lots.length) {
@@ -772,7 +790,7 @@ const notes =
         });
       }
 
-      if (!species) {
+      if (!inventorySpecies) {
         const availableItems = lots
           .filter((lot) => safeNumber(lot.remaining_quantity_lbs) > 0)
           .map((lot) => {
@@ -793,13 +811,16 @@ const notes =
         });
       }
 
-      const speciesLots = await getAvailableInventoryForSpecies(clientId, species);
+      const speciesLots = await getAvailableInventoryForSpecies(
+        clientId,
+        inventorySpecies
+      );
 
       if (!speciesLots.length) {
         return res.status(200).json({
-          summary: `I could not find available inventory for ${species}.`,
+          summary: `I could not find available inventory for ${inventorySpecies}.`,
           execution_message: "One moment while I check inventory.",
-          debug: { clientId, sheetId, species },
+          debug: { clientId, sheetId, species: inventorySpecies },
         });
       }
 
@@ -819,20 +840,13 @@ const notes =
           total_available_lbs: totalAvailable,
           lots: speciesLots,
         },
-        debug: { clientId, sheetId, species },
+        debug: { clientId, sheetId, species: inventorySpecies },
       });
     }
 
     if (action === "place_order") {
-      const species = args.species || "";
-      const buyerName = args.buyer_name || "";
-      const quantityLbs = safeNumber(args.quantity_lbs);
-      const shippingDestination = args.shipping_destination || "";
-      const sellerName = args.seller_name || "AI";
-      const notes = args.notes || "";
-
       if (!species || !buyerName || !quantityLbs || !shippingDestination) {
-        return res.status(400).json({
+        return res.status(200).json({
           summary:
             "To place the order, I still need the buyer name, seafood item, quantity in pounds, and shipping destination.",
           execution_message: "One moment while I log this order.",
@@ -840,7 +854,7 @@ const notes =
       }
 
       if (quantityLbs <= 0) {
-        return res.status(400).json({
+        return res.status(200).json({
           summary: "The quantity needs to be a valid number greater than zero.",
           execution_message: "One moment while I log this order.",
         });
@@ -873,7 +887,8 @@ const notes =
       }
 
       const weightedTotal = deduction.used_lots.reduce(
-        (sum, lot) => sum + safeNumber(lot.deducted_lbs) * safeNumber(lot.price_per_pound),
+        (sum, lot) =>
+          sum + safeNumber(lot.deducted_lbs) * safeNumber(lot.price_per_pound),
         0
       );
       const avgPrice =
