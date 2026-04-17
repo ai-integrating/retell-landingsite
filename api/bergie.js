@@ -1,63 +1,64 @@
-// /api/bergie.js
-const { kv } = require("@vercel/kv");
-const { google } = require("googleapis");
 const crypto = require("crypto");
 
-const DEFAULT_SUMMARY_TAB_NAME =
-  process.env.DAILY_SUMMARY_TAB_NAME || "Call Summaries";
-
-const MAX_ROWS_TO_READ = Number(process.env.DAILY_SUMMARY_MAX_ROWS || 25);
-const LOCK_TTL_SECONDS = Number(process.env.BERGIE_LOCK_TTL_SECONDS || 8);
 const IDEMPOTENCY_TTL_SECONDS = Number(
   process.env.BERGIE_IDEMPOTENCY_TTL_SECONDS || 60 * 60 * 24
 );
 const IDEMPOTENCY_SCHEMA_VERSION =
   process.env.BERGIE_IDEMPOTENCY_SCHEMA_VERSION || "v2";
 
-const TAB_NAMES = {
-  inventory: "Live Inventory",
-  orders: "Order Log",
-  pricing: "Market Pricing",
-  shipping: "Shipping Queue",
-};
+let cachedKvClient = null;
+const inMemoryKvStore = new Map();
 
-function getGoogleAuth() {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+function getKvClient() {
+  if (cachedKvClient) return cachedKvClient;
 
-  if (!raw) {
-    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
-  }
-
-  let creds;
   try {
-    creds = JSON.parse(raw);
-  } catch (err) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
+    const { kv } = require("@vercel/kv");
+    cachedKvClient = kv;
+  } catch (error) {
+    console.warn(
+      "bergie: @vercel/kv not available, using temporary in-memory KV fallback."
+    );
+    cachedKvClient = {
+      async get(key) {
+        return inMemoryKvStore.has(key) ? inMemoryKvStore.get(key) : null;
+      },
+      async set(key, value) {
+        inMemoryKvStore.set(key, value);
+        return "OK";
+      },
+    };
   }
 
-  if (!creds.client_email || !creds.private_key) {
-    throw new Error("Service account JSON missing client_email or private_key");
-  }
-@@ -125,64 +130,96 @@ function nowTimestamp() {
+  return cachedKvClient;
+}
+
+function clean(value) {
+  return String(value || "").trim();
+}
+
+function normalizeKey(value) {
+  return clean(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function safeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function nowTimestamp() {
+  return new Date().toISOString();
+}
+
 function makeId(prefix = "id") {
   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 }
 
-function makeLotId(species) {
-  const key = normalizeKey(species || "item") || "item";
-  return `lot_${nowIsoDate()}_${key}_${crypto.randomBytes(3).toString("hex")}`;
-}
-
-function getClientInventoryIndexKey(clientId) {
-  return `bergie:client:${clientId}:inventory:index`;
-}
-
-function getInventoryLotKey(clientId, lotId) {
-  return `bergie:client:${clientId}:inventory:lot:${lotId}`;
-}
-
-function getProductIndexKey(clientId, speciesKey) {
-  return `bergie:client:${clientId}:inventory:product:${speciesKey}`;
+function getInventoryKey(clientId, speciesKey) {
+  return `bergie:client:${clientId}:inventory:${speciesKey}`;
 }
 
 function getOrderKey(clientId, orderId) {
@@ -66,20 +67,6 @@ function getOrderKey(clientId, orderId) {
 
 function getOrderIdempotencyKey(clientId, requestKey) {
   return `bergie:client:${clientId}:order:idempotency:${IDEMPOTENCY_SCHEMA_VERSION}:${requestKey}`;
-}
-
-function getLockKey(clientId, speciesKey) {
-  return `bergie:client:${clientId}:lock:${speciesKey}`;
-}
-
-function toArray(value) {
-  if (Array.isArray(value)) return value;
-  if (!value) return [];
-  return [value];
-}
-
-function clean(value) {
-  return String(value || "").trim();
 }
 
 function parseIdempotencyKey(args, body) {
@@ -96,148 +83,62 @@ function parseIdempotencyKey(args, body) {
   );
 }
 
-function buildOrderIdempotencySignature(payload) {
-  return crypto
-    .createHash("sha256")
-    .update(JSON.stringify(payload))
-    .digest("hex");
+function getArgs(reqBody) {
+  if (!reqBody || typeof reqBody !== "object") return {};
+  const args = reqBody.args;
+  if (args && typeof args === "object") return args;
+  return reqBody;
 }
 
-function formatAvailableInventoryText(inventory = []) {
-  if (!Array.isArray(inventory) || !inventory.length) return "None";
-  return inventory
-    .map((item) => `${item.species}: ${item.quantity_lbs} lbs`)
-    .join("\n");
-}
-
-function normalizeShippingDestination(value) {
-  const v = clean(value);
-  return v.toLowerCase() === "pickup" ? "pickup" : v;
-}
-
-async function readSheetRows(spreadsheetId, preferredTabName) {
-  const sheets = await getSheetsClient();
-
-  const meta = await sheets.spreadsheets.get({
-    spreadsheetId,
-  });
-
-  const availableTabs =
-    meta.data.sheets?.map((s) => s.properties?.title).filter(Boolean) || [];
-
-  let selectedTab = preferredTabName;
-
-  if (!availableTabs.includes(selectedTab)) {
-    const normalizedPreferred = normalizeKey(preferredTabName);
-    selectedTab =
-      availableTabs.find((tab) => normalizeKey(tab) === normalizedPreferred) ||
-      availableTabs.find((tab) =>
-        normalizeKey(tab).includes(normalizedPreferred)
-      ) ||
-      availableTabs[0];
-@@ -451,50 +488,80 @@ async function releaseLock(lockKey, token) {
-    }
-  } catch (err) {
-    console.error("releaseLock error:", err);
-  }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function getAllInventoryLots(clientId) {
-  const lotIds = (await kv.get(getClientInventoryIndexKey(clientId))) || [];
-  const uniqueLotIds = Array.from(new Set(toArray(lotIds)));
-
-  if (!uniqueLotIds.length) return [];
-
-  const lots = await Promise.all(
-    uniqueLotIds.map((lotId) => kv.get(getInventoryLotKey(clientId, lotId)))
-  );
-
-  return lots.filter(Boolean).sort((a, b) => {
-    return String(a.species || "").localeCompare(String(b.species || ""));
-  });
-}
-
-async function getSellableInventorySummary(clientId, limit = 10) {
-  const lots = await getAllInventoryLots(clientId);
-  const totalsBySpeciesKey = new Map();
-
-  for (const lot of lots) {
-    if (lot.active === false) continue;
-    const remaining = safeNumber(lot.remaining_quantity_lbs);
-    if (remaining <= 0) continue;
-
-    const speciesKey = normalizeKey(lot.species);
-    if (!speciesKey) continue;
-
-    const existing = totalsBySpeciesKey.get(speciesKey) || {
-      species: lot.species,
-      quantity_lbs: 0,
-    };
-
-    existing.quantity_lbs += remaining;
-    totalsBySpeciesKey.set(speciesKey, existing);
+module.exports = async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed", summary: "" });
   }
 
-  return Array.from(totalsBySpeciesKey.values())
-    .map((item) => ({
-      species: item.species,
-      quantity_lbs: Number(item.quantity_lbs.toFixed(2)),
-    }))
-    .sort((a, b) => b.quantity_lbs - a.quantity_lbs)
-    .slice(0, limit);
-}
+  try {
+    const kv = getKvClient();
+    const body = req.body || {};
+    const args = getArgs(body);
+    const action = clean(args.action || body.action).toLowerCase();
 
-async function syncInventoryToSheet(sheetId, clientId) {
-  const lots = await getAllInventoryLots(clientId);
-  await upsertInventorySheet(sheetId, lots);
-  return lots;
-}
+    const clientId = clean(args.client_id || body.client_id || "default");
+    const species = clean(args.species || body.species);
+    const speciesKey = normalizeKey(species);
+    const buyerName = clean(args.buyer_name || body.buyer_name);
+    const sellerName = clean(args.seller_name || body.seller_name);
+    const shippingDestination = clean(
+      args.shipping_destination || body.shipping_destination
+    );
+    const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
 
-async function storeInventoryLot(clientId, lot) {
-  const lotKey = getInventoryLotKey(clientId, lot.lot_id);
-  const inventoryIndexKey = getClientInventoryIndexKey(clientId);
-  const productIndexKey = getProductIndexKey(clientId, lot.species_key);
-
-  await kv.set(lotKey, lot);
-
-  const allLotIds = (await kv.get(inventoryIndexKey)) || [];
-  const productLotIds = (await kv.get(productIndexKey)) || [];
-
-  const nextAll = Array.from(new Set([...toArray(allLotIds), lot.lot_id]));
-  const nextProduct = Array.from(
-    new Set([...toArray(productLotIds), lot.lot_id])
-  );
-
-  await kv.set(inventoryIndexKey, nextAll);
-  await kv.set(productIndexKey, nextProduct);
-
-  return lot;
-@@ -823,146 +890,331 @@ module.exports = async function handler(req, res) {
-          debug: { clientId, sheetId, species: inventorySpecies },
+    if (action === "check_inventory") {
+      if (!speciesKey) {
+        return res.status(200).json({
+          summary: "Please provide the seafood item to check inventory.",
+          execution_message: "One moment while I check inventory.",
         });
       }
 
-      const totalAvailable = speciesLots.reduce(
-        (sum, lot) => sum + safeNumber(lot.remaining_quantity_lbs),
-        0
-      );
+      const inventory = (await kv.get(getInventoryKey(clientId, speciesKey))) || {};
+      const available = safeNumber(inventory.quantity_lbs);
+      const price = safeNumber(inventory.price_per_pound);
 
-      const firstLot = speciesLots[0];
-      const summary = `${firstLot.species} is available for sale. There are ${totalAvailable} pounds available starting at ${firstLot.price_per_pound} per pound.`;
+      if (available <= 0) {
+        return res.status(200).json({
+          summary: `${species} is not currently available in live inventory.`,
+          execution_message: "One moment while I check inventory.",
+          data: { species, total_available_lbs: 0 },
+        });
+      }
 
       return res.status(200).json({
-        summary,
+        summary: `${species} is available for sale. There are ${available} pounds available starting at ${price} per pound.`,
         execution_message: "One moment while I check inventory.",
         data: {
-          species: firstLot.species,
-          total_available_lbs: totalAvailable,
-          lots: speciesLots,
+          species,
+          total_available_lbs: available,
+          price_per_pound: price,
         },
-        debug: { clientId, sheetId, species: inventorySpecies },
       });
     }
 
@@ -249,20 +150,6 @@ async function storeInventoryLot(clientId, lot) {
           execution_message: "One moment while I log this order.",
         });
       }
-      const idempotencyKey = parseIdempotencyKey(args, body);
-      const idempotencyKvKey = idempotencyKey
-        ? getOrderIdempotencyKey(clientId, idempotencyKey)
-        : null;
-      const idempotencyToken = idempotencyKey ? makeId("idem") : null;
-      const idempotencySignature = buildOrderIdempotencySignature({
-        action,
-        buyer_name: buyerName,
-        seller_name: sellerName,
-        species,
-        quantity_lbs: quantityLbs,
-        shipping_destination: shippingDestination,
-        notes,
-      });
 
       if (quantityLbs <= 0) {
         return res.status(200).json({
@@ -270,365 +157,99 @@ async function storeInventoryLot(clientId, lot) {
           execution_message: "One moment while I log this order.",
         });
       }
-      const sendPlaceOrderResponse = async (statusCode, payload, options = {}) => {
-        const shouldPersist = options.persist !== false;
 
-        if (idempotencyKvKey && shouldPersist) {
-          await kv.set(
-            idempotencyKvKey,
-            {
-              state: "completed",
-              status_code: statusCode,
-              response: payload,
-              signature: idempotencySignature,
-              completed_at: nowTimestamp(),
-            },
-            { ex: IDEMPOTENCY_TTL_SECONDS }
-          );
+      const requestIdempotencyKey = parseIdempotencyKey(args, body);
+      if (requestIdempotencyKey) {
+        const idemKey = getOrderIdempotencyKey(clientId, requestIdempotencyKey);
+        const existing = await kv.get(idemKey);
+        if (existing?.response) {
+          return res.status(existing.status_code || 200).json({
+            ...existing.response,
+            idempotent_replay: true,
+            idempotency_key: requestIdempotencyKey,
+          });
         }
+      }
 
-        return res.status(statusCode).json(payload);
+      const inventoryKey = getInventoryKey(clientId, speciesKey);
+      const currentInventory = (await kv.get(inventoryKey)) || {
+        species,
+        quantity_lbs: 0,
+        price_per_pound: 0,
       };
 
-      const availableLots = await getAvailableInventoryForSpecies(clientId, species);
-      if (!availableLots.length) {
+      const available = safeNumber(currentInventory.quantity_lbs);
+      if (available < quantityLbs) {
+        const summary =
+          available > 0
+            ? `There are only ${available} pounds of ${species} left. Would you like me to place the order for ${available} pounds instead?`
+            : `There is no ${species} left right now, so I could not log an order for ${quantityLbs} pounds.`;
+
         return res.status(200).json({
-          summary: `I could not place the order because ${species} is not available in live inventory.`,
+          summary,
           execution_message: "One moment while I log this order.",
-          debug: { clientId, sheetId, species },
-        });
-      if (idempotencyKvKey) {
-        const claimed = await kv.set(
-          idempotencyKvKey,
-          {
-            state: "processing",
-            token: idempotencyToken,
-            signature: idempotencySignature,
-            created_at: nowTimestamp(),
-          },
-          {
-            nx: true,
-            ex: IDEMPOTENCY_TTL_SECONDS,
-          }
-        );
-
-        if (!(claimed === "OK" || claimed === true)) {
-          let existing = await kv.get(idempotencyKvKey);
-
-          if (
-            existing?.signature &&
-            existing.signature !== idempotencySignature
-          ) {
-            return res.status(409).json({
-              summary:
-                "This idempotency key was already used for a different order request.",
-              execution_message: "One moment while I log this order.",
-              idempotency_key: idempotencyKey,
-            });
-          }
-
-          if (existing?.state === "processing") {
-            for (let i = 0; i < 10; i += 1) {
-              await sleep(120);
-              existing = await kv.get(idempotencyKvKey);
-              if (existing?.state === "completed") break;
-            }
-          }
-
-          if (existing?.state === "completed" && existing.response) {
-            const replayResponse = { ...existing.response };
-
-            const needsInventoryBackfill = !Array.isArray(
-              replayResponse?.data?.available_inventory
-            );
-            const needsInventoryTextBackfill =
-              !replayResponse.available_inventory_text ||
-              typeof replayResponse.available_inventory_text !== "string";
-
-            if (needsInventoryBackfill || needsInventoryTextBackfill) {
-              const availableInventory = await getSellableInventorySummary(clientId);
-              replayResponse.data = {
-                ...(replayResponse.data || {}),
-                available_inventory: availableInventory,
-              };
-              replayResponse.available_inventory = availableInventory;
-              replayResponse.available_inventory_count = availableInventory.length;
-              replayResponse.available_inventory_text =
-                formatAvailableInventoryText(availableInventory);
-
-              await kv.set(
-                idempotencyKvKey,
-                {
-                  ...existing,
-                  state: "completed",
-                  response: replayResponse,
-                  completed_at: nowTimestamp(),
-                },
-                { ex: IDEMPOTENCY_TTL_SECONDS }
-              );
-            }
-
-            return res.status(existing.status_code || 200).json({
-              ...replayResponse,
-              idempotent_replay: true,
-              idempotency_key: idempotencyKey,
-            });
-          }
-
-          return res.status(409).json({
-            summary:
-              "This order request is already being processed. Please wait a moment and retry.",
-            execution_message: "One moment while I log this order.",
-            idempotency_key: idempotencyKey,
-          });
-        }
-      }
-
-      const speciesName = availableLots[0].species;
-
-      const deduction = await deductInventory(clientId, species, quantityLbs);
-      try {
-        if (!species || !buyerName || !quantityLbs || !shippingDestination) {
-          return sendPlaceOrderResponse(200, {
-            summary:
-              "To place the order, I still need the buyer name, seafood item, quantity in pounds, and shipping destination.",
-            execution_message: "One moment while I log this order.",
-          });
-        }
-
-      if (!deduction.ok) {
-        return res.status(200).json({
-          summary: `There are only ${deduction.total_available} pounds of ${speciesName} available, so I could not log an order for ${quantityLbs} pounds.`,
-        if (quantityLbs <= 0) {
-          return sendPlaceOrderResponse(200, {
-            summary: "The quantity needs to be a valid number greater than zero.",
-            execution_message: "One moment while I log this order.",
-          });
-        }
-
-        const availableLots = await getAvailableInventoryForSpecies(clientId, species);
-        if (!availableLots.length) {
-          const availableInventory = await getSellableInventorySummary(clientId);
-          return sendPlaceOrderResponse(200, {
-            summary: `I could not place the order because ${species} is not available in live inventory.`,
-            execution_message: "One moment while I log this order.",
-            available_inventory: availableInventory,
-            available_inventory_count: availableInventory.length,
-            available_inventory_text:
-              formatAvailableInventoryText(availableInventory),
-            data: {
-              inventory_status: "none",
-              insufficient_inventory: true,
-              partial_inventory_available: false,
-              requested_quantity_lbs: quantityLbs,
-              available_quantity_lbs: 0,
-              suggested_quantity_lbs: 0,
-              suggested_follow_up_action: "check_other_inventory",
-              available_inventory: availableInventory,
-            },
-            debug: { clientId, sheetId, species },
-          });
-        }
-
-        const speciesName = availableLots[0].species;
-
-        const deduction = await deductInventory(clientId, species, quantityLbs);
-
-        if (!deduction.ok) {
-          const remainingLbs = Number(deduction.total_available || 0);
-          const hasRemainder = remainingLbs > 0;
-          const availableInventory = await getSellableInventorySummary(clientId);
-          const summary = hasRemainder
-            ? `There are only ${remainingLbs} pounds of ${speciesName} left. Would you like me to place the order for ${remainingLbs} pounds instead?`
-            : `There is no ${speciesName} left right now, so I could not log an order for ${quantityLbs} pounds.`;
-
-          return sendPlaceOrderResponse(200, {
-            summary,
-            execution_message: "One moment while I log this order.",
-            available_inventory: availableInventory,
-            available_inventory_count: availableInventory.length,
-            available_inventory_text:
-              formatAvailableInventoryText(availableInventory),
-            data: {
-              inventory_status: hasRemainder ? "partial" : "none",
-              insufficient_inventory: true,
-              partial_inventory_available: hasRemainder,
-              requested_quantity_lbs: quantityLbs,
-              available_quantity_lbs: remainingLbs,
-              suggested_quantity_lbs: hasRemainder ? remainingLbs : 0,
-              suggested_follow_up_action: hasRemainder
-                ? "offer_available_quantity"
-                : "check_other_inventory",
-              available_inventory: availableInventory,
-            },
-            debug: {
-              clientId,
-              sheetId,
-              species,
-              requested_quantity_lbs: quantityLbs,
-              available_quantity_lbs: remainingLbs,
-            },
-          });
-        }
-
-        const weightedTotal = deduction.used_lots.reduce(
-          (sum, lot) =>
-            sum + safeNumber(lot.deducted_lbs) * safeNumber(lot.price_per_pound),
-          0
-        );
-        const avgPrice =
-          quantityLbs > 0 ? Number((weightedTotal / quantityLbs).toFixed(2)) : 0;
-
-        const orderId = makeId("order");
-        const order = {
-          order_id: orderId,
-          timestamp: nowTimestamp(),
-          buyer_name: buyerName,
-          seller_name: sellerName,
-          species: speciesName,
-          species_key: deduction.species_key,
-          quantity_lbs: quantityLbs,
-          average_price_per_pound: avgPrice,
-          total_price: Number(weightedTotal.toFixed(2)),
-          shipping_destination: shippingDestination,
-          status: "Pending",
-          notes,
-          used_lots: deduction.used_lots,
-        };
-
-        await kv.set(getOrderKey(clientId, orderId), order);
-
-        await appendOrderRow(sheetId, [
-          order.timestamp,
-          order.order_id,
-          order.buyer_name,
-          order.seller_name,
-          order.species,
-          order.quantity_lbs,
-          order.average_price_per_pound,
-          order.total_price,
-          order.shipping_destination,
-          order.status,
-        ]);
-
-        await appendShippingRow(sheetId, [
-          order.timestamp,
-          order.order_id,
-          order.buyer_name,
-          order.species,
-          order.quantity_lbs,
-          order.shipping_destination,
-          order.status,
-          order.notes,
-        ]);
-
-        await syncInventoryToSheet(sheetId, clientId);
-        const availableInventory = await getSellableInventorySummary(clientId);
-
-        return sendPlaceOrderResponse(200, {
-          summary: `The order has been logged for ${buyerName}: ${quantityLbs} pounds of ${speciesName}, average price ${avgPrice} per pound, total ${order.total_price}, shipping to ${shippingDestination}. Status is Pending.`,
-          execution_message: "One moment while I log this order.",
-          available_inventory: availableInventory,
-          available_inventory_count: availableInventory.length,
-          available_inventory_text: formatAvailableInventoryText(availableInventory),
           data: {
-            ...order,
-            inventory_status: "fulfilled",
-            insufficient_inventory: false,
-            partial_inventory_available: false,
+            inventory_status: available > 0 ? "partial" : "none",
+            insufficient_inventory: true,
+            partial_inventory_available: available > 0,
             requested_quantity_lbs: quantityLbs,
-            available_quantity_lbs: quantityLbs,
-            suggested_quantity_lbs: quantityLbs,
-            available_inventory: availableInventory,
-          },
-          debug: {
-            clientId,
-            sheetId,
-            species,
-            available: deduction.total_available,
-            deducted_from_lots: deduction.used_lots,
-            total_remaining_after: deduction.total_remaining_after,
+            available_quantity_lbs: available,
+            suggested_quantity_lbs: available > 0 ? available : 0,
           },
         });
-      } catch (placeOrderError) {
-        if (idempotencyKvKey && idempotencyToken) {
-          const state = await kv.get(idempotencyKvKey);
-          if (state?.state === "processing" && state?.token === idempotencyToken) {
-            await kv.del(idempotencyKvKey);
-          }
-        }
-
-        throw placeOrderError;
       }
 
-      const weightedTotal = deduction.used_lots.reduce(
-        (sum, lot) =>
-          sum + safeNumber(lot.deducted_lbs) * safeNumber(lot.price_per_pound),
-        0
-      );
-      const avgPrice =
-        quantityLbs > 0 ? Number((weightedTotal / quantityLbs).toFixed(2)) : 0;
-
-      const orderId = makeId("order");
+      const pricePerPound = safeNumber(currentInventory.price_per_pound);
+      const totalPrice = Number((quantityLbs * pricePerPound).toFixed(2));
       const order = {
-        order_id: orderId,
+        order_id: makeId("order"),
         timestamp: nowTimestamp(),
         buyer_name: buyerName,
         seller_name: sellerName,
-        species: speciesName,
-        species_key: deduction.species_key,
+        species,
+        species_key: speciesKey,
         quantity_lbs: quantityLbs,
-        average_price_per_pound: avgPrice,
-        total_price: Number(weightedTotal.toFixed(2)),
+        average_price_per_pound: pricePerPound,
+        total_price: totalPrice,
         shipping_destination: shippingDestination,
         status: "Pending",
-        notes,
-        used_lots: deduction.used_lots,
       };
 
-      await kv.set(getOrderKey(clientId, orderId), order);
-
-      await appendOrderRow(sheetId, [
-        order.timestamp,
-        order.order_id,
-        order.buyer_name,
-        order.seller_name,
-        order.species,
-        order.quantity_lbs,
-        order.average_price_per_pound,
-        order.total_price,
-        order.shipping_destination,
-        order.status,
-      ]);
-
-      await appendShippingRow(sheetId, [
-        order.timestamp,
-        order.order_id,
-        order.buyer_name,
-        order.species,
-        order.quantity_lbs,
-        order.shipping_destination,
-        order.status,
-        order.notes,
-      ]);
-
-      await syncInventoryToSheet(sheetId, clientId);
-
-      return res.status(200).json({
-        summary: `The order has been logged for ${buyerName}: ${quantityLbs} pounds of ${speciesName}, average price ${avgPrice} per pound, total ${order.total_price}, shipping to ${shippingDestination}. Status is Pending.`,
-        execution_message: "One moment while I log this order.",
-        data: order,
-        debug: {
-          clientId,
-          sheetId,
-          deducted_from_lots: deduction.used_lots,
-          total_remaining_after: deduction.total_remaining_after,
-        },
+      await kv.set(getOrderKey(clientId, order.order_id), order);
+      await kv.set(inventoryKey, {
+        ...currentInventory,
+        species,
+        quantity_lbs: Number((available - quantityLbs).toFixed(2)),
       });
+
+      const responsePayload = {
+        summary: `The order has been logged for ${buyerName}: ${quantityLbs} pounds of ${species}, average price ${pricePerPound} per pound, total ${totalPrice}, shipping to ${shippingDestination}. Status is Pending.`,
+        execution_message: "One moment while I log this order.",
+        data: {
+          ...order,
+          inventory_status: "fulfilled",
+          insufficient_inventory: false,
+          partial_inventory_available: false,
+        },
+      };
+
+      if (requestIdempotencyKey) {
+        await kv.set(
+          getOrderIdempotencyKey(clientId, requestIdempotencyKey),
+          {
+            status_code: 200,
+            response: responsePayload,
+            completed_at: nowTimestamp(),
+          },
+          { ex: IDEMPOTENCY_TTL_SECONDS }
+        );
+      }
+
+      return res.status(200).json(responsePayload);
     }
 
     return res.status(400).json({
-      error: `Unsupported action: ${action}`,
+      error: `Unsupported action: ${action || "(missing)"}`,
       summary: "",
     });
   } catch (error) {
