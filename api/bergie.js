@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { google } = require("googleapis");
 
 const IDEMPOTENCY_TTL_SECONDS = Number(
   process.env.BERGIE_IDEMPOTENCY_TTL_SECONDS || 60 * 60 * 24
@@ -43,13 +44,11 @@ function getKvClient() {
       },
       async set(key, value, options = {}) {
         inMemoryKvStore.set(key, value);
-
         if (options?.ex) {
           setTimeout(() => {
             inMemoryKvStore.delete(key);
           }, options.ex * 1000).unref?.();
         }
-
         return "OK";
       },
       async del(key) {
@@ -159,7 +158,39 @@ async function releaseLock(kv, lockKey, ownerId) {
   }
 }
 
+function getGoogleAuth() {
+  return new google.auth.GoogleAuth({
+    credentials: {
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+    },
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+
+async function appendInventoryLogs(rows) {
+  const spreadsheetId = process.env.BERGIE_SPREADSHEET_ID;
+  const tabName = process.env.BERGIE_INVENTORY_LOG_TAB || "Inventory_Log";
+
+  if (!spreadsheetId) {
+    console.warn("BERGIE_SPREADSHEET_ID missing; skipping sheet append.");
+    return;
+  }
+
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tabName}!A:G`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: rows },
+  });
+}
+
 module.exports = async function handler(req, res) {
+  console.log("RAW BODY:", req.body);
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -170,88 +201,113 @@ module.exports = async function handler(req, res) {
     const args = getArgs(body);
     const action = clean(args.action || body.action).toLowerCase();
 
+    if (!action) {
+      console.error("Missing action field:", body);
+      return res.status(400).json({ ok: false, error: "Missing action" });
+    }
+
     const clientId = clean(args.client_id || body.client_id || "default");
     const species = clean(args.species || body.species);
     const speciesKey = normalizeKey(species);
     const buyerName = clean(args.buyer_name || body.buyer_name);
-    const sellerName = clean(args.seller_name || body.seller_name);
+    const sellerName = clean(args.seller_name || body.seller_name || "AI");
     const shippingDestination = clean(
       args.shipping_destination || body.shipping_destination
     );
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
 
-   // 🔥 SET INVENTORY BULK
-if (action === "set_inventory_bulk") {
-  const rawEntries = Array.isArray(args.entries)
-    ? args.entries
-    : Array.isArray(body.entries)
-    ? body.entries
-    : [];
+    if (action === "set_inventory_bulk") {
+      const rawEntries = Array.isArray(args.entries)
+        ? args.entries
+        : Array.isArray(body.entries)
+        ? body.entries
+        : [];
 
-  if (!rawEntries.length) {
-    return res.status(200).json({
-      ok: false,
-      action: "set_inventory_bulk",
-      summary: "No inventory entries were provided.",
-      data: {
-        updated_count: 0,
-      },
-    });
-  }
+      if (!rawEntries.length) {
+        return res.status(200).json({
+          ok: false,
+          action: "set_inventory_bulk",
+          summary: "No inventory entries were provided.",
+          data: { updated_count: 0 },
+        });
+      }
 
-  const results = [];
+      const results = [];
 
-  for (const entry of rawEntries) {
-    const entrySpecies = clean(entry?.species);
-    const entrySpeciesKey = normalizeKey(entrySpecies);
-    const entryQuantityLbs = safeNumber(entry?.quantity_lbs);
-    const entryPricePerPound = safeNumber(entry?.price_per_pound);
+      for (const entry of rawEntries) {
+        const entrySpecies = clean(entry?.species);
+        const entrySpeciesKey = normalizeKey(entrySpecies);
+        const entryQuantityLbs = safeNumber(entry?.quantity_lbs);
+        const entryPricePerPound = safeNumber(entry?.price_per_pound);
+        const entryPort = clean(entry?.port);
+        const entryStatus = clean(entry?.status);
 
-    if (!entrySpeciesKey) {
-      results.push({
-        ok: false,
-        species: entrySpecies || "",
-        summary: "Skipped entry with missing species.",
+        if (!entrySpeciesKey) {
+          results.push({
+            ok: false,
+            species: entrySpecies || "",
+            summary: "Skipped entry with missing species.",
+          });
+          continue;
+        }
+
+        const inventoryKey = getInventoryKey(clientId, entrySpeciesKey);
+
+        const record = {
+          species: entrySpecies,
+          species_key: entrySpeciesKey,
+          quantity_lbs: entryQuantityLbs,
+          price_per_pound: entryPricePerPound,
+          port: entryPort,
+          status: entryStatus,
+          updated_at: nowTimestamp(),
+          seller_name: sellerName,
+        };
+
+        await kv.set(inventoryKey, record);
+
+        results.push({
+          ok: true,
+          species: entrySpecies,
+          species_key: entrySpeciesKey,
+          quantity_lbs: entryQuantityLbs,
+          price_per_pound: entryPricePerPound,
+          port: entryPort,
+          status: entryStatus,
+        });
+      }
+
+      const updatedCount = results.filter((r) => r.ok).length;
+      const skippedCount = results.length - updatedCount;
+
+      const successfulRows = results
+        .filter((r) => r.ok)
+        .map((r) => [
+          nowTimestamp(),
+          clientId,
+          r.species,
+          r.quantity_lbs,
+          r.price_per_pound,
+          r.port || "",
+          sellerName,
+        ]);
+
+      if (successfulRows.length) {
+        await appendInventoryLogs(successfulRows);
+      }
+
+      return res.status(200).json({
+        ok: true,
+        action: "set_inventory_bulk",
+        summary: `Processed ${results.length} inventory entries. Updated ${updatedCount}. Skipped ${skippedCount}.`,
+        data: {
+          updated_count: updatedCount,
+          skipped_count: skippedCount,
+          results,
+        },
       });
-      continue;
     }
 
-    const inventoryKey = getInventoryKey(clientId, entrySpeciesKey);
-
-    const record = {
-      species: entrySpecies,
-      species_key: entrySpeciesKey,
-      quantity_lbs: entryQuantityLbs,
-      price_per_pound: entryPricePerPound,
-      updated_at: nowTimestamp(),
-    };
-
-    await kv.set(inventoryKey, record);
-
-    results.push({
-      ok: true,
-      species: entrySpecies,
-      species_key: entrySpeciesKey,
-      quantity_lbs: entryQuantityLbs,
-      price_per_pound: entryPricePerPound,
-    });
-  }
-
-  const updatedCount = results.filter((r) => r.ok).length;
-  const skippedCount = results.length - updatedCount;
-
-  return res.status(200).json({
-    ok: true,
-    action: "set_inventory_bulk",
-    summary: `Processed ${results.length} inventory entries. Updated ${updatedCount}. Skipped ${skippedCount}.`,
-    data: {
-      updated_count: updatedCount,
-      skipped_count: skippedCount,
-      results,
-    },
-  });
-}
-    // 🔥 SET INVENTORY
     if (action === "set_inventory") {
       if (!speciesKey) {
         return res.status(200).json({
@@ -277,6 +333,10 @@ if (action === "set_inventory_bulk") {
 
       await kv.set(inventoryKey, record);
 
+      await appendInventoryLogs([
+        [nowTimestamp(), clientId, species, quantityLbs, pricePerPound, "", sellerName],
+      ]);
+
       return res.status(200).json({
         ok: true,
         action: "set_inventory",
@@ -285,7 +345,6 @@ if (action === "set_inventory_bulk") {
       });
     }
 
-    // 🔍 CHECK INVENTORY
     if (action === "check_inventory") {
       const inventory =
         (await kv.get(getInventoryKey(clientId, speciesKey))) || {};
@@ -301,15 +360,11 @@ if (action === "set_inventory_bulk") {
       });
     }
 
-    // 🛒 PLACE ORDER
     if (action === "place_order") {
       const requestIdempotencyKey = parseIdempotencyKey(args, body);
 
       if (requestIdempotencyKey) {
-        const idemKey = getOrderIdempotencyKey(
-          clientId,
-          requestIdempotencyKey
-        );
+        const idemKey = getOrderIdempotencyKey(clientId, requestIdempotencyKey);
         const existing = await kv.get(idemKey);
 
         if (existing?.response) {
@@ -356,6 +411,9 @@ if (action === "set_inventory_bulk") {
           buyer_name: buyerName,
           species,
           quantity_lbs: quantityLbs,
+          shipping_destination: shippingDestination,
+          seller_name: sellerName,
+          created_at: nowTimestamp(),
         };
 
         await kv.set(getOrderKey(clientId, order.order_id), order);
@@ -385,7 +443,7 @@ if (action === "set_inventory_bulk") {
 
     return res.status(400).json({ error: "Invalid action" });
   } catch (error) {
-    console.error(error);
+    console.error("bergie error:", error);
     return res.status(500).json({ error: "Server error" });
   }
 };
