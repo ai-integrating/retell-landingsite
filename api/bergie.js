@@ -44,11 +44,13 @@ function getKvClient() {
       },
       async set(key, value, options = {}) {
         inMemoryKvStore.set(key, value);
+
         if (options?.ex) {
           setTimeout(() => {
             inMemoryKvStore.delete(key);
           }, options.ex * 1000).unref?.();
         }
+
         return "OK";
       },
       async del(key) {
@@ -168,12 +170,44 @@ function getGoogleAuth() {
   });
 }
 
-async function appendInventoryLogs(rows) {
-  const spreadsheetId = process.env.BERGIE_SPREADSHEET_ID;
-  const tabName = process.env.BERGIE_INVENTORY_LOG_TAB || "Inventory_Log";
+async function getClientSheetConfig(kv, clientId, agentId) {
+  let resolvedClientId = clean(clientId);
 
-  if (!spreadsheetId) {
-    console.warn("BERGIE_SPREADSHEET_ID missing; skipping sheet append.");
+  if (!resolvedClientId && agentId) {
+    resolvedClientId = clean(await kv.get(`agent:${agentId}:client`));
+  }
+
+  if (!resolvedClientId) return null;
+
+  const raw =
+    (await kv.get(`client:${resolvedClientId}:sheet`)) ||
+    (await kv.get(`client:${resolvedClientId}:config`));
+
+  if (!raw) return null;
+
+  if (typeof raw === "string") {
+    return {
+      clientId: resolvedClientId,
+      spreadsheetId: raw,
+      inventoryLogTab: "Inventory_Log",
+    };
+  }
+
+  return {
+    clientId: resolvedClientId,
+    spreadsheetId: clean(raw.spreadsheet_id || raw.sheet_id),
+    inventoryLogTab: clean(raw.inventory_log_tab || "Inventory_Log"),
+  };
+}
+
+async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+
+  if (!cfg?.spreadsheetId) {
+    console.warn("No spreadsheet config found for client/agent", {
+      clientId,
+      agentId,
+    });
     return;
   }
 
@@ -181,10 +215,12 @@ async function appendInventoryLogs(rows) {
   const sheets = google.sheets({ version: "v4", auth });
 
   await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${tabName}!A:G`,
+    spreadsheetId: cfg.spreadsheetId,
+    range: `${cfg.inventoryLogTab}!A:G`,
     valueInputOption: "USER_ENTERED",
-    requestBody: { values: rows },
+    requestBody: {
+      values: rows,
+    },
   });
 }
 
@@ -207,6 +243,9 @@ module.exports = async function handler(req, res) {
     }
 
     const clientId = clean(args.client_id || body.client_id || "default");
+    const agentId = clean(
+      args.agent_id || body.agent_id || body?.call?.agent_id || ""
+    );
     const species = clean(args.species || body.species);
     const speciesKey = normalizeKey(species);
     const buyerName = clean(args.buyer_name || body.buyer_name);
@@ -293,7 +332,11 @@ module.exports = async function handler(req, res) {
         ]);
 
       if (successfulRows.length) {
-        await appendInventoryLogs(successfulRows);
+        await appendInventoryLogs(kv, {
+          clientId,
+          agentId,
+          rows: successfulRows,
+        });
       }
 
       return res.status(200).json({
@@ -320,6 +363,8 @@ module.exports = async function handler(req, res) {
       const pricePerPound = safeNumber(
         args.price_per_pound || body.price_per_pound
       );
+      const port = clean(args.port || body.port);
+      const status = clean(args.status || body.status);
 
       const inventoryKey = getInventoryKey(clientId, speciesKey);
 
@@ -328,14 +373,29 @@ module.exports = async function handler(req, res) {
         species_key: speciesKey,
         quantity_lbs: quantityLbs,
         price_per_pound: pricePerPound,
+        port,
+        status,
         updated_at: nowTimestamp(),
+        seller_name: sellerName,
       };
 
       await kv.set(inventoryKey, record);
 
-      await appendInventoryLogs([
-        [nowTimestamp(), clientId, species, quantityLbs, pricePerPound, "", sellerName],
-      ]);
+      await appendInventoryLogs(kv, {
+        clientId,
+        agentId,
+        rows: [
+          [
+            nowTimestamp(),
+            clientId,
+            species,
+            quantityLbs,
+            pricePerPound,
+            port,
+            sellerName,
+          ],
+        ],
+      });
 
       return res.status(200).json({
         ok: true,
@@ -346,6 +406,19 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === "check_inventory") {
+      if (!speciesKey) {
+        return res.status(200).json({
+          ok: false,
+          action: "check_inventory",
+          summary: "Missing species.",
+          data: {
+            species,
+            total_available_lbs: 0,
+            price_per_pound: 0,
+          },
+        });
+      }
+
       const inventory =
         (await kv.get(getInventoryKey(clientId, speciesKey))) || {};
 
@@ -356,11 +429,46 @@ module.exports = async function handler(req, res) {
           species,
           total_available_lbs: safeNumber(inventory.quantity_lbs),
           price_per_pound: safeNumber(inventory.price_per_pound),
+          port: clean(inventory.port),
+          status: clean(inventory.status),
+          updated_at: clean(inventory.updated_at),
         },
       });
     }
 
     if (action === "place_order") {
+      if (!speciesKey) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing species.",
+        });
+      }
+
+      if (!buyerName) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing buyer name.",
+        });
+      }
+
+      if (!shippingDestination) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing shipping destination.",
+        });
+      }
+
+      if (!quantityLbs || quantityLbs <= 0) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing or invalid quantity.",
+        });
+      }
+
       const requestIdempotencyKey = parseIdempotencyKey(args, body);
 
       if (requestIdempotencyKey) {
@@ -380,6 +488,8 @@ module.exports = async function handler(req, res) {
 
       if (!locked) {
         return res.status(200).json({
+          ok: false,
+          action: "place_order",
           summary: "Inventory busy, try again",
         });
       }
@@ -390,9 +500,12 @@ module.exports = async function handler(req, res) {
 
         if (available < quantityLbs) {
           return res.status(200).json({
+            ok: false,
+            action: "place_order",
             summary: "Not enough inventory",
             data: {
               available_quantity_lbs: available,
+              requested_quantity_lbs: quantityLbs,
               inventory_status: available > 0 ? "partial" : "none",
               insufficient_inventory: true,
             },
@@ -404,21 +517,27 @@ module.exports = async function handler(req, res) {
         await kv.set(inventoryKey, {
           ...inventory,
           quantity_lbs: remaining,
+          updated_at: nowTimestamp(),
         });
 
         const order = {
           order_id: makeId("order"),
           buyer_name: buyerName,
           species,
+          species_key: speciesKey,
           quantity_lbs: quantityLbs,
           shipping_destination: shippingDestination,
           seller_name: sellerName,
+          client_id: clientId,
+          agent_id: agentId,
           created_at: nowTimestamp(),
         };
 
         await kv.set(getOrderKey(clientId, order.order_id), order);
 
         const response = {
+          ok: true,
+          action: "place_order",
           summary: "Order placed",
           data: {
             ...order,
@@ -441,9 +560,17 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    return res.status(400).json({ error: "Invalid action" });
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid action",
+      action,
+    });
   } catch (error) {
     console.error("bergie error:", error);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+      details: error?.message || "Unknown error",
+    });
   }
 };
