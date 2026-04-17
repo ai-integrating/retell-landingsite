@@ -187,6 +187,26 @@ module.exports = async function handler(req, res) {
       args.shipping_destination || body.shipping_destination
     );
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
+    if (action === "set_inventory") {
+  if (!species) {
+    return res.status(200).json({
+      summary: "Missing species",
+    });
+  }
+
+  const inventoryKey = getInventoryKey(clientId, speciesKey);
+
+  await kv.set(inventoryKey, {
+    species,
+    quantity_lbs: quantityLbs,
+    price_per_pound: safeNumber(args.price_per_pound || body.price_per_pound),
+    updated_at: nowTimestamp(),
+  });
+
+  return res.status(200).json({
+    summary: `${species} inventory updated to ${quantityLbs} lbs.`,
+  });
+}
 
     if (action === "check_inventory") {
       if (!speciesKey) {
