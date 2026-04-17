@@ -71,7 +71,7 @@ function clean(value) {
 function normalizeKey(value) {
   return clean(value)
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/[^a-z0-9]+/g, "")
     .replace(/^_+|_+$/g, "");
 }
 
@@ -190,6 +190,7 @@ async function getClientSheetConfig(kv, clientId, agentId) {
       clientId: resolvedClientId,
       spreadsheetId: raw,
       inventoryLogTab: "Inventory_Log",
+      liveInventoryTab: "Live Inventory",
     };
   }
 
@@ -197,6 +198,7 @@ async function getClientSheetConfig(kv, clientId, agentId) {
     clientId: resolvedClientId,
     spreadsheetId: clean(raw.spreadsheet_id || raw.sheet_id),
     inventoryLogTab: clean(raw.inventory_log_tab || "Inventory_Log"),
+    liveInventoryTab: clean(raw.live_inventory_tab || "Live Inventory"),
   };
 }
 
@@ -222,6 +224,136 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
       values: rows,
     },
   });
+}
+
+async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+
+  if (!cfg?.spreadsheetId) {
+    console.warn("No spreadsheet config found for live inventory append", {
+      clientId,
+      agentId,
+    });
+    return;
+  }
+
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: cfg.spreadsheetId,
+    range: `${cfg.liveInventoryTab}!A:J`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        lot.id,
+        lot.species,
+        lot.species_key,
+        lot.price_per_pound,
+        lot.starting_quantity_lbs,
+        lot.quantity_lbs,
+        lot.quantity_lbs > 0 ? "Yes" : "No",
+        lot.port || "",
+        lot.status || "Fresh",
+        lot.updated_at || lot.created_at || nowTimestamp(),
+      ]],
+    },
+  });
+}
+
+async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
+  if (!Array.isArray(lots) || !lots.length) return;
+
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+
+  if (!cfg?.spreadsheetId) {
+    console.warn("No spreadsheet config found for live inventory update", {
+      clientId,
+      agentId,
+    });
+    return;
+  }
+
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  const getRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: cfg.spreadsheetId,
+    range: `${cfg.liveInventoryTab}!A:J`,
+  });
+
+  const rows = getRes.data.values || [];
+  if (!rows.length) return;
+
+  const rowMap = new Map();
+  for (let i = 1; i < rows.length; i++) {
+    const rowId = clean(rows[i][0]);
+    if (rowId) rowMap.set(rowId, i + 1);
+  }
+
+  for (const lot of lots) {
+    const sheetRow = rowMap.get(clean(lot.id));
+    if (!sheetRow) continue;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: cfg.spreadsheetId,
+      range: `${cfg.liveInventoryTab}!F${sheetRow}:J${sheetRow}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          lot.quantity_lbs,
+          lot.quantity_lbs > 0 ? "Yes" : "No",
+          lot.port || "",
+          lot.status || "Fresh",
+          lot.updated_at || nowTimestamp(),
+        ]],
+      },
+    });
+  }
+}
+
+function ensureLotsArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return [
+    {
+      id: clean(value.id) || makeId("lot"),
+      species: clean(value.species),
+      species_key: clean(value.species_key),
+      quantity_lbs: safeNumber(value.quantity_lbs),
+      starting_quantity_lbs: safeNumber(
+        value.starting_quantity_lbs || value.quantity_lbs
+      ),
+      price_per_pound: safeNumber(value.price_per_pound),
+      port: clean(value.port),
+      status: clean(value.status),
+      created_at: clean(value.created_at) || nowTimestamp(),
+      updated_at: clean(value.updated_at) || nowTimestamp(),
+      seller_name: clean(value.seller_name),
+    },
+  ];
+}
+
+function summarizeLots(lots) {
+  const safeLots = ensureLotsArray(lots);
+  return {
+    total_available_lbs: safeLots.reduce(
+      (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+      0
+    ),
+    lots_count: safeLots.length,
+    price_per_pound:
+      safeLots.length === 1 ? safeNumber(safeLots[0].price_per_pound) : 0,
+    port: safeLots.length === 1 ? clean(safeLots[0].port) : "",
+    status: safeLots.length === 1 ? clean(safeLots[0].status) : "",
+    updated_at:
+      safeLots.length > 0
+        ? safeLots
+            .map((lot) => clean(lot.updated_at || lot.created_at))
+            .sort()
+            .slice(-1)[0]
+        : "",
+  };
 }
 
 module.exports = async function handler(req, res) {
@@ -291,28 +423,40 @@ module.exports = async function handler(req, res) {
         }
 
         const inventoryKey = getInventoryKey(clientId, entrySpeciesKey);
+        const existingLots = ensureLotsArray(await kv.get(inventoryKey));
 
-        const record = {
+        const lot = {
+          id: makeId("lot"),
           species: entrySpecies,
           species_key: entrySpeciesKey,
           quantity_lbs: entryQuantityLbs,
+          starting_quantity_lbs: entryQuantityLbs,
           price_per_pound: entryPricePerPound,
           port: entryPort,
-          status: entryStatus,
+          status: entryStatus || "Fresh",
+          created_at: nowTimestamp(),
           updated_at: nowTimestamp(),
           seller_name: sellerName,
         };
 
-        await kv.set(inventoryKey, record);
+        existingLots.push(lot);
+        await kv.set(inventoryKey, existingLots);
+
+        await appendLiveInventoryLot(kv, {
+          clientId,
+          agentId,
+          lot,
+        });
 
         results.push({
           ok: true,
-          species: entrySpecies,
-          species_key: entrySpeciesKey,
-          quantity_lbs: entryQuantityLbs,
-          price_per_pound: entryPricePerPound,
-          port: entryPort,
-          status: entryStatus,
+          id: lot.id,
+          species: lot.species,
+          species_key: lot.species_key,
+          quantity_lbs: lot.quantity_lbs,
+          price_per_pound: lot.price_per_pound,
+          port: lot.port,
+          status: lot.status,
         });
       }
 
@@ -367,19 +511,30 @@ module.exports = async function handler(req, res) {
       const status = clean(args.status || body.status);
 
       const inventoryKey = getInventoryKey(clientId, speciesKey);
+      const existingLots = ensureLotsArray(await kv.get(inventoryKey));
 
-      const record = {
+      const lot = {
+        id: makeId("lot"),
         species,
         species_key: speciesKey,
         quantity_lbs: quantityLbs,
+        starting_quantity_lbs: quantityLbs,
         price_per_pound: pricePerPound,
         port,
-        status,
+        status: status || "Fresh",
+        created_at: nowTimestamp(),
         updated_at: nowTimestamp(),
         seller_name: sellerName,
       };
 
-      await kv.set(inventoryKey, record);
+      existingLots.push(lot);
+      await kv.set(inventoryKey, existingLots);
+
+      await appendLiveInventoryLot(kv, {
+        clientId,
+        agentId,
+        lot,
+      });
 
       await appendInventoryLogs(kv, {
         clientId,
@@ -400,8 +555,8 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         action: "set_inventory",
-        summary: `${species} inventory updated to ${quantityLbs} lbs at ${pricePerPound} per pound.`,
-        data: record,
+        summary: `${species} inventory lot added: ${quantityLbs} lbs at ${pricePerPound} per pound.`,
+        data: lot,
       });
     }
 
@@ -415,23 +570,20 @@ module.exports = async function handler(req, res) {
             species,
             total_available_lbs: 0,
             price_per_pound: 0,
+            lots_count: 0,
           },
         });
       }
 
-      const inventory =
-        (await kv.get(getInventoryKey(clientId, speciesKey))) || {};
+      const lots = ensureLotsArray(await kv.get(getInventoryKey(clientId, speciesKey)));
+      const summary = summarizeLots(lots);
 
       return res.status(200).json({
         ok: true,
         action: "check_inventory",
         data: {
           species,
-          total_available_lbs: safeNumber(inventory.quantity_lbs),
-          price_per_pound: safeNumber(inventory.price_per_pound),
-          port: clean(inventory.port),
-          status: clean(inventory.status),
-          updated_at: clean(inventory.updated_at),
+          ...summary,
         },
       });
     }
@@ -495,30 +647,67 @@ module.exports = async function handler(req, res) {
       }
 
       try {
-        const inventory = (await kv.get(inventoryKey)) || {};
-        const available = safeNumber(inventory.quantity_lbs);
+        const lots = ensureLotsArray(await kv.get(inventoryKey)).sort((a, b) => {
+          const aTime = new Date(a.created_at || 0).getTime();
+          const bTime = new Date(b.created_at || 0).getTime();
+          return aTime - bTime;
+        });
 
-        if (available < quantityLbs) {
+        const totalAvailable = lots.reduce(
+          (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+          0
+        );
+
+        if (totalAvailable < quantityLbs) {
           return res.status(200).json({
             ok: false,
             action: "place_order",
             summary: "Not enough inventory",
             data: {
-              available_quantity_lbs: available,
+              available_quantity_lbs: totalAvailable,
               requested_quantity_lbs: quantityLbs,
-              inventory_status: available > 0 ? "partial" : "none",
+              inventory_status: totalAvailable > 0 ? "partial" : "none",
               insufficient_inventory: true,
             },
           });
         }
 
-        const remaining = available - quantityLbs;
+        let remainingToFill = quantityLbs;
+        const consumedLots = [];
 
-        await kv.set(inventoryKey, {
-          ...inventory,
-          quantity_lbs: remaining,
-          updated_at: nowTimestamp(),
+        for (const lot of lots) {
+          if (remainingToFill <= 0) break;
+
+          const available = safeNumber(lot.quantity_lbs);
+          if (available <= 0) continue;
+
+          const deduction = Math.min(available, remainingToFill);
+          lot.quantity_lbs = available - deduction;
+          lot.updated_at = nowTimestamp();
+
+          remainingToFill -= deduction;
+          consumedLots.push({
+            id: lot.id,
+            species: lot.species,
+            species_key: lot.species_key,
+            deducted_lbs: deduction,
+            remaining_lbs: lot.quantity_lbs,
+            price_per_pound: safeNumber(lot.price_per_pound),
+          });
+        }
+
+        await kv.set(inventoryKey, lots);
+
+        await updateLiveInventoryRowsById(kv, {
+          clientId,
+          agentId,
+          lots,
         });
+
+        const remainingInventory = lots.reduce(
+          (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+          0
+        );
 
         const order = {
           order_id: makeId("order"),
@@ -531,6 +720,7 @@ module.exports = async function handler(req, res) {
           client_id: clientId,
           agent_id: agentId,
           created_at: nowTimestamp(),
+          fulfilled_from_lots: consumedLots,
         };
 
         await kv.set(getOrderKey(clientId, order.order_id), order);
@@ -541,7 +731,7 @@ module.exports = async function handler(req, res) {
           summary: "Order placed",
           data: {
             ...order,
-            remaining_inventory_lbs: remaining,
+            remaining_inventory_lbs: remainingInventory,
             inventory_status: "fulfilled",
           },
         };
