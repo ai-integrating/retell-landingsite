@@ -180,6 +180,77 @@ module.exports = async function handler(req, res) {
     );
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
 
+   // 🔥 SET INVENTORY BULK
+if (action === "set_inventory_bulk") {
+  const rawEntries = Array.isArray(args.entries)
+    ? args.entries
+    : Array.isArray(body.entries)
+    ? body.entries
+    : [];
+
+  if (!rawEntries.length) {
+    return res.status(200).json({
+      ok: false,
+      action: "set_inventory_bulk",
+      summary: "No inventory entries were provided.",
+      data: {
+        updated_count: 0,
+      },
+    });
+  }
+
+  const results = [];
+
+  for (const entry of rawEntries) {
+    const entrySpecies = clean(entry?.species);
+    const entrySpeciesKey = normalizeKey(entrySpecies);
+    const entryQuantityLbs = safeNumber(entry?.quantity_lbs);
+    const entryPricePerPound = safeNumber(entry?.price_per_pound);
+
+    if (!entrySpeciesKey) {
+      results.push({
+        ok: false,
+        species: entrySpecies || "",
+        summary: "Skipped entry with missing species.",
+      });
+      continue;
+    }
+
+    const inventoryKey = getInventoryKey(clientId, entrySpeciesKey);
+
+    const record = {
+      species: entrySpecies,
+      species_key: entrySpeciesKey,
+      quantity_lbs: entryQuantityLbs,
+      price_per_pound: entryPricePerPound,
+      updated_at: nowTimestamp(),
+    };
+
+    await kv.set(inventoryKey, record);
+
+    results.push({
+      ok: true,
+      species: entrySpecies,
+      species_key: entrySpeciesKey,
+      quantity_lbs: entryQuantityLbs,
+      price_per_pound: entryPricePerPound,
+    });
+  }
+
+  const updatedCount = results.filter((r) => r.ok).length;
+  const skippedCount = results.length - updatedCount;
+
+  return res.status(200).json({
+    ok: true,
+    action: "set_inventory_bulk",
+    summary: `Processed ${results.length} inventory entries. Updated ${updatedCount}. Skipped ${skippedCount}.`,
+    data: {
+      updated_count: updatedCount,
+      skipped_count: skippedCount,
+      results,
+    },
+  });
+}
     // 🔥 SET INVENTORY
     if (action === "set_inventory") {
       if (!speciesKey) {
