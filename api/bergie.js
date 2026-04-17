@@ -134,17 +134,12 @@ async function acquireLock(kv, lockKey, ownerId) {
     if (!existing) {
       await kv.set(
         lockKey,
-        {
-          owner_id: ownerId,
-          acquired_at: nowTimestamp(),
-        },
+        { owner_id: ownerId, acquired_at: nowTimestamp() },
         { ex: LOCK_TTL_SECONDS }
       );
 
       const confirm = await kv.get(lockKey);
-      if (confirm?.owner_id === ownerId) {
-        return true;
-      }
+      if (confirm?.owner_id === ownerId) return true;
     }
 
     await sleep(LOCK_RETRY_MS);
@@ -160,16 +155,13 @@ async function releaseLock(kv, lockKey, ownerId) {
       await kv.del(lockKey);
     }
   } catch (error) {
-    console.warn("bergie: failed to release lock", error?.message || error);
+    console.warn("failed to release lock", error);
   }
 }
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({
-      error: "Method not allowed",
-      summary: "",
-    });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
@@ -187,267 +179,142 @@ module.exports = async function handler(req, res) {
       args.shipping_destination || body.shipping_destination
     );
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
+
+    // 🔥 SET INVENTORY
     if (action === "set_inventory") {
-  if (!species) {
-    return res.status(200).json({
-      summary: "Missing species",
-    });
-  }
-
-  const inventoryKey = getInventoryKey(clientId, speciesKey);
-
-  await kv.set(inventoryKey, {
-    species,
-    quantity_lbs: quantityLbs,
-    price_per_pound: safeNumber(args.price_per_pound || body.price_per_pound),
-    updated_at: nowTimestamp(),
-  });
-
-  return res.status(200).json({
-    summary: `${species} inventory updated to ${quantityLbs} lbs.`,
-  });
-}
-
-    if (action === "check_inventory") {
       if (!speciesKey) {
         return res.status(200).json({
           ok: false,
-          action: "check_inventory",
-          summary: "Please provide the seafood item to check inventory.",
-          execution_message: "One moment while I check inventory.",
-          data: {
-            species: species || "",
-            total_available_lbs: 0,
-          },
+          action: "set_inventory",
+          summary: "Missing species.",
         });
       }
 
+      const pricePerPound = safeNumber(
+        args.price_per_pound || body.price_per_pound
+      );
+
+      const inventoryKey = getInventoryKey(clientId, speciesKey);
+
+      const record = {
+        species,
+        species_key: speciesKey,
+        quantity_lbs: quantityLbs,
+        price_per_pound: pricePerPound,
+        updated_at: nowTimestamp(),
+      };
+
+      await kv.set(inventoryKey, record);
+
+      return res.status(200).json({
+        ok: true,
+        action: "set_inventory",
+        summary: `${species} inventory updated to ${quantityLbs} lbs at ${pricePerPound} per pound.`,
+        data: record,
+      });
+    }
+
+    // 🔍 CHECK INVENTORY
+    if (action === "check_inventory") {
       const inventory =
         (await kv.get(getInventoryKey(clientId, speciesKey))) || {};
-      const available = safeNumber(inventory.quantity_lbs);
-      const price = safeNumber(inventory.price_per_pound);
-
-      if (available <= 0) {
-        return res.status(200).json({
-          ok: true,
-          action: "check_inventory",
-          summary: `${species} is not currently available in live inventory.`,
-          execution_message: "One moment while I check inventory.",
-          data: {
-            species,
-            total_available_lbs: 0,
-            price_per_pound: price,
-            inventory_status: "none",
-          },
-        });
-      }
 
       return res.status(200).json({
         ok: true,
         action: "check_inventory",
-        summary: `${species} is available for sale. There are ${available} pounds available starting at ${price} per pound.`,
-        execution_message: "One moment while I check inventory.",
         data: {
           species,
-          total_available_lbs: available,
-          price_per_pound: price,
-          inventory_status: "available",
+          total_available_lbs: safeNumber(inventory.quantity_lbs),
+          price_per_pound: safeNumber(inventory.price_per_pound),
         },
       });
     }
 
+    // 🛒 PLACE ORDER
     if (action === "place_order") {
-      if (!species || !buyerName || !quantityLbs || !shippingDestination) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary:
-            "To place the order, I still need the buyer name, seafood item, quantity in pounds, and shipping destination.",
-          execution_message: "One moment while I log this order.",
-        });
-      }
-
-      if (quantityLbs <= 0) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "The quantity needs to be a valid number greater than zero.",
-          execution_message: "One moment while I log this order.",
-        });
-      }
-
       const requestIdempotencyKey = parseIdempotencyKey(args, body);
+
       if (requestIdempotencyKey) {
-        const idemKey = getOrderIdempotencyKey(clientId, requestIdempotencyKey);
+        const idemKey = getOrderIdempotencyKey(
+          clientId,
+          requestIdempotencyKey
+        );
         const existing = await kv.get(idemKey);
 
-        if (existing?.status === "completed" && existing?.response) {
-          return res.status(existing.status_code || 200).json({
-            ...existing.response,
-            idempotent_replay: true,
-            idempotency_key: requestIdempotencyKey,
-          });
+        if (existing?.response) {
+          return res.status(200).json(existing.response);
         }
-
-        if (existing?.status === "processing") {
-          return res.status(200).json({
-            ok: true,
-            action: "place_order",
-            summary: "This order request is already being processed.",
-            execution_message: "One moment while I log this order.",
-            idempotent_replay: true,
-            idempotency_key: requestIdempotencyKey,
-          });
-        }
-
-        await kv.set(
-          idemKey,
-          {
-            status: "processing",
-            started_at: nowTimestamp(),
-          },
-          { ex: IDEMPOTENCY_TTL_SECONDS }
-        );
       }
 
       const inventoryKey = getInventoryKey(clientId, speciesKey);
       const lockKey = getInventoryLockKey(clientId, speciesKey);
-      const lockOwnerId = makeId("lock");
+      const lockId = makeId("lock");
 
-      const lockAcquired = await acquireLock(kv, lockKey, lockOwnerId);
+      const locked = await acquireLock(kv, lockKey, lockId);
 
-      if (!lockAcquired) {
+      if (!locked) {
         return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary:
-            "That item is being updated right now. Please resubmit the order in a moment.",
-          execution_message: "One moment while I log this order.",
-          data: {
-            inventory_status: "busy",
-          },
+          summary: "Inventory busy, try again",
         });
       }
 
       try {
-        const currentInventory = (await kv.get(inventoryKey)) || {
-          species,
-          quantity_lbs: 0,
-          price_per_pound: 0,
-        };
-
-        const available = safeNumber(currentInventory.quantity_lbs);
+        const inventory = (await kv.get(inventoryKey)) || {};
+        const available = safeNumber(inventory.quantity_lbs);
 
         if (available < quantityLbs) {
-          const summary =
-            available > 0
-              ? `There are only ${available} pounds of ${species} left. Would you like me to place the order for ${available} pounds instead?`
-              : `There is no ${species} left right now, so I could not log an order for ${quantityLbs} pounds.`;
-
-          const responsePayload = {
-            ok: true,
-            action: "place_order",
-            summary,
-            execution_message: "One moment while I log this order.",
+          return res.status(200).json({
+            summary: "Not enough inventory",
             data: {
+              available_quantity_lbs: available,
               inventory_status: available > 0 ? "partial" : "none",
               insufficient_inventory: true,
-              partial_inventory_available: available > 0,
-              requested_quantity_lbs: quantityLbs,
-              available_quantity_lbs: available,
-              suggested_quantity_lbs: available > 0 ? available : 0,
-              remaining_inventory_lbs: available,
             },
-          };
-
-          if (requestIdempotencyKey) {
-            await kv.set(
-              getOrderIdempotencyKey(clientId, requestIdempotencyKey),
-              {
-                status: "completed",
-                status_code: 200,
-                response: responsePayload,
-                completed_at: nowTimestamp(),
-              },
-              { ex: IDEMPOTENCY_TTL_SECONDS }
-            );
-          }
-
-          return res.status(200).json(responsePayload);
+          });
         }
 
-        const pricePerPound = safeNumber(currentInventory.price_per_pound);
-        const totalPrice = Number((quantityLbs * pricePerPound).toFixed(2));
-        const remainingInventory = Number((available - quantityLbs).toFixed(2));
+        const remaining = available - quantityLbs;
+
+        await kv.set(inventoryKey, {
+          ...inventory,
+          quantity_lbs: remaining,
+        });
 
         const order = {
           order_id: makeId("order"),
-          timestamp: nowTimestamp(),
           buyer_name: buyerName,
-          seller_name: sellerName,
           species,
-          species_key: speciesKey,
           quantity_lbs: quantityLbs,
-          average_price_per_pound: pricePerPound,
-          total_price: totalPrice,
-          shipping_destination: shippingDestination,
-          status: "Pending",
         };
 
         await kv.set(getOrderKey(clientId, order.order_id), order);
 
-        await kv.set(inventoryKey, {
-          ...currentInventory,
-          species,
-          quantity_lbs: remainingInventory,
-          updated_at: nowTimestamp(),
-          last_order_id: order.order_id,
-        });
-
-        const responsePayload = {
-          ok: true,
-          action: "place_order",
-          summary: `The order has been logged for ${buyerName}: ${quantityLbs} pounds of ${species}, average price ${pricePerPound} per pound, total ${totalPrice}, shipping to ${shippingDestination}. Status is Pending. ${remainingInventory} pounds remain in inventory.`,
-          execution_message: "One moment while I log this order.",
+        const response = {
+          summary: "Order placed",
           data: {
             ...order,
+            remaining_inventory_lbs: remaining,
             inventory_status: "fulfilled",
-            insufficient_inventory: false,
-            partial_inventory_available: false,
-            remaining_inventory_lbs: remainingInventory,
           },
         };
 
         if (requestIdempotencyKey) {
           await kv.set(
             getOrderIdempotencyKey(clientId, requestIdempotencyKey),
-            {
-              status: "completed",
-              status_code: 200,
-              response: responsePayload,
-              completed_at: nowTimestamp(),
-            },
+            { response },
             { ex: IDEMPOTENCY_TTL_SECONDS }
           );
         }
 
-        return res.status(200).json(responsePayload);
+        return res.status(200).json(response);
       } finally {
-        await releaseLock(kv, lockKey, lockOwnerId);
+        await releaseLock(kv, lockKey, lockId);
       }
     }
 
-    return res.status(400).json({
-      error: `Unsupported action: ${action || "(missing)"}`,
-      summary: "",
-    });
+    return res.status(400).json({ error: "Invalid action" });
   } catch (error) {
-    console.error("bergie error:", error);
-
-    return res.status(500).json({
-      summary: "",
-      error: "Failed to process request",
-      details: error?.message || "Unknown error",
-    });
+    console.error(error);
+    return res.status(500).json({ error: "Server error" });
   }
 };
