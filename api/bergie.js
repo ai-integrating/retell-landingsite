@@ -58,227 +58,7 @@ function getKvClient() {
         return 1;
       },
     };
-  } (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/api/bergie.js b/api/bergie.js
-index 967380921cd8a37368d3e766b718006dee08e3c3..2d9838b965d8582071e97c57296d74cc5f01b4dc 100644
---- a/api/bergie.js
-+++ b/api/bergie.js
-@@ -68,50 +68,56 @@ function clean(value) {
-   return String(value).trim();
- }
- 
- function normalizeKey(value) {
-   return clean(value)
-     .toLowerCase()
-     .replace(/[^a-z0-9]+/g, "")
-     .replace(/^_+|_+$/g, "");
- }
- 
- function safeNumber(value) {
-   if (value === null || value === undefined || value === "") return 0;
-   const n = Number(value);
-   return Number.isFinite(n) ? n : 0;
- }
- 
- function safeSheetValue(value) {
-   if (value === undefined || value === null) return "";
-   if (typeof value === "number") {
-     return Number.isFinite(value) ? value : "";
-   }
-   if (typeof value === "boolean") return value ? "Yes" : "No";
-   return String(value).trim();
- }
- 
-+function toSheetA1Name(sheetName) {
-+  const cleaned = clean(sheetName).replace(/^'+|'+$/g, "");
-+  const escaped = cleaned.replace(/'/g, "''");
-+  return `'${escaped}'`;
-+}
-+
- function nowTimestamp() {
-   return new Date().toISOString();
- }
- 
- function makeId(prefix = "id") {
-   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
- }
- 
- function getInventoryKey(clientId, speciesKey) {
-   return `bergie:client:${clientId}:inventory:${speciesKey}`;
- }
- 
- function getInventoryLockKey(clientId, speciesKey) {
-   return `bergie:client:${clientId}:inventory_lock:${speciesKey}`;
- }
- 
- function getOrderKey(clientId, orderId) {
-   return `bergie:client:${clientId}:order:${orderId}`;
- }
- 
- function getOrderIdempotencyKey(clientId, requestKey) {
-   return `bergie:client:${clientId}:order:idempotency:${IDEMPOTENCY_SCHEMA_VERSION}:${requestKey}`;
- }
- 
- function parseIdempotencyKey(args, body) {
-@@ -234,151 +240,149 @@ async function getClientSheetConfig(kv, clientId, agentId) {
- async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
-   const cfg = await getClientSheetConfig(kv, clientId, agentId);
- 
-   if (!cfg?.spreadsheetId) {
-     console.warn("No spreadsheet config found for client/agent", {
-       clientId,
-       agentId,
-     });
-     return;
-   }
- 
-   const safeRows = (rows || []).map((row) =>
-     (row || []).map((cell) => safeSheetValue(cell))
-   );
- 
-   if (!safeRows.length) return;
- 
-   const auth = getGoogleAuth();
-   const sheets = google.sheets({ version: "v4", auth });
- 
-   console.log("appendInventoryLogs config:", cfg);
-   console.log("appendInventoryLogs rows:", safeRows);
- 
-   await sheets.spreadsheets.values.append({
-     spreadsheetId: cfg.spreadsheetId,
--    // FIX: Wrapped in single quotes to support spaces in tab names
--    range: `'${cfg.inventoryLogTab}'`, 
-+    range: toSheetA1Name(cfg.inventoryLogTab),
-     valueInputOption: "USER_ENTERED",
-     requestBody: {
-       values: safeRows,
-     },
-   });
- }
- 
- async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
-   const cfg = await getClientSheetConfig(kv, clientId, agentId);
- 
-   if (!cfg?.spreadsheetId) {
-     console.warn("No spreadsheet config found for live inventory append", {
-       clientId,
-       agentId,
-     });
-     return;
-   }
- 
-   const row = [[
-     safeSheetValue(lot.id),
-     safeSheetValue(lot.species),
-     safeSheetValue(lot.species_key),
-     safeNumber(lot.price_per_pound),
-     safeNumber(lot.starting_quantity_lbs),
-     safeNumber(lot.quantity_lbs),
-     safeNumber(lot.quantity_lbs) > 0 ? "Yes" : "No",
-     safeSheetValue(lot.port),
-     safeSheetValue(lot.status || "Fresh"),
-     safeSheetValue(lot.updated_at || lot.created_at || nowTimestamp()),
-   ]];
- 
-   const auth = getGoogleAuth();
-   const sheets = google.sheets({ version: "v4", auth });
- 
-   console.log("appendLiveInventoryLot config:", cfg);
-   console.log("appendLiveInventoryLot row:", row);
- 
-   await sheets.spreadsheets.values.append({
-     spreadsheetId: cfg.spreadsheetId,
--    // FIX: Wrapped in single quotes to support spaces in tab names
--    range: `'${cfg.liveInventoryTab}'`, 
-+    range: toSheetA1Name(cfg.liveInventoryTab),
-     valueInputOption: "USER_ENTERED",
-     requestBody: {
-       values: row,
-     },
-   });
- }
- 
- async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
-   if (!Array.isArray(lots) || !lots.length) return;
- 
-   const cfg = await getClientSheetConfig(kv, clientId, agentId);
- 
-   if (!cfg?.spreadsheetId) {
-     console.warn("No spreadsheet config found for live inventory update", {
-       clientId,
-       agentId,
-     });
-     return;
-   }
- 
-   const auth = getGoogleAuth();
-   const sheets = google.sheets({ version: "v4", auth });
- 
-   const getRes = await sheets.spreadsheets.values.get({
-     spreadsheetId: cfg.spreadsheetId,
--    range: `'${cfg.liveInventoryTab}'!A:J`,
-+    range: `${toSheetA1Name(cfg.liveInventoryTab)}!A:J`,
-   });
- 
-   const rows = getRes.data.values || [];
-   if (!rows.length) return;
- 
-   const rowMap = new Map();
-   for (let i = 1; i < rows.length; i++) {
-     const rowId = clean(rows[i][0]);
-     if (rowId) rowMap.set(rowId, i + 1);
-   }
- 
-   for (const lot of lots) {
-     const sheetRow = rowMap.get(clean(lot.id));
-     if (!sheetRow) continue;
- 
-     const updateRow = [[
-       safeNumber(lot.quantity_lbs),
-       safeNumber(lot.quantity_lbs) > 0 ? "Yes" : "No",
-       safeSheetValue(lot.port),
-       safeSheetValue(lot.status || "Fresh"),
-       safeSheetValue(lot.updated_at || nowTimestamp()),
-     ]];
- 
-     console.log("updateLiveInventoryRowsById config:", cfg);
-     console.log("updateLiveInventoryRowsById row:", {
-       sheetRow,
-       values: updateRow,
-     });
- 
-     await sheets.spreadsheets.values.update({
-       spreadsheetId: cfg.spreadsheetId,
--      range: `'${cfg.liveInventoryTab}'!F${sheetRow}:J${sheetRow}`,
-+      range: `${toSheetA1Name(cfg.liveInventoryTab)}!F${sheetRow}:J${sheetRow}`,
-       valueInputOption: "USER_ENTERED",
-       requestBody: {
-         values: updateRow,
-       },
-     });
-   }
- }
- 
- function ensureLotsArray(value) {
-   if (Array.isArray(value)) return value;
-   if (!value || typeof value !== "object") return [];
-   return [
-     {
-       id: clean(value.id) || makeId("lot"),
-       species: clean(value.species),
-       species_key: clean(value.species_key),
-       quantity_lbs: safeNumber(value.quantity_lbs),
-       starting_quantity_lbs: safeNumber(
-         value.starting_quantity_lbs || value.quantity_lbs
-       ),
-       price_per_pound: safeNumber(value.price_per_pound),
-       port: clean(value.port),
-       status: clean(value.status),
-       created_at: clean(value.created_at) || nowTimestamp(),
-       updated_at: clean(value.updated_at) || nowTimestamp(),
- 
-EOF
-)
+  }
 
   return cachedKvClient;
 }
@@ -308,6 +88,12 @@ function safeSheetValue(value) {
   }
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value).trim();
+}
+
+function toSheetA1Name(sheetName) {
+  const cleaned = clean(sheetName).replace(/^'+|'+$/g, "");
+  const escaped = cleaned.replace(/'/g, "''");
+  return `'${escaped}'`;
 }
 
 function nowTimestamp() {
@@ -476,8 +262,7 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    // FIX: Wrapped in single quotes to support spaces in tab names
-    range: `'${cfg.inventoryLogTab}'`, 
+    range: `${toSheetA1Name(cfg.inventoryLogTab)}!A:G`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: safeRows,
@@ -517,8 +302,7 @@ async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    // FIX: Wrapped in single quotes to support spaces in tab names
-    range: `'${cfg.liveInventoryTab}'`, 
+    range: `${toSheetA1Name(cfg.liveInventoryTab)}!A:J`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: row,
@@ -544,7 +328,7 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
 
   const getRes = await sheets.spreadsheets.values.get({
     spreadsheetId: cfg.spreadsheetId,
-    range: `'${cfg.liveInventoryTab}'!A:J`,
+    range: `${toSheetA1Name(cfg.liveInventoryTab)}!A:J`,
   });
 
   const rows = getRes.data.values || [];
@@ -576,7 +360,7 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: cfg.spreadsheetId,
-      range: `'${cfg.liveInventoryTab}'!F${sheetRow}:J${sheetRow}`,
+      range: `${toSheetA1Name(cfg.liveInventoryTab)}!F${sheetRow}:J${sheetRow}`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: updateRow,
