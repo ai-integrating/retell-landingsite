@@ -126,6 +126,18 @@ function getArgs(reqBody) {
   return reqBody;
 }
 
+async function resolveClientId(kv, clientId, agentId) {
+  const directClientId = clean(clientId);
+  if (directClientId) return directClientId;
+
+  const mappedClientId = clean(
+    agentId ? await kv.get(`agent:${agentId}:client`) : ""
+  );
+  if (mappedClientId) return mappedClientId;
+
+  return "default";
+}
+
 async function acquireLock(kv, lockKey, ownerId) {
   const started = Date.now();
 
@@ -171,13 +183,7 @@ function getGoogleAuth() {
 }
 
 async function getClientSheetConfig(kv, clientId, agentId) {
-  let resolvedClientId = clean(clientId);
-
-  if (!resolvedClientId && agentId) {
-    resolvedClientId = clean(await kv.get(`agent:${agentId}:client`));
-  }
-
-  if (!resolvedClientId) return null;
+  const resolvedClientId = await resolveClientId(kv, clientId, agentId);
 
   const raw =
     (await kv.get(`client:${resolvedClientId}:sheet`)) ||
@@ -374,10 +380,12 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "Missing action" });
     }
 
-    const clientId = clean(args.client_id || body.client_id || "default");
+    const rawClientId = clean(args.client_id || body.client_id || "");
     const agentId = clean(
       args.agent_id || body.agent_id || body?.call?.agent_id || ""
     );
+    const clientId = await resolveClientId(kv, rawClientId, agentId);
+
     const species = clean(args.species || body.species);
     const speciesKey = normalizeKey(species);
     const buyerName = clean(args.buyer_name || body.buyer_name);
@@ -575,7 +583,9 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const lots = ensureLotsArray(await kv.get(getInventoryKey(clientId, speciesKey)));
+      const lots = ensureLotsArray(
+        await kv.get(getInventoryKey(clientId, speciesKey))
+      );
       const summary = summarizeLots(lots);
 
       return res.status(200).json({
