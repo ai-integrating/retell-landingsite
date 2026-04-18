@@ -181,24 +181,46 @@ function getGoogleAuth() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
 }
-
 async function getClientSheetConfig(kv, clientId, agentId) {
   const resolvedClientId = await resolveClientId(kv, clientId, agentId);
 
-  const raw =
+  let raw =
     (await kv.get(`client:${resolvedClientId}:sheet`)) ||
     (await kv.get(`client:${resolvedClientId}:config`));
 
   if (!raw) return null;
 
   if (typeof raw === "string") {
-    return {
-      clientId: resolvedClientId,
-      spreadsheetId: raw,
-      inventoryLogTab: "Inventory_Log",
-      liveInventoryTab: "Live Inventory",
-    };
+    const trimmed = raw.trim();
+
+    // If the KV string is actually JSON text, parse it
+    if (trimmed.startsWith("{")) {
+      try {
+        raw = JSON.parse(trimmed);
+      } catch (error) {
+        console.error("Invalid JSON in client sheet config:", {
+          clientId: resolvedClientId,
+          raw,
+        });
+        return null;
+      }
+    } else {
+      return {
+        clientId: resolvedClientId,
+        spreadsheetId: trimmed,
+        inventoryLogTab: "Inventory_Log",
+        liveInventoryTab: "Live Inventory",
+      };
+    }
   }
+
+  return {
+    clientId: resolvedClientId,
+    spreadsheetId: clean(raw.spreadsheet_id || raw.sheet_id),
+    inventoryLogTab: clean(raw.inventory_log_tab || "Inventory_Log"),
+    liveInventoryTab: clean(raw.live_inventory_tab || "Live Inventory"),
+  };
+}
 
   return {
     clientId: resolvedClientId,
