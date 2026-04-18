@@ -256,8 +256,8 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    // UPDATED: Using sheet name only for more reliable appending
-    range: cfg.inventoryLogTab,
+    // FIX: Wrapped in single quotes to support spaces in tab names
+    range: `'${cfg.inventoryLogTab}'`, 
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: safeRows,
@@ -297,8 +297,8 @@ async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    // UPDATED: Using sheet name only for more reliable appending
-    range: cfg.liveInventoryTab,
+    // FIX: Wrapped in single quotes to support spaces in tab names
+    range: `'${cfg.liveInventoryTab}'`, 
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: row,
@@ -324,7 +324,7 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
 
   const getRes = await sheets.spreadsheets.values.get({
     spreadsheetId: cfg.spreadsheetId,
-    range: `${cfg.liveInventoryTab}!A:J`,
+    range: `'${cfg.liveInventoryTab}'!A:J`,
   });
 
   const rows = getRes.data.values || [];
@@ -356,7 +356,7 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: cfg.spreadsheetId,
-      range: `${cfg.liveInventoryTab}!F${sheetRow}:J${sheetRow}`,
+      range: `'${cfg.liveInventoryTab}'!F${sheetRow}:J${sheetRow}`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: updateRow,
