@@ -256,7 +256,8 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    range: `${cfg.inventoryLogTab}!A:G`,
+    // UPDATED: Using sheet name only for more reliable appending
+    range: cfg.inventoryLogTab,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: safeRows,
@@ -296,7 +297,8 @@ async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
-    range: `${cfg.liveInventoryTab}!A:J`,
+    // UPDATED: Using sheet name only for more reliable appending
+    range: cfg.liveInventoryTab,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: row,
