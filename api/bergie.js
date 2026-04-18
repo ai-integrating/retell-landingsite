@@ -81,6 +81,15 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function safeSheetValue(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : "";
+  }
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value).trim();
+}
+
 function nowTimestamp() {
   return new Date().toISOString();
 }
@@ -181,6 +190,7 @@ function getGoogleAuth() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
 }
+
 async function getClientSheetConfig(kv, clientId, agentId) {
   const resolvedClientId = await resolveClientId(kv, clientId, agentId);
 
@@ -193,7 +203,6 @@ async function getClientSheetConfig(kv, clientId, agentId) {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
 
-    // If the KV string is actually JSON text, parse it
     if (trimmed.startsWith("{")) {
       try {
         raw = JSON.parse(trimmed);
@@ -222,14 +231,6 @@ async function getClientSheetConfig(kv, clientId, agentId) {
   };
 }
 
-  return {
-    clientId: resolvedClientId,
-    spreadsheetId: clean(raw.spreadsheet_id || raw.sheet_id),
-    inventoryLogTab: clean(raw.inventory_log_tab || "Inventory_Log"),
-    liveInventoryTab: clean(raw.live_inventory_tab || "Live Inventory"),
-  };
-}
-
 async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
   const cfg = await getClientSheetConfig(kv, clientId, agentId);
 
@@ -241,15 +242,24 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
     return;
   }
 
+  const safeRows = (rows || []).map((row) =>
+    (row || []).map((cell) => safeSheetValue(cell))
+  );
+
+  if (!safeRows.length) return;
+
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
+
+  console.log("appendInventoryLogs config:", cfg);
+  console.log("appendInventoryLogs rows:", safeRows);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
     range: `${cfg.inventoryLogTab}!A:G`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
-      values: rows,
+      values: safeRows,
     },
   });
 }
@@ -265,26 +275,31 @@ async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
     return;
   }
 
+  const row = [[
+    safeSheetValue(lot.id),
+    safeSheetValue(lot.species),
+    safeSheetValue(lot.species_key),
+    safeNumber(lot.price_per_pound),
+    safeNumber(lot.starting_quantity_lbs),
+    safeNumber(lot.quantity_lbs),
+    safeNumber(lot.quantity_lbs) > 0 ? "Yes" : "No",
+    safeSheetValue(lot.port),
+    safeSheetValue(lot.status || "Fresh"),
+    safeSheetValue(lot.updated_at || lot.created_at || nowTimestamp()),
+  ]];
+
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
+
+  console.log("appendLiveInventoryLot config:", cfg);
+  console.log("appendLiveInventoryLot row:", row);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
     range: `${cfg.liveInventoryTab}!A:J`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
-      values: [[
-        lot.id,
-        lot.species,
-        lot.species_key,
-        lot.price_per_pound,
-        lot.starting_quantity_lbs,
-        lot.quantity_lbs,
-        lot.quantity_lbs > 0 ? "Yes" : "No",
-        lot.port || "",
-        lot.status || "Fresh",
-        lot.updated_at || lot.created_at || nowTimestamp(),
-      ]],
+      values: row,
     },
   });
 }
@@ -323,18 +338,26 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
     const sheetRow = rowMap.get(clean(lot.id));
     if (!sheetRow) continue;
 
+    const updateRow = [[
+      safeNumber(lot.quantity_lbs),
+      safeNumber(lot.quantity_lbs) > 0 ? "Yes" : "No",
+      safeSheetValue(lot.port),
+      safeSheetValue(lot.status || "Fresh"),
+      safeSheetValue(lot.updated_at || nowTimestamp()),
+    ]];
+
+    console.log("updateLiveInventoryRowsById config:", cfg);
+    console.log("updateLiveInventoryRowsById row:", {
+      sheetRow,
+      values: updateRow,
+    });
+
     await sheets.spreadsheets.values.update({
       spreadsheetId: cfg.spreadsheetId,
       range: `${cfg.liveInventoryTab}!F${sheetRow}:J${sheetRow}`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
-        values: [[
-          lot.quantity_lbs,
-          lot.quantity_lbs > 0 ? "Yes" : "No",
-          lot.port || "",
-          lot.status || "Fresh",
-          lot.updated_at || nowTimestamp(),
-        ]],
+        values: updateRow,
       },
     });
   }
