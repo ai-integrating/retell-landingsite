@@ -141,6 +141,23 @@ function getArgs(reqBody) {
   return reqBody;
 }
 
+function toBool(value) {
+  const v = clean(value).toLowerCase();
+  return v === "true" || v === "1" || v === "yes" || v === "y";
+}
+
+function normalizeProductForm(value, species = "") {
+  const form = clean(value).toLowerCase();
+
+  if (form) return form;
+
+  const speciesKey = normalizeKey(species);
+  if (speciesKey === "skate") return "wings";
+  if (speciesKey === "monkfish") return "tails";
+
+  return "whole";
+}
+
 async function resolveClientId(kv, clientId, agentId) {
   const directClientId = clean(clientId);
   if (directClientId) return directClientId;
@@ -223,8 +240,11 @@ async function getClientSheetConfig(kv, clientId, agentId) {
       return {
         clientId: resolvedClientId,
         spreadsheetId: trimmed,
-        inventoryLogTab: "Inventory_Log",
+        inventoryLogTab: "Inventory Log",
         liveInventoryTab: "Live Inventory",
+        orderLogTab: "Order Log",
+        shippingQueueTab: "Shipping Queue",
+        filletQueueTab: "Fillet Queue",
       };
     }
   }
@@ -232,9 +252,43 @@ async function getClientSheetConfig(kv, clientId, agentId) {
   return {
     clientId: resolvedClientId,
     spreadsheetId: clean(raw.spreadsheet_id || raw.sheet_id),
-    inventoryLogTab: clean(raw.inventory_log_tab || "Inventory_Log"),
+    inventoryLogTab: clean(raw.inventory_log_tab || "Inventory Log"),
     liveInventoryTab: clean(raw.live_inventory_tab || "Live Inventory"),
+    orderLogTab: clean(raw.order_log_tab || "Order Log"),
+    shippingQueueTab: clean(raw.shipping_queue_tab || "Shipping Queue"),
+    filletQueueTab: clean(raw.fillet_queue_tab || "Fillet Queue"),
   };
+}
+
+async function appendRowsToTab(kv, { clientId, agentId, tabName, rows, range }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+
+  if (!cfg?.spreadsheetId) {
+    console.warn("No spreadsheet config found for appendRowsToTab", {
+      clientId,
+      agentId,
+      tabName,
+    });
+    return;
+  }
+
+  const safeRows = (rows || []).map((row) =>
+    (row || []).map((cell) => safeSheetValue(cell))
+  );
+
+  if (!safeRows.length) return;
+
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: cfg.spreadsheetId,
+    range: `${toSheetA1Name(tabName)}!${range}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: safeRows,
+    },
+  });
 }
 
 async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
@@ -369,6 +423,83 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
   }
 }
 
+async function appendOrderLog(kv, { clientId, agentId, order }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+  if (!cfg?.orderLogTab) return;
+
+  const row = [[
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.species),
+    safeNumber(order.quantity_lbs),
+    safeSheetValue(order.shipping_destination),
+    safeSheetValue(order.order_status || "Pending"),
+    safeSheetValue(order.notes || ""),
+    safeSheetValue(order.seller_name),
+  ]];
+
+  await appendRowsToTab(kv, {
+    clientId,
+    agentId,
+    tabName: cfg.orderLogTab,
+    rows: row,
+    range: "A:I",
+  });
+}
+
+async function appendShippingQueue(kv, { clientId, agentId, order }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+  if (!cfg?.shippingQueueTab) return;
+
+  const row = [[
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.species),
+    safeNumber(order.quantity_lbs),
+    safeSheetValue(order.shipping_destination),
+    safeSheetValue(order.order_status || "Pending"),
+    safeSheetValue(order.notes || ""),
+    safeSheetValue(order.seller_name),
+    safeSheetValue(order.product_form),
+  ]];
+
+  await appendRowsToTab(kv, {
+    clientId,
+    agentId,
+    tabName: cfg.shippingQueueTab,
+    rows: row,
+    range: "A:J",
+  });
+}
+
+async function appendFilletQueue(kv, { clientId, agentId, order }) {
+  const cfg = await getClientSheetConfig(kv, clientId, agentId);
+  if (!cfg?.filletQueueTab) return;
+
+  const row = [[
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.species),
+    safeSheetValue(order.product_form),
+    safeNumber(order.quantity_lbs),
+    safeSheetValue(order.shipping_destination),
+    safeSheetValue(order.order_status || "Pending Fillet"),
+    safeSheetValue(order.notes || ""),
+    safeSheetValue(order.seller_name),
+  ]];
+
+  await appendRowsToTab(kv, {
+    clientId,
+    agentId,
+    tabName: cfg.filletQueueTab,
+    rows: row,
+    range: "A:J",
+  });
+}
+
 function ensureLotsArray(value) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
@@ -445,6 +576,12 @@ module.exports = async function handler(req, res) {
       args.shipping_destination || body.shipping_destination
     );
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
+    const notes = clean(args.notes || body.notes);
+    const productForm = normalizeProductForm(
+      args.product_form || body.product_form,
+      species
+    );
+    const customerOwned = toBool(args.customer_owned || body.customer_owned);
 
     if (action === "set_inventory_bulk") {
       const rawEntries = Array.isArray(args.entries)
@@ -693,122 +830,155 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      const inventoryKey = getInventoryKey(clientId, speciesKey);
-      const lockKey = getInventoryLockKey(clientId, speciesKey);
-      const lockId = makeId("lock");
+      let remainingInventory = null;
+      let consumedLots = [];
 
-      const locked = await acquireLock(kv, lockKey, lockId);
+      if (!customerOwned) {
+        const inventoryKey = getInventoryKey(clientId, speciesKey);
+        const lockKey = getInventoryLockKey(clientId, speciesKey);
+        const lockId = makeId("lock");
 
-      if (!locked) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "Inventory busy, try again",
-        });
-      }
+        const locked = await acquireLock(kv, lockKey, lockId);
 
-      try {
-        const lots = ensureLotsArray(await kv.get(inventoryKey)).sort((a, b) => {
-          const aTime = new Date(a.created_at || 0).getTime();
-          const bTime = new Date(b.created_at || 0).getTime();
-          return aTime - bTime;
-        });
-
-        const totalAvailable = lots.reduce(
-          (sum, lot) => sum + safeNumber(lot.quantity_lbs),
-          0
-        );
-
-        if (totalAvailable < quantityLbs) {
+        if (!locked) {
           return res.status(200).json({
             ok: false,
             action: "place_order",
-            summary: "Not enough inventory",
-            data: {
-              available_quantity_lbs: totalAvailable,
-              requested_quantity_lbs: quantityLbs,
-              inventory_status: totalAvailable > 0 ? "partial" : "none",
-              insufficient_inventory: true,
-            },
+            summary: "Inventory busy, try again",
           });
         }
 
-        let remainingToFill = quantityLbs;
-        const consumedLots = [];
-
-        for (const lot of lots) {
-          if (remainingToFill <= 0) break;
-
-          const available = safeNumber(lot.quantity_lbs);
-          if (available <= 0) continue;
-
-          const deduction = Math.min(available, remainingToFill);
-          lot.quantity_lbs = available - deduction;
-          lot.updated_at = nowTimestamp();
-
-          remainingToFill -= deduction;
-          consumedLots.push({
-            id: lot.id,
-            species: lot.species,
-            species_key: lot.species_key,
-            deducted_lbs: deduction,
-            remaining_lbs: lot.quantity_lbs,
-            price_per_pound: safeNumber(lot.price_per_pound),
+        try {
+          const lots = ensureLotsArray(await kv.get(inventoryKey)).sort((a, b) => {
+            const aTime = new Date(a.created_at || 0).getTime();
+            const bTime = new Date(b.created_at || 0).getTime();
+            return aTime - bTime;
           });
+
+          const totalAvailable = lots.reduce(
+            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+            0
+          );
+
+          if (totalAvailable < quantityLbs) {
+            return res.status(200).json({
+              ok: false,
+              action: "place_order",
+              summary: "STOP SALE — not enough inventory",
+              data: {
+                available_quantity_lbs: totalAvailable,
+                requested_quantity_lbs: quantityLbs,
+                inventory_status: totalAvailable > 0 ? "partial" : "none",
+                insufficient_inventory: true,
+              },
+            });
+          }
+
+          let remainingToFill = quantityLbs;
+
+          for (const lot of lots) {
+            if (remainingToFill <= 0) break;
+
+            const available = safeNumber(lot.quantity_lbs);
+            if (available <= 0) continue;
+
+            const deduction = Math.min(available, remainingToFill);
+            lot.quantity_lbs = available - deduction;
+            lot.updated_at = nowTimestamp();
+
+            remainingToFill -= deduction;
+            consumedLots.push({
+              id: lot.id,
+              species: lot.species,
+              species_key: lot.species_key,
+              deducted_lbs: deduction,
+              remaining_lbs: lot.quantity_lbs,
+              price_per_pound: safeNumber(lot.price_per_pound),
+            });
+          }
+
+          await kv.set(inventoryKey, lots);
+
+          await updateLiveInventoryRowsById(kv, {
+            clientId,
+            agentId,
+            lots,
+          });
+
+          remainingInventory = lots.reduce(
+            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+            0
+          );
+        } finally {
+          await releaseLock(kv, lockKey, lockId);
         }
+      }
 
-        await kv.set(inventoryKey, lots);
+      const order = {
+        order_id: makeId("order"),
+        buyer_name: buyerName,
+        species,
+        species_key: speciesKey,
+        product_form: productForm,
+        quantity_lbs: quantityLbs,
+        shipping_destination: shippingDestination,
+        seller_name: sellerName,
+        client_id: clientId,
+        agent_id: agentId,
+        customer_owned: customerOwned,
+        created_at: nowTimestamp(),
+        order_status:
+          productForm === "fillet" ? "Pending Fillet" : "Pending",
+        notes,
+        fulfilled_from_lots: consumedLots,
+      };
 
-        await updateLiveInventoryRowsById(kv, {
+      await kv.set(getOrderKey(clientId, order.order_id), order);
+
+      await appendOrderLog(kv, {
+        clientId,
+        agentId,
+        order,
+      });
+
+      if (productForm === "fillet") {
+        await appendFilletQueue(kv, {
           clientId,
           agentId,
-          lots,
+          order,
         });
-
-        const remainingInventory = lots.reduce(
-          (sum, lot) => sum + safeNumber(lot.quantity_lbs),
-          0
-        );
-
-        const order = {
-          order_id: makeId("order"),
-          buyer_name: buyerName,
-          species,
-          species_key: speciesKey,
-          quantity_lbs: quantityLbs,
-          shipping_destination: shippingDestination,
-          seller_name: sellerName,
-          client_id: clientId,
-          agent_id: agentId,
-          created_at: nowTimestamp(),
-          fulfilled_from_lots: consumedLots,
-        };
-
-        await kv.set(getOrderKey(clientId, order.order_id), order);
-
-        const response = {
-          ok: true,
-          action: "place_order",
-          summary: "Order placed",
-          data: {
-            ...order,
-            remaining_inventory_lbs: remainingInventory,
-            inventory_status: "fulfilled",
-          },
-        };
-
-        if (requestIdempotencyKey) {
-          await kv.set(
-            getOrderIdempotencyKey(clientId, requestIdempotencyKey),
-            { response },
-            { ex: IDEMPOTENCY_TTL_SECONDS }
-          );
-        }
-
-        return res.status(200).json(response);
-      } finally {
-        await releaseLock(kv, lockKey, lockId);
       }
+
+      if (clean(shippingDestination).toLowerCase() !== "pickup") {
+        await appendShippingQueue(kv, {
+          clientId,
+          agentId,
+          order,
+        });
+      }
+
+      const response = {
+        ok: true,
+        action: "place_order",
+        summary: "Order placed",
+        data: {
+          ...order,
+          remaining_inventory_lbs: remainingInventory,
+          inventory_status: customerOwned
+            ? "customer_owned"
+            : "fulfilled",
+        },
+      };
+
+      if (requestIdempotencyKey) {
+        await kv.set(
+          getOrderIdempotencyKey(clientId, requestIdempotencyKey),
+          { response },
+          { ex: IDEMPOTENCY_TTL_SECONDS }
+        );
+      }
+
+      return res.status(200).json(response);
     }
 
     return res.status(400).json({
