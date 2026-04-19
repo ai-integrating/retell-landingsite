@@ -158,6 +158,11 @@ function normalizeProductForm(value, species = "") {
   return "whole";
 }
 
+function normalizeDeliveryType(shippingDestination) {
+  const destination = clean(shippingDestination).toLowerCase();
+  return destination === "pickup" ? "pickup" : "delivery";
+}
+
 async function resolveClientId(kv, clientId, agentId) {
   const directClientId = clean(clientId);
   if (directClientId) return directClientId;
@@ -311,9 +316,6 @@ async function appendInventoryLogs(kv, { clientId, agentId, rows }) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
 
-  console.log("appendInventoryLogs config:", cfg);
-  console.log("appendInventoryLogs rows:", safeRows);
-
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
     range: `${toSheetA1Name(cfg.inventoryLogTab)}!A:G`,
@@ -350,9 +352,6 @@ async function appendLiveInventoryLot(kv, { clientId, agentId, lot }) {
 
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
-
-  console.log("appendLiveInventoryLot config:", cfg);
-  console.log("appendLiveInventoryLot row:", row);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: cfg.spreadsheetId,
@@ -406,12 +405,6 @@ async function updateLiveInventoryRowsById(kv, { clientId, agentId, lots }) {
       safeSheetValue(lot.updated_at || nowTimestamp()),
     ]];
 
-    console.log("updateLiveInventoryRowsById config:", cfg);
-    console.log("updateLiveInventoryRowsById row:", {
-      sheetRow,
-      values: updateRow,
-    });
-
     await sheets.spreadsheets.values.update({
       spreadsheetId: cfg.spreadsheetId,
       range: `${toSheetA1Name(cfg.liveInventoryTab)}!F${sheetRow}:J${sheetRow}`,
@@ -431,17 +424,17 @@ async function appendOrderLog(kv, { clientId, agentId, order }) {
     safeNumber(order.quantity_lbs) * safeNumber(order.price_per_pound);
 
   const row = [[
-    safeSheetValue(order.created_at),                 // A Timestamp
-    safeSheetValue(order.order_id),                   // B Order ID
-    safeSheetValue(order.buyer_name),                 // C Buyer Name
-    safeSheetValue(order.seller_name || "AI"),        // D Seller Name
-    safeSheetValue(order.species),                    // E Species / Size
-    safeNumber(order.quantity_lbs),                   // F Quantity (lbs)
-    safeNumber(order.price_per_pound),                // G Price Per Pound
-    safeNumber(totalPrice),                           // H Total Price
-    safeSheetValue(order.shipping_destination),       // I Shipping Destination
-    safeSheetValue(order.order_status || "Pending"),  // J Order Status
-    safeSheetValue(order.product_form || "whole"),    // K product_form
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.seller_name || "AI"),
+    safeSheetValue(order.species),
+    safeNumber(order.quantity_lbs),
+    safeNumber(order.price_per_pound),
+    safeNumber(totalPrice),
+    safeSheetValue(order.shipping_destination),
+    safeSheetValue(order.order_status || "Pending"),
+    safeSheetValue(order.product_form || "whole"),
   ]];
 
   await appendRowsToTab(kv, {
@@ -458,16 +451,17 @@ async function appendShippingQueue(kv, { clientId, agentId, order }) {
   if (!cfg?.shippingQueueTab) return;
 
   const row = [[
-    safeSheetValue(order.created_at),
-    safeSheetValue(order.order_id),
-    safeSheetValue(order.buyer_name),
-    safeSheetValue(order.species),
-    safeNumber(order.quantity_lbs),
-    safeSheetValue(order.shipping_destination),
-    safeSheetValue(order.order_status || "Pending"),
-    safeSheetValue(order.notes || ""),
-    safeSheetValue(order.seller_name),
-    safeSheetValue(order.product_form),
+    safeSheetValue(order.created_at),                 // A Timestamp
+    safeSheetValue(order.order_id),                   // B Order ID
+    safeSheetValue(order.buyer_name),                 // C Buyer Name
+    safeSheetValue(order.species),                    // D Species / Size
+    safeNumber(order.quantity_lbs),                   // E Quantity (lbs)
+    safeSheetValue(order.delivery_type),              // F delivery_type
+    safeSheetValue(order.shipping_destination),       // G Shipping Destination
+    safeSheetValue(order.order_status || "Pending"),  // H Order Status
+    safeSheetValue(order.notes || ""),                // I Notes
+    safeSheetValue(order.seller_name || "AI"),        // J handled by
+    safeSheetValue(order.product_form || "whole"),    // K product_form
   ]];
 
   await appendRowsToTab(kv, {
@@ -475,7 +469,7 @@ async function appendShippingQueue(kv, { clientId, agentId, order }) {
     agentId,
     tabName: cfg.shippingQueueTab,
     rows: row,
-    range: "A:J",
+    range: "A:K",
   });
 }
 
@@ -484,16 +478,13 @@ async function appendFilletQueue(kv, { clientId, agentId, order }) {
   if (!cfg?.filletQueueTab) return;
 
   const row = [[
-    safeSheetValue(order.created_at),
-    safeSheetValue(order.order_id),
-    safeSheetValue(order.buyer_name),
-    safeSheetValue(order.species),
-    safeSheetValue(order.product_form),
-    safeNumber(order.quantity_lbs),
-    safeSheetValue(order.shipping_destination),
-    safeSheetValue(order.order_status || "Pending Fillet"),
-    safeSheetValue(order.notes || ""),
-    safeSheetValue(order.seller_name),
+    safeSheetValue(order.created_at),                 // A Timestamp
+    safeSheetValue(order.order_id),                   // B Order ID
+    safeSheetValue(order.species),                    // C Species
+    safeNumber(order.quantity_lbs),                   // D Quantity (finished)
+    safeSheetValue(order.product_form || "fillet"),   // E product_form
+    safeSheetValue(order.buyer_name),                 // F Buyer
+    safeSheetValue(order.order_status || "Pending Fillet"), // G Status
   ]];
 
   await appendRowsToTab(kv, {
@@ -501,7 +492,7 @@ async function appendFilletQueue(kv, { clientId, agentId, order }) {
     agentId,
     tabName: cfg.filletQueueTab,
     rows: row,
-    range: "A:J",
+    range: "A:G",
   });
 }
 
@@ -580,6 +571,7 @@ module.exports = async function handler(req, res) {
     const shippingDestination = clean(
       args.shipping_destination || body.shipping_destination
     );
+    const deliveryType = normalizeDeliveryType(shippingDestination);
     const quantityLbs = safeNumber(args.quantity_lbs || body.quantity_lbs);
     const notes = clean(args.notes || body.notes);
     const productForm = normalizeProductForm(
@@ -928,6 +920,7 @@ module.exports = async function handler(req, res) {
         quantity_lbs: quantityLbs,
         price_per_pound:
           safeNumber(consumedLots?.[0]?.price_per_pound) || 0,
+        delivery_type: deliveryType,
         shipping_destination: shippingDestination,
         seller_name: sellerName,
         client_id: clientId,
@@ -956,7 +949,7 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      if (clean(shippingDestination).toLowerCase() !== "pickup") {
+      if (deliveryType === "delivery") {
         await appendShippingQueue(kv, {
           clientId,
           agentId,
