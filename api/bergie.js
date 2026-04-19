@@ -427,16 +427,24 @@ async function appendOrderLog(kv, { clientId, agentId, order }) {
   const cfg = await getClientSheetConfig(kv, clientId, agentId);
   if (!cfg?.orderLogTab) return;
 
+  const quantity = safeNumber(order.quantity_lbs);
+  const pricePerPound =
+    safeNumber(order.price_per_pound) ||
+    safeNumber(order.fulfilled_from_lots?.[0]?.price_per_pound);
+  const totalPrice = quantity * pricePerPound;
+
   const row = [[
-    safeSheetValue(order.created_at),
-    safeSheetValue(order.order_id),
-    safeSheetValue(order.buyer_name),
-    safeSheetValue(order.species),
-    safeNumber(order.quantity_lbs),
-    safeSheetValue(order.shipping_destination),
-    safeSheetValue(order.order_status || "Pending"),
-    safeSheetValue(order.notes || ""),
-    safeSheetValue(order.seller_name),
+    safeSheetValue(order.created_at),                 // A Timestamp
+    safeSheetValue(order.order_id),                   // B Order ID
+    safeSheetValue(order.buyer_name),                 // C Buyer Name
+    safeSheetValue(order.seller_name || "AI"),        // D Seller Name
+    safeSheetValue(order.species),                    // E Species / Size
+    quantity,                                         // F Quantity (lbs)
+    pricePerPound,                                    // G Price Per Pound
+    totalPrice,                                       // H Total Price
+    safeSheetValue(order.shipping_destination),       // I Shipping Destination
+    safeSheetValue(order.order_status || "Pending"),  // J Order Status
+    safeSheetValue(order.product_form || "whole"),    // K product_form
   ]];
 
   await appendRowsToTab(kv, {
@@ -444,7 +452,7 @@ async function appendOrderLog(kv, { clientId, agentId, order }) {
     agentId,
     tabName: cfg.orderLogTab,
     rows: row,
-    range: "A:I",
+    range: "A:K",
   });
 }
 
