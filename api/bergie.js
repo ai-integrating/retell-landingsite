@@ -616,7 +616,10 @@ module.exports = async function handler(req, res) {
         const entrySpeciesKey = normalizeKey(entrySpecies);
         const entryQuantityLbs = safeNumber(entry?.quantity_lbs);
         const yieldPercent = getYieldPercent(entrySpeciesKey);
-        const sellableLbs = entryQuantityLbs * yieldPercent;
+        
+        // Clean whole numbers for sheets
+        const sellableLbs = Math.round(entryQuantityLbs * yieldPercent);
+        
         const entryPricePerPound = safeNumber(entry?.price_per_pound);
         const entryPort = clean(entry?.port);
         const entryStatus = clean(entry?.status);
@@ -719,7 +722,9 @@ module.exports = async function handler(req, res) {
       const status = clean(args.status || body.status);
 
       const yieldPercent = getYieldPercent(speciesKey);
-      const sellableLbs = quantityLbs * yieldPercent;
+      
+      // Clean whole numbers for sheets
+      const sellableLbs = Math.round(quantityLbs * yieldPercent);
 
       const inventoryKey = getInventoryKey(clientId, speciesKey);
       const existingLots = ensureLotsArray(await kv.get(inventoryKey));
@@ -768,7 +773,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         action: "set_inventory",
-        summary: `${species} inventory lot added: ${quantityLbs} lbs → ${sellableLbs} sellable.`,
+        summary: `${species} inventory lot added: ${quantityLbs} lbs raw → ${sellableLbs} lbs sellable.`,
         data: lot,
       });
     }
@@ -778,4 +783,240 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({
           ok: false,
           action: "check_inventory",
-          summary:
+          summary: "Missing species.",
+          data: {
+            species,
+            total_available_lbs: 0,
+            price_per_pound: 0,
+            lots_count: 0,
+          },
+        });
+      }
+
+      const lots = ensureLotsArray(
+        await kv.get(getInventoryKey(clientId, speciesKey))
+      );
+      const summary = summarizeLots(lots);
+
+      return res.status(200).json({
+        ok: true,
+        action: "check_inventory",
+        data: {
+          species,
+          ...summary,
+        },
+      });
+    }
+
+    if (action === "place_order") {
+      if (!speciesKey) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing species.",
+        });
+      }
+
+      if (!buyerName) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing buyer name.",
+        });
+      }
+
+      if (!shippingDestination) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing shipping destination.",
+        });
+      }
+
+      if (!quantityLbs || quantityLbs <= 0) {
+        return res.status(200).json({
+          ok: false,
+          action: "place_order",
+          summary: "Missing or invalid quantity.",
+        });
+      }
+
+      const requestIdempotencyKey = parseIdempotencyKey(args, body);
+
+      if (requestIdempotencyKey) {
+        const idemKey = getOrderIdempotencyKey(clientId, requestIdempotencyKey);
+        const existing = await kv.get(idemKey);
+
+        if (existing?.response) {
+          return res.status(200).json(existing.response);
+        }
+      }
+
+      let remainingInventory = null;
+      let consumedLots = [];
+
+      if (!customerOwned) {
+        const inventoryKey = getInventoryKey(clientId, speciesKey);
+        const lockKey = getInventoryLockKey(clientId, speciesKey);
+        const lockId = makeId("lock");
+
+        const locked = await acquireLock(kv, lockKey, lockId);
+
+        if (!locked) {
+          return res.status(200).json({
+            ok: false,
+            action: "place_order",
+            summary: "Inventory busy, try again",
+          });
+        }
+
+        try {
+          const lots = ensureLotsArray(await kv.get(inventoryKey)).sort((a, b) => {
+            const aTime = new Date(a.created_at || 0).getTime();
+            const bTime = new Date(b.created_at || 0).getTime();
+            return aTime - bTime;
+          });
+
+          const totalAvailable = lots.reduce(
+            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+            0
+          );
+
+          if (totalAvailable < quantityLbs) {
+            return res.status(200).json({
+              ok: false,
+              action: "place_order",
+              summary: "STOP SALE — not enough inventory",
+              data: {
+                available_quantity_lbs: totalAvailable,
+                requested_quantity_lbs: quantityLbs,
+                inventory_status: totalAvailable > 0 ? "partial" : "none",
+                insufficient_inventory: true,
+              },
+            });
+          }
+
+          let remainingToFill = quantityLbs;
+
+          for (const lot of lots) {
+            if (remainingToFill <= 0) break;
+
+            const available = safeNumber(lot.quantity_lbs);
+            if (available <= 0) continue;
+
+            const deduction = Math.min(available, remainingToFill);
+            lot.quantity_lbs = available - deduction;
+            lot.updated_at = nowTimestamp();
+
+            remainingToFill -= deduction;
+            consumedLots.push({
+              id: lot.id,
+              species: lot.species,
+              species_key: lot.species_key,
+              deducted_lbs: deduction,
+              remaining_lbs: lot.quantity_lbs,
+              price_per_pound: safeNumber(lot.price_per_pound),
+            });
+          }
+
+          await kv.set(inventoryKey, lots);
+
+          await updateLiveInventoryRowsById(kv, {
+            clientId,
+            agentId,
+            lots,
+          });
+
+          remainingInventory = lots.reduce(
+            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
+            0
+          );
+        } finally {
+          await releaseLock(kv, lockKey, lockId);
+        }
+      }
+
+      const order = {
+        order_id: makeId("order"),
+        buyer_name: buyerName,
+        species,
+        species_key: speciesKey,
+        product_form: productForm,
+        quantity_lbs: quantityLbs,
+        price_per_pound:
+          safeNumber(consumedLots?.[0]?.price_per_pound) || 0,
+        delivery_type: deliveryType,
+        shipping_destination: shippingDestination,
+        seller_name: sellerName,
+        client_id: clientId,
+        agent_id: agentId,
+        customer_owned: customerOwned,
+        created_at: nowTimestamp(),
+        order_status:
+          productForm === "fillet" ? "Pending Fillet" : "Pending",
+        notes,
+        fulfilled_from_lots: consumedLots,
+      };
+
+      await kv.set(getOrderKey(clientId, order.order_id), order);
+
+      await appendOrderLog(kv, {
+        clientId,
+        agentId,
+        order,
+      });
+
+      if (productForm === "fillet") {
+        await appendFilletQueue(kv, {
+          clientId,
+          agentId,
+          order,
+        });
+      }
+
+      if (deliveryType === "delivery") {
+        await appendShippingQueue(kv, {
+          clientId,
+          agentId,
+          order,
+        });
+      }
+
+      const response = {
+        ok: true,
+        action: "place_order",
+        summary: "Order placed",
+        data: {
+          ...order,
+          remaining_inventory_lbs: remainingInventory,
+          inventory_status: customerOwned
+            ? "customer_owned"
+            : "fulfilled",
+        },
+      };
+
+      if (requestIdempotencyKey) {
+        await kv.set(
+          getOrderIdempotencyKey(clientId, requestIdempotencyKey),
+          { response },
+          { ex: IDEMPOTENCY_TTL_SECONDS }
+        );
+      }
+
+      return res.status(200).json(response);
+    }
+
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid action",
+      action,
+    });
+  } catch (error) {
+    console.error("bergie error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+      details: error?.message || "Unknown error",
+    });
+  }
+};
