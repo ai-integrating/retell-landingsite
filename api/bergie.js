@@ -1,6 +1,19 @@
 const crypto = require("crypto");
 const { google } = require("googleapis");
 
+const FILLET_YIELD = {
+  scallops: 1.0,
+  cod: 0.45,
+  marketcod: 0.45,
+  haddock: 0.42,
+  skate: 0.6,
+  tuna: 0.5
+};
+
+function getYieldPercent(speciesKey) {
+  return FILLET_YIELD[speciesKey] ?? 1.0;
+}
+
 const IDEMPOTENCY_TTL_SECONDS = Number(
   process.env.BERGIE_IDEMPOTENCY_TTL_SECONDS || 60 * 60 * 24
 );
@@ -451,17 +464,17 @@ async function appendShippingQueue(kv, { clientId, agentId, order }) {
   if (!cfg?.shippingQueueTab) return;
 
   const row = [[
-    safeSheetValue(order.created_at),                 // A Timestamp
-    safeSheetValue(order.order_id),                   // B Order ID
-    safeSheetValue(order.buyer_name),                 // C Buyer Name
-    safeSheetValue(order.species),                    // D Species / Size
-    safeNumber(order.quantity_lbs),                   // E Quantity (lbs)
-    safeSheetValue(order.delivery_type),              // F delivery_type
-    safeSheetValue(order.shipping_destination),       // G Shipping Destination
-    safeSheetValue(order.order_status || "Pending"),  // H Order Status
-    safeSheetValue(order.notes || ""),                // I Notes
-    safeSheetValue(order.seller_name || "AI"),        // J handled by
-    safeSheetValue(order.product_form || "whole"),    // K product_form
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.species),
+    safeNumber(order.quantity_lbs),
+    safeSheetValue(order.delivery_type),
+    safeSheetValue(order.shipping_destination),
+    safeSheetValue(order.order_status || "Pending"),
+    safeSheetValue(order.notes || ""),
+    safeSheetValue(order.seller_name || "AI"),
+    safeSheetValue(order.product_form || "whole"),
   ]];
 
   await appendRowsToTab(kv, {
@@ -478,13 +491,13 @@ async function appendFilletQueue(kv, { clientId, agentId, order }) {
   if (!cfg?.filletQueueTab) return;
 
   const row = [[
-    safeSheetValue(order.created_at),                 // A Timestamp
-    safeSheetValue(order.order_id),                   // B Order ID
-    safeSheetValue(order.species),                    // C Species
-    safeNumber(order.quantity_lbs),                   // D Quantity (finished)
-    safeSheetValue(order.product_form || "fillet"),   // E product_form
-    safeSheetValue(order.buyer_name),                 // F Buyer
-    safeSheetValue(order.order_status || "Pending Fillet"), // G Status
+    safeSheetValue(order.created_at),
+    safeSheetValue(order.order_id),
+    safeSheetValue(order.species),
+    safeNumber(order.quantity_lbs),
+    safeSheetValue(order.product_form || "fillet"),
+    safeSheetValue(order.buyer_name),
+    safeSheetValue(order.order_status || "Pending Fillet"),
   ]];
 
   await appendRowsToTab(kv, {
@@ -602,6 +615,8 @@ module.exports = async function handler(req, res) {
         const entrySpecies = clean(entry?.species);
         const entrySpeciesKey = normalizeKey(entrySpecies);
         const entryQuantityLbs = safeNumber(entry?.quantity_lbs);
+        const yieldPercent = getYieldPercent(entrySpeciesKey);
+        const sellableLbs = entryQuantityLbs * yieldPercent;
         const entryPricePerPound = safeNumber(entry?.price_per_pound);
         const entryPort = clean(entry?.port);
         const entryStatus = clean(entry?.status);
@@ -622,8 +637,10 @@ module.exports = async function handler(req, res) {
           id: makeId("lot"),
           species: entrySpecies,
           species_key: entrySpeciesKey,
-          quantity_lbs: entryQuantityLbs,
-          starting_quantity_lbs: entryQuantityLbs,
+          raw_quantity_lbs: entryQuantityLbs,
+          yield_percent: yieldPercent,
+          quantity_lbs: sellableLbs,
+          starting_quantity_lbs: sellableLbs,
           price_per_pound: entryPricePerPound,
           port: entryPort,
           status: entryStatus || "Fresh",
@@ -697,11 +714,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const pricePerPound = safeNumber(
-        args.price_per_pound || body.price_per_pound
-      );
+      const pricePerPound = safeNumber(args.price_per_pound || body.price_per_pound);
       const port = clean(args.port || body.port);
       const status = clean(args.status || body.status);
+
+      const yieldPercent = getYieldPercent(speciesKey);
+      const sellableLbs = quantityLbs * yieldPercent;
 
       const inventoryKey = getInventoryKey(clientId, speciesKey);
       const existingLots = ensureLotsArray(await kv.get(inventoryKey));
@@ -710,8 +728,10 @@ module.exports = async function handler(req, res) {
         id: makeId("lot"),
         species,
         species_key: speciesKey,
-        quantity_lbs: quantityLbs,
-        starting_quantity_lbs: quantityLbs,
+        raw_quantity_lbs: quantityLbs,
+        yield_percent: yieldPercent,
+        quantity_lbs: sellableLbs,
+        starting_quantity_lbs: sellableLbs,
         price_per_pound: pricePerPound,
         port,
         status: status || "Fresh",
@@ -737,7 +757,7 @@ module.exports = async function handler(req, res) {
             nowTimestamp(),
             clientId,
             species,
-            quantityLbs,
+            sellableLbs,
             pricePerPound,
             port,
             sellerName,
@@ -748,7 +768,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         action: "set_inventory",
-        summary: `${species} inventory lot added: ${quantityLbs} lbs at ${pricePerPound} per pound.`,
+        summary: `${species} inventory lot added: ${quantityLbs} lbs → ${sellableLbs} sellable.`,
         data: lot,
       });
     }
@@ -758,240 +778,4 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({
           ok: false,
           action: "check_inventory",
-          summary: "Missing species.",
-          data: {
-            species,
-            total_available_lbs: 0,
-            price_per_pound: 0,
-            lots_count: 0,
-          },
-        });
-      }
-
-      const lots = ensureLotsArray(
-        await kv.get(getInventoryKey(clientId, speciesKey))
-      );
-      const summary = summarizeLots(lots);
-
-      return res.status(200).json({
-        ok: true,
-        action: "check_inventory",
-        data: {
-          species,
-          ...summary,
-        },
-      });
-    }
-
-    if (action === "place_order") {
-      if (!speciesKey) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "Missing species.",
-        });
-      }
-
-      if (!buyerName) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "Missing buyer name.",
-        });
-      }
-
-      if (!shippingDestination) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "Missing shipping destination.",
-        });
-      }
-
-      if (!quantityLbs || quantityLbs <= 0) {
-        return res.status(200).json({
-          ok: false,
-          action: "place_order",
-          summary: "Missing or invalid quantity.",
-        });
-      }
-
-      const requestIdempotencyKey = parseIdempotencyKey(args, body);
-
-      if (requestIdempotencyKey) {
-        const idemKey = getOrderIdempotencyKey(clientId, requestIdempotencyKey);
-        const existing = await kv.get(idemKey);
-
-        if (existing?.response) {
-          return res.status(200).json(existing.response);
-        }
-      }
-
-      let remainingInventory = null;
-      let consumedLots = [];
-
-      if (!customerOwned) {
-        const inventoryKey = getInventoryKey(clientId, speciesKey);
-        const lockKey = getInventoryLockKey(clientId, speciesKey);
-        const lockId = makeId("lock");
-
-        const locked = await acquireLock(kv, lockKey, lockId);
-
-        if (!locked) {
-          return res.status(200).json({
-            ok: false,
-            action: "place_order",
-            summary: "Inventory busy, try again",
-          });
-        }
-
-        try {
-          const lots = ensureLotsArray(await kv.get(inventoryKey)).sort((a, b) => {
-            const aTime = new Date(a.created_at || 0).getTime();
-            const bTime = new Date(b.created_at || 0).getTime();
-            return aTime - bTime;
-          });
-
-          const totalAvailable = lots.reduce(
-            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
-            0
-          );
-
-          if (totalAvailable < quantityLbs) {
-            return res.status(200).json({
-              ok: false,
-              action: "place_order",
-              summary: "STOP SALE — not enough inventory",
-              data: {
-                available_quantity_lbs: totalAvailable,
-                requested_quantity_lbs: quantityLbs,
-                inventory_status: totalAvailable > 0 ? "partial" : "none",
-                insufficient_inventory: true,
-              },
-            });
-          }
-
-          let remainingToFill = quantityLbs;
-
-          for (const lot of lots) {
-            if (remainingToFill <= 0) break;
-
-            const available = safeNumber(lot.quantity_lbs);
-            if (available <= 0) continue;
-
-            const deduction = Math.min(available, remainingToFill);
-            lot.quantity_lbs = available - deduction;
-            lot.updated_at = nowTimestamp();
-
-            remainingToFill -= deduction;
-            consumedLots.push({
-              id: lot.id,
-              species: lot.species,
-              species_key: lot.species_key,
-              deducted_lbs: deduction,
-              remaining_lbs: lot.quantity_lbs,
-              price_per_pound: safeNumber(lot.price_per_pound),
-            });
-          }
-
-          await kv.set(inventoryKey, lots);
-
-          await updateLiveInventoryRowsById(kv, {
-            clientId,
-            agentId,
-            lots,
-          });
-
-          remainingInventory = lots.reduce(
-            (sum, lot) => sum + safeNumber(lot.quantity_lbs),
-            0
-          );
-        } finally {
-          await releaseLock(kv, lockKey, lockId);
-        }
-      }
-
-      const order = {
-        order_id: makeId("order"),
-        buyer_name: buyerName,
-        species,
-        species_key: speciesKey,
-        product_form: productForm,
-        quantity_lbs: quantityLbs,
-        price_per_pound:
-          safeNumber(consumedLots?.[0]?.price_per_pound) || 0,
-        delivery_type: deliveryType,
-        shipping_destination: shippingDestination,
-        seller_name: sellerName,
-        client_id: clientId,
-        agent_id: agentId,
-        customer_owned: customerOwned,
-        created_at: nowTimestamp(),
-        order_status:
-          productForm === "fillet" ? "Pending Fillet" : "Pending",
-        notes,
-        fulfilled_from_lots: consumedLots,
-      };
-
-      await kv.set(getOrderKey(clientId, order.order_id), order);
-
-      await appendOrderLog(kv, {
-        clientId,
-        agentId,
-        order,
-      });
-
-      if (productForm === "fillet") {
-        await appendFilletQueue(kv, {
-          clientId,
-          agentId,
-          order,
-        });
-      }
-
-      if (deliveryType === "delivery") {
-        await appendShippingQueue(kv, {
-          clientId,
-          agentId,
-          order,
-        });
-      }
-
-      const response = {
-        ok: true,
-        action: "place_order",
-        summary: "Order placed",
-        data: {
-          ...order,
-          remaining_inventory_lbs: remainingInventory,
-          inventory_status: customerOwned
-            ? "customer_owned"
-            : "fulfilled",
-        },
-      };
-
-      if (requestIdempotencyKey) {
-        await kv.set(
-          getOrderIdempotencyKey(clientId, requestIdempotencyKey),
-          { response },
-          { ex: IDEMPOTENCY_TTL_SECONDS }
-        );
-      }
-
-      return res.status(200).json(response);
-    }
-
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid action",
-      action,
-    });
-  } catch (error) {
-    console.error("bergie error:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Server error",
-      details: error?.message || "Unknown error",
-    });
-  }
-};
+          summary:
