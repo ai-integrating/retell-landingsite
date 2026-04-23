@@ -890,6 +890,10 @@ module.exports = async (req, res) => {
           type: "retell-llm",
           llm_id: llmId,
         },
+        speech_settings: {
+          interruption_sensitivity: 0,
+          response_eagerness: 1,
+        },
         metadata: {
           business_name: bizName,
           agent_role: roleKey,
