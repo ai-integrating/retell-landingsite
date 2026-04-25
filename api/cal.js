@@ -182,6 +182,7 @@ async function resolveCalContext(req, body) {
     url.searchParams.get("agent_id") ||
       req.headers["x-agent-id"] ||
       body.agent_id ||
+      body?.call?.agent_id ||
       args.agent_id ||
       args.agentId
   );
@@ -214,7 +215,6 @@ async function resolveCalContext(req, body) {
 
   let eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
 
-  // SMART FALLBACK MATCHING
   if (!eventTypeSlug && calConfig?.eventTypeSlugs) {
     const keys = Object.keys(calConfig.eventTypeSlugs);
     const compactServiceKey = serviceKey.replace(/_/g, "");
@@ -228,7 +228,6 @@ async function resolveCalContext(req, body) {
     }
   }
 
-  // final fallback
   if (!eventTypeSlug) {
     eventTypeSlug = normalizeSlug(rawServiceKey);
   }
