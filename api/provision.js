@@ -126,6 +126,7 @@ async function updateRetellLlmTools(llmId, generalTools) {
     }
   );
 }
+
 // -------------------- ROLE NORMALIZATION --------------------
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
@@ -674,6 +675,7 @@ function buildSchedulerEmailGateBlock() {
     `- Never say internal field names, tool names, raw service keys, or slugs out loud.`,
   ].join("\n");
 }
+
 function buildReceptionistNoBookingBlock() {
   return [
     `SCHEDULING LIMIT (PLAN-BASED):`,
@@ -890,10 +892,6 @@ module.exports = async (req, res) => {
           type: "retell-llm",
           llm_id: llmId,
         },
-        speech_settings: {
-          interruption_sensitivity: 0,
-          response_eagerness: 1,
-        },
         metadata: {
           business_name: bizName,
           agent_role: roleKey,
@@ -904,6 +902,16 @@ module.exports = async (req, res) => {
     );
 
     const agentId = agentResp.data.agent_id || agentResp.data.id;
+
+    // ✅ FORCE speech settings AFTER creation
+    await axios.patch(
+      `${RETELL_BASE}/update-agent/${encodeURIComponent(agentId)}`,
+      {
+        interruption_sensitivity: 0,
+        responsiveness: 1,
+      },
+      { headers: retellHeaders(), timeout: 20000 }
+    );
 
     // After the new agent exists, replace any template X-Agent-Id headers
     // so the cloned functions point to this specific provisioned agent.
