@@ -320,7 +320,29 @@ module.exports = async function handler(req, res) {
       rowCount: rows.length,
     });
 
-    const summary = summarizeRows(rows);
+function getTodayDateString() {
+  const today = new Date();
+  return today.toLocaleDateString("en-US");
+}
+
+function findTodaySummary(rows) {
+  const today = getTodayDateString();
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+
+    const date = row["Date"] || row["date"];
+    const summary = row["summary_text"] || row["Summary"] || row["summary"];
+
+    if (!date) continue;
+
+    if (String(date).includes(today)) {
+      return summary || "";
+    }
+  }
+
+  return "";
+}
 
     return res.status(200).json({
       summary,
