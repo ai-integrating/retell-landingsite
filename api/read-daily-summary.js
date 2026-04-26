@@ -107,7 +107,6 @@ function normalizeDate(input) {
 
   const raw = clean(input);
 
-  // Handles Google Sheet dates like 4/23/2026
   const parsed = new Date(raw);
   if (!isNaN(parsed)) {
     return parsed.toDateString();
@@ -143,13 +142,15 @@ function getRowSummary(row) {
 function findSummaryByDate(rows, requestedDate) {
   const targetDate = normalizeDate(requestedDate);
 
+  if (!targetDate) return "";
+
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i];
 
     const rowDate = normalizeDate(row["Date"] || row["date"]);
     const summary = getRowSummary(row);
 
-    if (targetDate && rowDate === targetDate && summary) {
+    if (rowDate === targetDate && summary) {
       return summary;
     }
   }
