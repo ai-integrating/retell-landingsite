@@ -215,14 +215,18 @@ module.exports = async function handler(req, res) {
     console.log("daily-summary body:", req.body);
     console.log("daily-summary headers:", req.headers);
 
-    const agentId =
-      req.body?.call?.agent_id ||
-      req.body?.agent_id ||
-      req.body?.data?.agent_id ||
-      req.body?.CallAgentId ||
-      req.headers?.agentid ||
-      null;
+const body = req.body || {};
+const args = body.args && typeof body.args === "object" ? body.args : {};
 
+const agentId =
+  args.agent_id ||
+  body.agent_id ||
+  body?.call?.agent_id ||
+  body?.data?.agent_id ||
+  body?.CallAgentId ||
+  req.headers?.["x-agent-id"] ||
+  req.headers?.agentid ||
+  null;
     if (!agentId) {
       return res.status(400).json({
         error: "Missing agent_id",
