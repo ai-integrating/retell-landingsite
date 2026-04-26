@@ -99,23 +99,45 @@ async function readSheetRows(spreadsheetId, tabName) {
 function getTodayDateString() {
   const today = new Date();
   return today.toLocaleDateString("en-US");
+function normalizeDateLoose(input) {
+  if (!input) return "";
+
+  const d = new Date(input);
+  if (isNaN(d)) return "";
+
+  return d.toDateString(); // "Wed Apr 23 2026"
 }
 
 function findTodaySummary(rows) {
-  const today = getTodayDateString();
+  const today = new Date().toDateString();
 
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i];
 
-    const date = clean(row["Date"] || row["date"]);
-    const summary = clean(row["summary_text"] || row["Summary"] || row["summary"]);
+    const rawDate = row["Date"] || row["date"];
+    const summary =
+      row["summary_text"] || row["Summary"] || row["summary"];
 
-    if (!date) continue;
+    const normalizedRowDate = normalizeDateLoose(rawDate);
 
-    if (date === today || date.includes(today)) {
-      return summary;
+    if (normalizedRowDate === today) {
+      return summary || "";
     }
   }
+
+  // 🔥 fallback: return most recent summary
+  if (rows.length) {
+    const lastRow = rows[rows.length - 1];
+    return (
+      lastRow["summary_text"] ||
+      lastRow["Summary"] ||
+      lastRow["summary"] ||
+      ""
+    );
+  }
+
+  return "";
+}
 
   return "";
 }
