@@ -19,6 +19,10 @@ function getGoogleAuth() {
     throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
   }
 
+  if (!creds.client_email || !creds.private_key) {
+    throw new Error("Service account JSON missing client_email or private_key");
+  }
+
   const privateKey = String(creds.private_key)
     .replace(/\\n/g, "\n")
     .replace(/\r\n/g, "\n")
@@ -68,7 +72,9 @@ async function readSheetRows(spreadsheetId, tabName) {
     meta.data.sheets?.map((s) => s.properties?.title).filter(Boolean) || [];
 
   if (!availableTabs.includes(tabName)) {
-    throw new Error(`Tab "${tabName}" not found. Available tabs: ${availableTabs.join(", ")}`);
+    throw new Error(
+      `Tab "${tabName}" not found. Available tabs: ${availableTabs.join(", ")}`
+    );
   }
 
   const resp = await sheets.spreadsheets.values.get({
@@ -96,48 +102,66 @@ async function readSheetRows(spreadsheetId, tabName) {
   return { tabName, rows };
 }
 
-function getTodayDateString() {
-  const today = new Date();
-  return today.toLocaleDateString("en-US");
-function normalizeDateLoose(input) {
+function normalizeDate(input) {
   if (!input) return "";
 
-  const d = new Date(input);
-  if (isNaN(d)) return "";
+  const raw = clean(input);
 
-  return d.toDateString(); // "Wed Apr 23 2026"
-}
-
-function findTodaySummary(rows) {
-  const today = new Date().toDateString();
-
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i];
-
-    const rawDate = row["Date"] || row["date"];
-    const summary =
-      row["summary_text"] || row["Summary"] || row["summary"];
-
-    const normalizedRowDate = normalizeDateLoose(rawDate);
-
-    if (normalizedRowDate === today) {
-      return summary || "";
-    }
-  }
-
-  // 🔥 fallback: return most recent summary
-  if (rows.length) {
-    const lastRow = rows[rows.length - 1];
-    return (
-      lastRow["summary_text"] ||
-      lastRow["Summary"] ||
-      lastRow["summary"] ||
-      ""
-    );
+  // Handles Google Sheet dates like 4/23/2026
+  const parsed = new Date(raw);
+  if (!isNaN(parsed)) {
+    return parsed.toDateString();
   }
 
   return "";
 }
+
+function getRequestedDate(req) {
+  const body = req.body || {};
+  const args = getArgs(body);
+
+  return (
+    clean(args.date) ||
+    clean(args.requested_date) ||
+    clean(args.summary_date) ||
+    clean(body.date) ||
+    clean(body.requested_date) ||
+    clean(body.summary_date) ||
+    new Date().toLocaleDateString("en-US")
+  );
+}
+
+function getRowSummary(row) {
+  return clean(
+    row["summary_text"] ||
+      row["Summary"] ||
+      row["summary"] ||
+      row["SUMMARY_TEXT"]
+  );
+}
+
+function findSummaryByDate(rows, requestedDate) {
+  const targetDate = normalizeDate(requestedDate);
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+
+    const rowDate = normalizeDate(row["Date"] || row["date"]);
+    const summary = getRowSummary(row);
+
+    if (targetDate && rowDate === targetDate && summary) {
+      return summary;
+    }
+  }
+
+  return "";
+}
+
+function findMostRecentSummary(rows) {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const summary = getRowSummary(rows[i]);
+    if (summary) return summary;
+  }
 
   return "";
 }
@@ -155,7 +179,7 @@ module.exports = async function handler(req, res) {
     if (!agentId) {
       return res.status(400).json({
         summary: "I couldn't find the agent ID for this call.",
-        execution_message: "Alright, let me check that.",
+        execution_message: "One moment while I pull that up.",
         error: "Missing agent_id",
       });
     }
@@ -168,7 +192,7 @@ module.exports = async function handler(req, res) {
     if (!clientId || !sheetId) {
       return res.status(404).json({
         summary: "I couldn't find the sheet setup for this client yet.",
-        execution_message: "Alright, let me check that.",
+        execution_message: "One moment while I pull that up.",
         error: "Missing KV mapping",
         debug: {
           agentId,
@@ -182,19 +206,30 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    const requestedDate = getRequestedDate(req);
+
     const { tabName, rows } = await readSheetRows(sheetId, DEFAULT_TAB_NAME);
 
-    const summary = findTodaySummary(rows);
+    const exactSummary = findSummaryByDate(rows, requestedDate);
+    const fallbackSummary = findMostRecentSummary(rows);
+
+    const summary =
+      exactSummary ||
+      fallbackSummary ||
+      "I couldn’t find a daily summary yet.";
 
     return res.status(200).json({
-      summary: summary || "I couldn’t find a daily summary for today yet.",
-      execution_message: "Alright, here’s what came in today.",
+      summary,
+      execution_message: "One moment while I pull that up.",
       debug: {
         agentId,
         clientId,
         sheetId,
         tabName,
         rowCount: rows.length,
+        requestedDate,
+        exactMatchFound: Boolean(exactSummary),
+        usedFallback: !exactSummary && Boolean(fallbackSummary),
       },
     });
   } catch (error) {
