@@ -1,9 +1,13 @@
-// /api/daily-summary.js
 const { kv } = require("@vercel/kv");
 const { google } = require("googleapis");
 
 const DEFAULT_TAB_NAME = process.env.DAILY_SUMMARY_TAB_NAME || "Call Summaries";
 const MAX_ROWS_TO_READ = Number(process.env.DAILY_SUMMARY_MAX_ROWS || 25);
+
+function clean(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+}
 
 function getGoogleAuth() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -15,7 +19,7 @@ function getGoogleAuth() {
   let creds;
   try {
     creds = JSON.parse(raw);
-  } catch (err) {
+  } catch {
     throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
   }
 
@@ -24,6 +28,7 @@ function getGoogleAuth() {
   }
 
   const privateKey = String(creds.private_key)
+    .replace(/\\n/g, "\n")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "")
     .trim();
@@ -36,13 +41,40 @@ function getGoogleAuth() {
   );
 }
 
+function getArgs(body) {
+  if (!body || typeof body !== "object") return {};
+  if (body.args && typeof body.args === "object") return body.args;
+  return {};
+}
+
+function getAgentId(req) {
+  const body = req.body || {};
+  const args = getArgs(body);
+
+  const possibleAgentId =
+    clean(body?.call?.agent_id) ||
+    clean(args.agent_id) ||
+    clean(body.agent_id) ||
+    clean(body?.data?.agent_id) ||
+    clean(body?.CallAgentId) ||
+    clean(req.headers?.["x-agent-id"]) ||
+    clean(req.headers?.agentid);
+
+  if (!possibleAgentId) return "";
+
+  // Prevent Retell placeholder text from being used as a real KV key.
+  if (possibleAgentId.includes("{{") || possibleAgentId.includes("}}")) {
+    return "";
+  }
+
+  return possibleAgentId;
+}
+
 async function readSheetRows(spreadsheetId, tabName) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: "v4", auth });
 
-  const meta = await sheets.spreadsheets.get({
-    spreadsheetId,
-  });
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
 
   const availableTabs =
     meta.data.sheets?.map((s) => s.properties?.title).filter(Boolean) || [];
@@ -55,19 +87,18 @@ async function readSheetRows(spreadsheetId, tabName) {
     throw new Error("No tabs found in spreadsheet");
   }
 
-  const range = `${selectedTab}!A:Z`;
-
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range,
+    range: `${selectedTab}!A:Z`,
   });
 
   const values = resp.data.values || [];
+
   if (!values.length) {
     return { tabName: selectedTab, rows: [] };
   }
 
-  const headers = values[0].map((h) => String(h || "").trim());
+  const headers = values[0].map((h) => clean(h));
   const bodyRows = values.slice(1);
 
   const rows = bodyRows.map((row) => {
@@ -92,8 +123,8 @@ function pickField(row, candidates) {
 }
 
 function isTrueLike(value) {
-  const v = String(value || "").trim().toLowerCase();
-  return v === "true" || v === "yes" || v === "1";
+  const v = clean(value).toLowerCase();
+  return v === "true" || v === "yes" || v === "1" || v === "urgent";
 }
 
 function summarizeRows(rows) {
@@ -107,7 +138,6 @@ function summarizeRows(rows) {
   let callbackCount = 0;
   let bookingCount = 0;
   const totalCalls = recent.length;
-
   const notable = [];
 
   for (const row of recent) {
@@ -117,6 +147,7 @@ function summarizeRows(rows) {
         "isurgent",
         "urgentmatter",
         "needsurgentattention",
+        "urgencylevel",
       ])
     );
 
@@ -135,6 +166,8 @@ function summarizeRows(rows) {
         "bookingrequested",
         "appointmentrequested",
         "bookappointment",
+        "bookingcompleted",
+        "booked",
       ])
     );
 
@@ -166,7 +199,9 @@ function summarizeRows(rows) {
     }
   }
 
-  let summary = `You had ${totalCalls} ${totalCalls === 1 ? "call" : "calls"} come in recently. `;
+  let summary = `You had ${totalCalls} ${
+    totalCalls === 1 ? "call" : "calls"
+  } come in recently. `;
 
   if (notable.length) {
     const top = notable.slice(-3).reverse();
@@ -185,20 +220,27 @@ function summarizeRows(rows) {
   }
 
   if (!urgentCount && !callbackCount && !bookingCount) {
-    summary += "Nothing urgent came up, and there’s nothing that needs follow-up right now.";
+    summary +=
+      "Nothing urgent came up, and there’s nothing that needs follow-up right now.";
     return summary;
   }
 
   if (urgentCount) {
-    summary += `${urgentCount} ${urgentCount === 1 ? "call needs" : "calls need"} urgent attention. `;
+    summary += `${urgentCount} ${
+      urgentCount === 1 ? "call needs" : "calls need"
+    } urgent attention. `;
   }
 
   if (callbackCount) {
-    summary += `${callbackCount} ${callbackCount === 1 ? "person needs" : "people need"} a callback. `;
+    summary += `${callbackCount} ${
+      callbackCount === 1 ? "person needs" : "people need"
+    } a callback. `;
   }
 
   if (bookingCount) {
-    summary += `${bookingCount} ${bookingCount === 1 ? "booking request was made" : "booking requests were made"}.`;
+    summary += `${bookingCount} ${
+      bookingCount === 1 ? "booking request was made" : "booking requests were made"
+    }.`;
   }
 
   return summary.trim();
@@ -207,29 +249,34 @@ function summarizeRows(rows) {
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({
-      error: "Method not allowed. Use POST",
+      error: "Method not allowed. Use POST.",
     });
   }
 
   try {
-    console.log("daily-summary body:", req.body);
-    console.log("daily-summary headers:", req.headers);
+    const body = req.body || {};
+    const args = getArgs(body);
 
-const body = req.body || {};
-const args = body.args && typeof body.args === "object" ? body.args : {};
+    console.log("read-daily-summary body:", body);
+    console.log("read-daily-summary args:", args);
+    console.log("read-daily-summary headers:", req.headers);
 
-const agentId =
-  args.agent_id ||
-  body.agent_id ||
-  body?.call?.agent_id ||
-  body?.data?.agent_id ||
-  body?.CallAgentId ||
-  req.headers?.["x-agent-id"] ||
-  req.headers?.agentid ||
-  null;
+    const agentId = getAgentId(req);
+
+    console.log("AGENT ID RECEIVED:", agentId);
+
     if (!agentId) {
       return res.status(400).json({
+        summary: "I couldn't find the agent ID for this call.",
+        execution_message: "Alright, let me check that.",
         error: "Missing agent_id",
+        debug: {
+          body_agent_id: body.agent_id || null,
+          args_agent_id: args.agent_id || null,
+          call_agent_id: body?.call?.agent_id || null,
+          header_agent_id:
+            req.headers?.["x-agent-id"] || req.headers?.agentid || null,
+        },
       });
     }
 
@@ -238,12 +285,28 @@ const agentId =
       ? await kv.get(`client:${clientId}:sheet`)
       : null;
 
-    console.log("KV lookup:", { agentId, clientId, sheetId });
+    console.log("KV lookup:", {
+      agentId,
+      clientId,
+      sheetId,
+      agentClientKey: `agent:${agentId}:client`,
+      clientSheetKey: clientId ? `client:${clientId}:sheet` : null,
+    });
 
     if (!clientId || !sheetId) {
       return res.status(404).json({
         summary: "I couldn't find the sheet setup for this client yet.",
-        execution_message: "Sure thing, one moment while I read my notes.",
+        execution_message: "Alright, let me check that.",
+        error: "Missing KV mapping",
+        debug: {
+          agentId,
+          clientId,
+          sheetId,
+          expectedAgentClientKey: `agent:${agentId}:client`,
+          expectedClientSheetKey: clientId
+            ? `client:${clientId}:sheet`
+            : null,
+        },
       });
     }
 
@@ -261,8 +324,9 @@ const agentId =
 
     return res.status(200).json({
       summary,
-      execution_message: "Sure thing, one moment while I read my notes.",
+      execution_message: "Alright, here’s what came in today.",
       debug: {
+        agentId,
         clientId,
         sheetId,
         tabName,
@@ -270,13 +334,13 @@ const agentId =
       },
     });
   } catch (error) {
-    console.error("daily-summary error:", error);
+    console.error("read-daily-summary error:", error);
 
     return res.status(500).json({
       summary: "",
+      execution_message: "I’m sorry, I couldn’t read the daily summary right now.",
       error: "Failed to generate summary",
       details: error?.message || "Unknown error",
     });
   }
 };
-
