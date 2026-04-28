@@ -44,118 +44,6 @@ function asString(v, fallback = "") {
   return s ? s : fallback;
 }
 
-function normalizeSlug(slug = "") {
-  return String(slug)
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/_/g, "-");
-}
-
-function normalizeServiceKey(v = "") {
-  return String(v)
-    .trim()
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "_")
-    .replace(/_+/g, "_");
-}
-
-function tryParseJson(value) {
-  if (!value) return null;
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return null;
-
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function cleanStringMap(obj) {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
-  const out = {};
-  for (const k of Object.keys(obj)) {
-    const key = normalizeServiceKey(k);
-    if (!key) continue;
-    const val = normalizeSlug(obj[k]);
-    if (!val) continue;
-    out[key] = val;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
-function cleanIdMap(obj) {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
-  const out = {};
-  for (const k of Object.keys(obj)) {
-    const key = normalizeServiceKey(k);
-    if (!key) continue;
-
-    const raw = obj[k];
-    if (raw === undefined || raw === null || raw === "") continue;
-
-    const num = Number(raw);
-    if (!Number.isFinite(num)) continue;
-
-    out[key] = num;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
-// -------------------- CAL CONFIG --------------------
-function extractCalConfig(body, existingCal = {}) {
-  const calObj = tryParseJson(body?.cal) || {};
-
-  const username = asString(
-    calObj.username,
-    asString(body?.username, asString(existingCal?.username, ""))
-  );
-
-  const eventTypeSlug = normalizeSlug(
-    asString(
-      calObj.eventTypeSlug,
-      asString(body?.eventTypeSlug, asString(existingCal?.eventTypeSlug, ""))
-    )
-  );
-
-  const timeZone = asString(
-    calObj.timeZone,
-    asString(body?.timeZone, asString(existingCal?.timeZone, ""))
-  );
-
-  const eventTypeSlugs = cleanStringMap(
-    calObj.eventTypeSlugs || body?.eventTypeSlugs || existingCal?.eventTypeSlugs
-  );
-
-  const eventTypeIds = cleanIdMap(
-    calObj.eventTypeIds || body?.eventTypeIds || existingCal?.eventTypeIds
-  );
-
-  const hasAny = !!(
-    username ||
-    eventTypeSlug ||
-    eventTypeSlugs ||
-    eventTypeIds ||
-    timeZone
-  );
-
-  if (!hasAny) return null;
-
-  return {
-    username: username || undefined,
-    eventTypeSlug: eventTypeSlug || undefined,
-    eventTypeSlugs: eventTypeSlugs || undefined,
-    eventTypeIds: eventTypeIds || undefined,
-    timeZone: timeZone || undefined,
-    updated_at: new Date().toISOString(),
-  };
-}
-
 // -------------------- AUTH --------------------
 function isAdmin(body) {
   const secret = process.env.KV_ADMIN_SECRET;
@@ -186,7 +74,8 @@ module.exports = async function handler(req, res) {
     const agent_id = asString(body?.agent_id);
     const client_id = asString(body?.client_id);
     const plan = asString(body?.plan);
-    const sheet_id = asString(body?.sheet_id); // NEW
+    const sheet_id = asString(body?.sheet_id);
+    const phone = asString(body?.phone); // ✅ ADDED
 
     if (!agent_id || !client_id) {
       return okJson(res, 400, {
@@ -196,42 +85,28 @@ module.exports = async function handler(req, res) {
     }
 
     const mapKey = `agent:${agent_id}:client`;
-    const calKey = `client:${client_id}:cal`;
-    const sheetKey = `client:${client_id}:sheet`; // NEW
+    const sheetKey = `client:${client_id}:sheet`;
+    const phoneKey = `agent:${agent_id}:phone`; // ✅ ADDED
 
     const existing = await kv.get(mapKey);
-    const prevCal = (await kv.get(calKey)) || {};
-    const calConfig = extractCalConfig(body, prevCal);
 
     // -------------------- EXISTING SAME --------------------
     if (existing && String(existing) === client_id) {
       if (plan) await kv.set(`plan:${agent_id}`, plan);
 
-      let mergedCal = prevCal;
-      if (calConfig) {
-        mergedCal = { ...prevCal, ...calConfig };
-        await kv.set(calKey, mergedCal);
-      }
-
       if (sheet_id) {
         await kv.set(sheetKey, sheet_id);
       }
 
-      const verify = await kv.get(mapKey);
-      const verifySheet = sheet_id ? await kv.get(sheetKey) : null;
-      console.log("VERIFY MAP AFTER SET (existing):", verify);
-      console.log("VERIFY SHEET AFTER SET (existing):", verifySheet);
+      if (phone) {
+        await kv.set(phoneKey, phone); // ✅ ADDED
+      }
 
       return okJson(res, 200, {
         ok: true,
         agent_id,
         client_id,
         already_set: true,
-        map_key: mapKey,
-        map_value: verify,
-        sheet_key: sheetKey,
-        sheet_value: verifySheet,
-        cal_preview: mergedCal,
       });
     }
 
@@ -248,32 +123,21 @@ module.exports = async function handler(req, res) {
 
     if (plan) await kv.set(`plan:${agent_id}`, plan);
 
-    let mergedCal = prevCal;
-    if (calConfig) {
-      mergedCal = { ...prevCal, ...calConfig };
-      await kv.set(calKey, mergedCal);
-    }
-
     if (sheet_id) {
       await kv.set(sheetKey, sheet_id);
     }
 
-    const verify = await kv.get(mapKey);
-    const verifySheet = sheet_id ? await kv.get(sheetKey) : null;
-    console.log("VERIFY MAP AFTER SET:", verify);
-    console.log("VERIFY SHEET AFTER SET:", verifySheet);
+    if (phone) {
+      await kv.set(phoneKey, phone); // ✅ ADDED
+    }
 
     return okJson(res, 200, {
       ok: true,
       agent_id,
       client_id,
       set: true,
-      map_key: mapKey,
-      map_value: verify,
-      sheet_key: sheetKey,
-      sheet_value: verifySheet,
-      cal_preview: mergedCal,
     });
+
   } catch (err) {
     console.error("kv-set-agent-client ERROR", err);
     return okJson(res, 500, {
