@@ -101,13 +101,14 @@ module.exports = async function handler(req, res) {
       if (phone) {
         await kv.set(phoneKey, phone); // ✅ ADDED
       }
-
-      return okJson(res, 200, {
-        ok: true,
-        agent_id,
-        client_id,
-        already_set: true,
-      });
+return okJson(res, 200, {
+  ok: true,
+  agent_id,
+  client_id,
+  phone_saved: !!phone,
+  phone,
+  already_set: true,
+});
     }
 
     // -------------------- EXISTING DIFFERENT --------------------
@@ -131,12 +132,14 @@ module.exports = async function handler(req, res) {
       await kv.set(phoneKey, phone); // ✅ ADDED
     }
 
-    return okJson(res, 200, {
-      ok: true,
-      agent_id,
-      client_id,
-      set: true,
-    });
+return okJson(res, 200, {
+  ok: true,
+  agent_id,
+  client_id,
+  phone_saved: !!phone,
+  phone,
+  set: true,
+});
 
   } catch (err) {
     console.error("kv-set-agent-client ERROR", err);
