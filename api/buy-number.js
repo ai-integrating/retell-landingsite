@@ -121,7 +121,7 @@ async function bindPhoneNumberToAgent({ phoneData, agentId }) {
       await axios.patch(
         `${RETELL_BASE}/update-phone-number/${encodeURIComponent(phoneNumber)}`,
         bindingPayload,
-        { headers: retellHeaders(), timeout: 7000 }
+        { headers: retellHeaders(), timeout: 15000 }
       );
       return { phone_number: phoneNumber, phone_number_id: phoneId || null };
     } catch (err) {
