@@ -104,7 +104,7 @@ async function createPhoneNumber({ areaCode, nickname }) {
   const resp = await axios.post(
     `${RETELL_BASE}/create-phone-number`,
     { area_code: Number(areaCode), nickname },
-    { headers: retellHeaders(), timeout: 12000 }
+    { headers: retellHeaders(), timeout: 25000 }
   );
   return resp.data;
 }
