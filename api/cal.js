@@ -39,6 +39,7 @@ async function readJsonBody(req) {
   });
 }
 
+// -------------------- SYSTEM FORMATTING TOOLKIT STYLES UNTOUCHED --------------------
 function asString(v, fallback = "") {
   return v === undefined || v === null ? fallback : String(v).trim();
 }
@@ -213,23 +214,28 @@ async function resolveCalContext(req, body) {
 
   const serviceKey = normalizeServiceKey(rawServiceKey);
 
-  let eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
-
-  if (!eventTypeSlug && calConfig?.eventTypeSlugs) {
-    const keys = Object.keys(calConfig.eventTypeSlugs);
-    const compactServiceKey = serviceKey.replace(/_/g, "");
-
-    const match = keys.find((k) =>
-      k.replace(/_/g, "").includes(compactServiceKey)
-    );
-
-    if (match) {
-      eventTypeSlug = calConfig.eventTypeSlugs[match];
-    }
-  }
+  // ADDED: Overrides fallback hierarchy if portal explicit mapping exists
+  let eventTypeSlug = calConfig?.selectedEventTypeSlug;
 
   if (!eventTypeSlug) {
-    eventTypeSlug = normalizeSlug(rawServiceKey);
+    eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
+
+    if (!eventTypeSlug && calConfig?.eventTypeSlugs) {
+      const keys = Object.keys(calConfig.eventTypeSlugs);
+      const compactServiceKey = serviceKey.replace(/_/g, "");
+
+      const match = keys.find((k) =>
+        k.replace(/_/g, "").includes(compactServiceKey)
+      );
+
+      if (match) {
+        eventTypeSlug = calConfig.eventTypeSlugs[match];
+      }
+    }
+
+    if (!eventTypeSlug) {
+      eventTypeSlug = normalizeSlug(rawServiceKey);
+    }
   }
 
   return {
@@ -487,6 +493,72 @@ async function handleBook(req, res, body) {
   }
 }
 
+// ADDED: Minimal actions for updating and saving chosen event types
+async function handleEventTypes(req, res, url, body) {
+  const args = body.args || body || {};
+  const agentId = cleanAgentId(
+    url.searchParams.get("agent_id") || req.headers["x-agent-id"] || args.agent_id || args.agentId
+  );
+  if (!agentId) return json(res, 400, { error: "Missing agent_id" });
+
+  const clientId = await kv.get(`agent:${agentId}:client`);
+  if (!clientId) return json(res, 400, { error: "No client_id found" });
+
+  const token = await kv.get(tokenKeyForAgent(agentId));
+  if (!token?.access_token) return json(res, 400, { error: "No OAuth token" });
+
+  const fetchedSlugs = await fetchAllEventTypeSlugs(token.access_token);
+  
+  const existingConfig = (await kv.get(`client:${clientId}:cal`)) || {};
+  await kv.set(`client:${clientId}:cal`, {
+    ...existingConfig,
+    eventTypeSlugs: Object.keys(fetchedSlugs).length > 0 ? fetchedSlugs : existingConfig.eventTypeSlugs,
+    updated_at: new Date().toISOString()
+  });
+
+  return json(res, 200, { ok: true, eventTypes: fetchedSlugs });
+}
+
+async function handleSelectEventType(req, res, url, body) {
+  const args = body.args || body || {};
+  const agentId = cleanAgentId(
+    url.searchParams.get("agent_id") || req.headers["x-agent-id"] || args.agent_id || args.agentId
+  );
+  if (!agentId) return json(res, 400, { error: "Missing agent_id" });
+
+  const slug = asString(
+    args.selectedEventTypeSlug ||
+    args.eventTypeSlug ||
+    args.slug
+  );
+  if (!slug) return json(res, 400, { error: "Missing selected event type slug" });
+
+  const clientId = await kv.get(`agent:${agentId}:client`);
+  if (!clientId) return json(res, 400, { error: "No client_id found" });
+
+  const existingConfig = (await kv.get(`client:${clientId}:cal`)) || {};
+  
+  // ADDED: Validation block ensuring saved slug exists within known values
+  const eventTypeSlugs = existingConfig.eventTypeSlugs || {};
+  const validSlugs = Object.values(eventTypeSlugs);
+
+  if (!validSlugs.includes(slug)) {
+    return json(res, 400, {
+      error: "Selected event type slug not found",
+      selectedEventTypeSlug: slug,
+      availableEventTypes: eventTypeSlugs
+    });
+  }
+
+  await kv.set(`client:${clientId}:cal`, {
+    ...existingConfig,
+    selectedEventTypeSlug: slug,
+    updated_at: new Date().toISOString()
+  });
+
+  return json(res, 200, { ok: true, selectedEventTypeSlug: slug });
+}
+
 // -------------------- ROUTER --------------------
 module.exports = async (req, res) => {
   setCors(res);
@@ -500,6 +572,9 @@ module.exports = async (req, res) => {
   if (action === "oauth_callback") return await handleOauthCallback(req, res, url);
   if (action === "availability") return await handleAvailability(req, res, body);
   if (action === "book") return await handleBook(req, res, body);
+  // ADDED: Extends route patterns explicitly
+  if (action === "event_types") return await handleEventTypes(req, res, url, body);
+  if (action === "select_event_type") return await handleSelectEventType(req, res, url, body);
 
   return json(res, 400, { error: "Unknown action", method: req.method });
 };
