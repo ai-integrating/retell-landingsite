@@ -144,6 +144,7 @@ function normalizeRole(roleRaw) {
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
   if (r.includes("intake")) return "intake";
   if (r.includes("sched")) return "scheduler";
+  if (r.includes("estimate") || r.includes("estimator")) return "estimator";
   if (r.includes("reception") || r.includes("front")) return "receptionist";
 
   const map = {
@@ -161,6 +162,9 @@ function normalizeRole(roleRaw) {
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
+    estimator: "estimator",
+    estimate: "estimator",
+    estimate_coordinator: "estimator",
   };
 
   return map[r] || "receptionist";
@@ -418,24 +422,26 @@ function buildSetupForRole(body, roleKey) {
   const intake = pick(body, ["intake_setup", "intake_config"], "");
   const emergency = pick(body, ["emergency_setup", "dispatch_setup", "dispatch_config"], "");
   const lead = pick(body, ["lead_revival_setup", "lead_revival_config"], "");
+  const estimator = pick(body, ["Estimator", "estimator_setup", "estimate_setup"], "");
+
+  const blocks = [];
 
   if (roleKey === "operations") {
-    return [
-      scheduler && `SCHEDULING SETUP:\n${scheduler}`,
-      intake && `INTAKE SETUP:\n${intake}`,
-      emergency && `EMERGENCY DISPATCH SETUP:\n${emergency}`,
-      lead && `LEAD REVIVAL SETUP:\n${lead}`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+    if (scheduler) blocks.push(`SCHEDULING SETUP:\n${scheduler}`);
+    if (intake) blocks.push(`INTAKE SETUP:\n${intake}`);
+    if (emergency) blocks.push(`EMERGENCY DISPATCH SETUP:\n${emergency}`);
+    if (lead) blocks.push(`LEAD REVIVAL SETUP:\n${lead}`);
   }
 
-  if (roleKey === "scheduler") return scheduler;
-  if (roleKey === "intake") return intake;
-  if (roleKey === "emergency") return emergency;
-  if (roleKey === "lead_revival") return lead;
+  if (roleKey === "scheduler" && scheduler) blocks.push(`SCHEDULING SETUP:\n${scheduler}`);
+  if (roleKey === "intake" && intake) blocks.push(`INTAKE SETUP:\n${intake}`);
+  if (roleKey === "emergency" && emergency) blocks.push(`EMERGENCY DISPATCH SETUP:\n${emergency}`);
+  if (roleKey === "lead_revival" && lead) blocks.push(`LEAD REVIVAL SETUP:\n${lead}`);
 
-  return "";
+  // Package capability — attach to any role when present
+  if (estimator) blocks.push(`ESTIMATOR SETUP:\n${estimator}`);
+
+  return blocks.join("\n\n");
 }
 
 function formatSetupBlock(setupText) {
