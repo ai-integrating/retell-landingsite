@@ -144,7 +144,6 @@ function normalizeRole(roleRaw) {
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
   if (r.includes("intake")) return "intake";
   if (r.includes("sched")) return "scheduler";
-  if (r.includes("estimate") || r.includes("estimator")) return "estimator";
   if (r.includes("reception") || r.includes("front")) return "receptionist";
 
   const map = {
@@ -162,9 +161,6 @@ function normalizeRole(roleRaw) {
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
-    estimator: "estimator",
-    estimate: "estimator",
-    estimate_coordinator: "estimator",
   };
 
   return map[r] || "receptionist";
