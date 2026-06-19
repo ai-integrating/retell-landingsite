@@ -118,44 +118,50 @@ module.exports = async function handler(req, res) {
   // Build the correct setup block for the role
   const roleSetup = buildSetupForRole(body, roleKey);
 
-  // Prepare payload for /api/provision
+  // Prepare base payload details
   const provisionPayload = {
     ...body,
     agent_role: roleKey,
-    // This is what your provision.js expects for the role:
     [`${roleKey}_setup`]: roleSetup,
   };
 
-  // Call provision immediately (acts like your "worker" for now)
-  const provisionUrl = pick(body, ["provision_url"], process.env.PROVISION_URL);
-  if (!provisionUrl) {
+  // Strictly enforce env variable for production security
+  const agentCreatorWebhookUrl = process.env.AGENT_CREATOR_WEBHOOK_URL;
+  if (!agentCreatorWebhookUrl) {
     return res.status(500).json({
       ok: false,
-      error: "Missing PROVISION_URL",
-      hint: "Set PROVISION_URL in Vercel env to your deployed /api/provision endpoint.",
+      error: "Missing AGENT_CREATOR_WEBHOOK_URL",
+      hint: "Set AGENT_CREATOR_WEBHOOK_URL in Vercel env to your Zapier catch hook.",
     });
   }
 
   try {
-    const resp = await axios.post(provisionUrl, provisionPayload, { timeout: 30000 });
+    const resp = await axios.post(agentCreatorWebhookUrl, {
+      ...provisionPayload,
+      idempotency_key: idempotencyKey,
+      job_id: idempotencyKey,
+      status: "queued",
+      mode: "agent_and_number",
+      purchase_number: "true",
+    }, { timeout: 15000 });
+    
     const result = resp.data;
 
-    // Cache for idempotency
+    // Cache the webhook response for idempotency
     seen.set(idempotencyKey, result);
 
     return res.status(200).json({
       ok: true,
       queued: true,
+      handed_off_to_agent_creator: true,
       idempotency_key: idempotencyKey,
-      role: roleKey,
-      used_setup_length: roleSetup ? String(roleSetup).length : 0,
-      provision_result: result,
+      role: roleKey
     });
   } catch (err) {
     const details = err?.response?.data || err?.message || String(err);
     return res.status(500).json({
       ok: false,
-      error: "Enqueue failed to provision",
+      error: "Enqueue failed to forward to Zapier",
       idempotency_key: idempotencyKey,
       role: roleKey,
       details,
