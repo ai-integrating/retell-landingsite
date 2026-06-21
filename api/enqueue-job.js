@@ -1,6 +1,27 @@
 // /api/enqueue-job.js
 const axios = require("axios");
 
+// Universal policy applied to all inbound agents
+const UNIVERSAL_LEAD_CAPTURE_POLICY = `
+LEAD CAPTURE FIRST POLICY (MANDATORY)
+
+Every inbound caller must be identified.
+Capture caller name before proceeding with the workflow.
+Then proceed with the workflow.
+
+Capture email whenever reasonably possible.
+If an estimate is requested, email is mandatory to request unless the customer refuses.
+Capture service/property address when applicable.
+
+Only after minimum lead information is collected should the AI move into scheduling, estimating, dispatching, sales, or support.
+
+For inbound calls, this policy overrides any role flow that delays name/contact capture until later in the call.
+
+Never end a call without at least attempting to collect contact information.
+
+Goal: We're closing leads, not losing them.
+`;
+
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -32,7 +53,7 @@ function pick(obj, keys, fallback = "") {
   return fallback;
 }
 
-// Same normalization you use in provision (keep consistent)
+// Normalization including hybrid Receptionist + Estimator support
 function normalizeRole(roleRaw) {
   const r = String(roleRaw || "").toLowerCase().trim();
   const map = {
@@ -52,6 +73,11 @@ function normalizeRole(roleRaw) {
     lead_revival: "lead_revival",
     revival: "lead_revival",
 
+    // Hybrid Receptionist + Estimator configuration
+    estimator: "receptionist_estimator",
+    receptionist_estimator: "receptionist_estimator",
+    estimator_receptionist: "receptionist_estimator",
+
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
@@ -64,6 +90,7 @@ function buildSetupForRole(body, roleKey) {
   const intake = pick(body, ["intake_setup", "intake_config"], "");
   const emergency = pick(body, ["emergency_setup", "dispatch_setup", "dispatch_config"], "");
   const lead = pick(body, ["lead_revival_setup", "lead_revival_config"], "");
+  const estimator = pick(body, ["estimator_setup", "estimator_config"], "");
 
   if (roleKey === "operations") {
     return [
@@ -71,6 +98,15 @@ function buildSetupForRole(body, roleKey) {
       intake && `INTAKE SETUP:\n${intake}`,
       emergency && `EMERGENCY DISPATCH SETUP:\n${emergency}`,
       lead && `LEAD REVIVAL SETUP:\n${lead}`,
+      estimator && `ESTIMATOR SETUP:\n${estimator}`,
+    ].filter(Boolean).join("\n\n");
+  }
+
+  // Hybrid profile combining standard baseline with estimating protocols
+  if (roleKey === "receptionist_estimator") {
+    return [
+      `RECEPTIONIST + ESTIMATOR SETUP:`,
+      estimator && `ESTIMATOR FLOWS & CONFIG:\n${estimator}`,
     ].filter(Boolean).join("\n\n");
   }
 
@@ -83,7 +119,7 @@ function buildSetupForRole(body, roleKey) {
   return "";
 }
 
-// In-memory idempotency (good enough for now). Replace with DB later.
+// In-memory idempotency cache
 const seen = global.__AIINTEGRATING_SEEN__ || (global.__AIINTEGRATING_SEEN__ = new Map());
 
 module.exports = async function handler(req, res) {
@@ -118,10 +154,11 @@ module.exports = async function handler(req, res) {
   // Build the correct setup block for the role
   const roleSetup = buildSetupForRole(body, roleKey);
 
-  // Prepare base payload details
+  // Prepare payload details including universal lead capture policy
   const provisionPayload = {
     ...body,
     agent_role: roleKey,
+    universal_lead_capture_policy: UNIVERSAL_LEAD_CAPTURE_POLICY,
     [`${roleKey}_setup`]: roleSetup,
   };
 
