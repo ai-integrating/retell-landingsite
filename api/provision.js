@@ -675,9 +675,11 @@ function buildSchedulerEmailGateBlock() {
 `- Never claim an appointment has been booked before the booking tool succeeds.`,
 
 `STEP 7 — CONFIRMATION`,
-`- If the booking succeeds, clearly confirm the appointment using the exact date and time returned by the booking tool.`,
-`- Example: "You're all set for Tuesday, July 14th at 5:00 PM. A confirmation has been sent to your email."`,
-`- Do NOT reconstruct or guess the appointment date or time.`,
+`- If the booking succeeds, confirm the appointment using the exact date and time returned by the booking tool.`,
+`- If a confirmation email is available, tell the caller it has been sent.`,
+`- If a meeting link exists, do NOT read the URL aloud. Simply let the caller know it is included in the confirmation email.`,
+`- Example: "You're all set for Tuesday, July 14th at 5:00 PM. I've sent your confirmation email with all of the appointment details and your meeting link."`,
+`- Only read a meeting link aloud if the caller specifically requests it or cannot access their email.`,
 `- If the booking fails, apologize briefly and offer the next appropriate step.`,
 
     ``,
