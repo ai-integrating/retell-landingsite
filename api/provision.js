@@ -166,12 +166,6 @@ function normalizeRole(roleRaw) {
   return map[r] || "receptionist";
 }
 
-// -------------------- NUMBER TIER --------------------
-function tierForRole(roleKey) {
-  const premium = new Set(["scheduler", "operations", "lead_revival"]);
-  return premium.has(roleKey) ? "premium" : "standard";
-}
-
 // -------------------- BASE URL (internal API calls) --------------------
 function getBaseUrl(req) {
   const envBase = process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || "";
@@ -514,11 +508,11 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
     `Stage 2: INTEREST - If the caller expresses a desire to move forward (e.g., "that sounds good"), ask if they would like to check availability.`,
     `Stage 3: BOOKING - ONLY move to booking/confirming if the caller explicitly says "Yes" or provides a specific day/time.`,
     ``,
-    '# DATA VERIFICATION & SLOW PRONUNCIATION RULES (CRITICAL)
-'When repeating the phone number or email back to the caller to confirm accuracy, you MUST drop your speed and speak normally, slowly, and clearly. Do NOT rush.
-'- For phone numbers: Say the digits with clear, deliberate pauses between number groups (e.g., "6 1 7... 3 9 7... 5 9 7 8").
-'- For emails: Pronounce letters, characters, and domains at a steady, unhurried, human pace.
-'',
+    `# DATA VERIFICATION & SLOW PRONUNCIATION RULES (CRITICAL)`,
+    `- When repeating the phone number or email back to the caller to confirm accuracy, you MUST drop your speed and speak normally, slowly, and clearly. Do NOT rush.`,
+    `- For phone numbers: Say the digits with clear, deliberate pauses between number groups (e.g., "6 1 7... 3 9 7... 5 9 7 8").`,
+    `- For emails: Pronounce letters, characters, and domains at a steady, unhurried, human pace.`,
+    ``,
     `# ANTI-ASSUMPTION GUARDRAILS (CRITICAL)`,
     `- NEVER assume a caller wants an appointment just because they asked a service question.`,
     `- DO NOT say "Great, I've got you down for..." or "What time works?" until Stage 3 is explicitly reached.`,
@@ -617,74 +611,63 @@ function buildBusinessContext(body) {
 // ✅ Updated scheduler block
 function buildSchedulerEmailGateBlock() {
   return [
-
-`SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
-
-`CORE PRINCIPLE`,
-`- Speak like an experienced receptionist, not an online booking form.`,
-`- Allow callers to describe what they need in their own words.`,
-`- Do NOT require callers to know the business's internal appointment or service names.`,
-`- Understand the caller's intent, then silently match it to the closest configured appointment type.`,
-
-`STEP 1 — UNDERSTAND THE REQUEST`,
-`- If the caller has already explained why they are calling, do NOT ask them to repeat themselves.`,
-`- Acknowledge the request naturally.`,
-`- Internally match the caller's request to the closest configured appointment type.`,
-`- If the caller only says they want to schedule or book an appointment, ask ONE natural question such as:`,
-`  - "What can we help you with today?"`,
-`  - "What would you like to schedule?"`,
-`  - "Can you tell me a little about what you need?"`,
-`- Do NOT automatically ask: "What service are you looking to book?"`,
-`- Do NOT expose internal service names, keys, IDs, slugs, hyphens, or underscores.`,
-`- If multiple appointment types could apply, ask ONE clarifying question.`,
-`- If there is one clear match, continue without asking the caller to choose from a list.`,
-
-`STEP 2 — CHECK AVAILABILITY`,
-`- Say: "Let me check the schedule for you."`,
-`- Call the availability tool using the internally matched appointment type.`,
-`- Do NOT ask: "Would you like me to check availability?"`,
-`- Do NOT guess or manually suggest appointment times.`,
-
-`STEP 3 — OFFER FIRST AVAILABLE`,
-`- Offer ONE available appointment at a time.`,
-`- ALWAYS begin with the earliest available slot returned by the scheduling tool.`,
-`- Example: "The first opening I have is Tuesday at 10:00 AM. Would that work for you?"`,
-`- If declined, offer the next available slot.`,
-`- Do NOT list multiple appointment times unless the caller asks.`,
-
-`STEP 4 — SLOT CONFIRMATION (CRITICAL GATE)`,
-`- Wait until the caller clearly accepts a specific appointment time.`,
-`- Do NOT collect personal information before an appointment time has been selected.`,
-
-`STEP 5 — COLLECT DETAILS (STRICT ORDER)`,
-`1) Ask: "Can I get your full name for the appointment?"`,
-`2) Ask: "What's the best email to send your appointment confirmation to?"`,
-`   - Convert spoken email wording into normal email format whenever obvious.`,
-`   - Repeat the completed email back in standard email format.`,
-`   - Example: "I have rosedossantos331@gmail.com. Is that correct?"`,
-`   - Do NOT read emails with spaces unless the caller is spelling them out for correction.`,
-`   - Do NOT continue until the email is confirmed.`,
-`3) Ask: "What's the best phone number for your appointment?"`,
-
-`STEP 6 — BOOK APPOINTMENT`,
-`- Call the booking tool ONLY after:`,
-`  - the appointment type has been determined`,
-`  - a specific appointment time has been accepted`,
-`  - the caller's required information has been collected`,
-`- Use the selected appointment type, selected appointment time, name, email, and phone.`,
-`- Never claim an appointment has been booked before the booking tool succeeds.`,
-
-`STEP 7 — CONFIRMATION`,
-`- If the booking succeeds, confirm the appointment using the exact date and time returned by the booking tool.`,
-`- If a confirmation email is available, tell the caller it has been sent.`,
-`- If a meeting link exists, do NOT read the URL aloud. Simply let the caller know it is included in the confirmation email.`,
-`- Example: "You're all set for Tuesday, July 14th at 5:00 PM. I've sent your confirmation email with all of the appointment details and your meeting link."`,
-`- Only read a meeting link aloud if the caller specifically requests it or cannot access their email.`,
-`- If the booking fails, apologize briefly and offer the next appropriate step.`,
-
+    `SCHEDULER FLOW (STRICT ORDER — ONE QUESTION AT A TIME):`,
+    `CORE PRINCIPLE`,
+    `- Speak like an experienced receptionist, not an online booking form.`,
+    `- Allow callers to describe what they need in their own words.`,
+    `- Do NOT require callers to know the business's internal appointment or service names.`,
+    `- Understand the caller's intent, then silently match it to the closest configured appointment type.`,
+    `STEP 1 — UNDERSTAND THE REQUEST`,
+    `- If the caller has already explained why they are calling, do NOT ask them to repeat themselves.`,
+    `- Acknowledge the request naturally.`,
+    `- Internally match the caller's request to the closest configured appointment type.`,
+    `- If the caller only says they want to schedule or book an appointment, ask ONE natural question such as:`,
+    `  - "What can we help you with today?"`,
+    `  - "What would you like to schedule?"`,
+    `  - "Can you tell me a little about what you need?"`,
+    `- Do NOT automatically ask: "What service are you looking to book?"`,
+    `- Do NOT expose internal service names, keys, IDs, slugs, hyphens, or underscores.`,
+    `- If multiple appointment types could apply, ask ONE clarifying question.`,
+    `- If there is one clear match, continue without asking the caller to choose from a list.`,
+    `STEP 2 — CHECK AVAILABILITY`,
+    `- Say: "Let me check the schedule for you."`,
+    `- Call the availability tool using the internally matched appointment type.`,
+    `- Do NOT ask: "Would you like me to check availability?"`,
+    `- Do NOT guess or manually suggest appointment times.`,
+    `STEP 3 — OFFER FIRST AVAILABLE`,
+    `- Offer ONE available appointment at a time.`,
+    `- ALWAYS begin with the earliest available slot returned by the scheduling tool.`,
+    `- Example: "The first opening I have is Tuesday at 10:00 AM. Would that work for you?"`,
+    `- If declined, offer the next available slot.`,
+    `- Do NOT list multiple appointment times unless the caller asks.`,
+    `STEP 4 — SLOT CONFIRMATION (CRITICAL GATE)`,
+    `- Wait until the caller clearly accepts a specific appointment time.`,
+    `- Do NOT collect personal information before an appointment time has been selected.`,
+    `STEP 5 — COLLECT DETAILS (STRICT ORDER)`,
+    `1) Ask: "Can I get your full name for the appointment?"`,
+    `2) Ask: "What's the best email to send your appointment confirmation to?"`,
+    `   - Convert spoken email wording into normal email format whenever obvious.`,
+    `   - Repeat the completed email back in standard email format.`,
+    `   - Example: "I have rosedossantos331@gmail.com. Is that correct?"`,
+    `   - Do NOT read emails with spaces unless the caller is spelling them out for correction.`,
+    `   - Do NOT continue until the email is confirmed.`,
+    `3) Ask: "What's the best phone number for your appointment?"`,
+    `STEP 6 — BOOK APPOINTMENT`,
+    `- Call the booking tool ONLY after:`,
+    `  - the appointment type has been determined`,
+    `  - a specific appointment time has been accepted`,
+    `  - the caller's required information has been collected`,
+    `- Use the selected appointment type, selected appointment time, name, email, and phone.`,
+    `- Never claim an appointment has been booked before the booking tool succeeds.`,
+    `STEP 7 — CONFIRMATION`,
+    `- If the booking succeeds, confirm the appointment using the exact date and time returned by the booking tool.`,
+    `- If a confirmation email is available, tell the caller it has been sent.`,
+    `- If a meeting link exists, do NOT read the URL aloud. Simply let the caller know it is included in the confirmation email.`,
+    `- Example: "You're all set for Tuesday, July 14th at 5:00 PM. I've sent your confirmation email with all of the appointment details and your meeting link."`,
+    `- Only read a meeting link aloud if the caller specifically requests it or cannot access their email.`,
+    `- If the booking fails, apologize briefly and offer the next appropriate step.`,
     ``,
     `CRITICAL RULES:`,
-
     `- You do NOT know availability unless returned by the system.`,
     `- NEVER suggest times without checking.`,
     `- ALWAYS offer the earliest slot first.`,
@@ -698,7 +681,7 @@ function buildSchedulerEmailGateBlock() {
 
 function buildReceptionistNoBookingBlock() {
   return [
-    `SCHEDULING LIMIT (PLAN-BASED):`,
+    `SCHEDULER LIMIT (PLAN-BASED):`,
     `- You do NOT book appointments.`,
     `- You do NOT reschedule or cancel appointments.`,
     `- If a caller wants to book/reschedule/cancel:`,
@@ -818,9 +801,55 @@ module.exports = async (req, res) => {
       .toLowerCase()
       .trim();
 
+    // ---------------------------------------------------------
+    // V2 ARCHITECTURE: SINGLE SOURCE OF TRUTH (HARDENED)
+    // ---------------------------------------------------------
+    const rawSubscription = pick(body, ["my_subscriptions", "subscription", "product_name"], "");
+    const subscription = String(rawSubscription)
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+    const AI_EMPLOYEES = {
+      "peter — estimator": {
+        agent_name: "Peter",
+        gender: "male",
+        tone: "calm",
+        role: "estimator",
+        template_llm_id: "llm_18a432fcc18b235399fc298809ef",
+        number_tier: "standard"
+      },
+      "ava — ai scheduler": {
+        agent_name: "Ava",
+        gender: "female",
+        tone: "warm",
+        role: "scheduler",
+        template_llm_id: "llm_99z882xyz",
+        number_tier: "premium"
+      }
+      // Add future AI employees here
+    };
+
+    const config = AI_EMPLOYEES[subscription];
+
+    if (!config) {
+      throw new Error(`Unknown or missing subscription selected: "${rawSubscription}". Cannot provision AI.`);
+    }
+
+    // Inject the configuration into the body payload
+    body.agent_name = config.agent_name;
+    body.agent_gender = config.gender;
+    body.voice_tone = config.tone;
+    body.agent_role = config.role;
+    body.template_llm_id = config.template_llm_id;
+    body.number_tier = config.number_tier;
+    // ---------------------------------------------------------
+
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
-    const agentName = pick(body, ["agent_name", "a_name", "name"], "Julian");
-    const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"], "receptionist"));
+    
+    // Values extracted safely via map injection
+    const agentName = pick(body, ["agent_name", "a_name", "name"]); 
+    const roleKey = normalizeRole(pick(body, ["agent_role", "role", "a_role"]));
 
     const { voiceKey, voiceId } = resolveVoice(body);
     const explicitPrompt = pick(body, ["final_prompt", "general_prompt", "prompt"], "");
@@ -882,10 +911,9 @@ module.exports = async (req, res) => {
     const baseUrl = getBaseUrl(req);
     const schedulingCapable = roleKey !== "emergency";
 
-    // Always use functions from the shared template LLM unless explicitly overridden
+    // ✅ Uses the injected template_llm_id from the map
     const templateLlmId =
-      pick(body, ["template_llm_id", "retell_template_llm_id"], "") ||
-      "llm_18a432fcc18b235399fc298809ef";
+      pick(body, ["template_llm_id", "retell_template_llm_id"], "");
 
     const templateTools = await getTemplateLlmTools(templateLlmId);
 
@@ -963,7 +991,7 @@ module.exports = async (req, res) => {
 
     let phoneNumber = "(not purchased)";
     let phoneNumberId = null;
-    const numberTierFinal = tierForRole(roleKey);
+    const numberTierFinal = body.number_tier || "standard";
 
     await kv.set(
       idemKey,
