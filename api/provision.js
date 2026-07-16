@@ -804,8 +804,12 @@ module.exports = async (req, res) => {
     // ---------------------------------------------------------
     // V2 ARCHITECTURE: SINGLE SOURCE OF TRUTH (HARDENED)
     // ---------------------------------------------------------
-    const rawSubscription = pick(body, ["my_subscriptions", "subscription", "product_name"], "");
-    const subscription = String(rawSubscription)
+    // Grab the payload, prioritizing the "Text" version that contains the Stripe block
+    const rawSubscriptionPayload = pick(body, ["my_subscriptions_text", "my_subscriptions", "subscription", "product_name"], "");
+    
+    // Isolate the first line of the block (the actual product name) and normalize it
+    const subscription = String(rawSubscriptionPayload)
+      .split("\n")[0]
       .trim()
       .toLowerCase()
       .replace(/\s+/g, " ");
@@ -817,6 +821,14 @@ module.exports = async (req, res) => {
         tone: "calm",
         role: "estimator",
         template_llm_id: "llm_18a432fcc18b235399fc298809ef",
+        number_tier: "standard"
+      },
+      "marcus — front desk receptionist": {
+        agent_name: "Marcus",
+        gender: "male",
+        tone: "calm",
+        role: "receptionist",
+        template_llm_id: "llm_your_marcus_id_here", 
         number_tier: "standard"
       },
       "ava — ai scheduler": {
@@ -833,16 +845,16 @@ module.exports = async (req, res) => {
     const config = AI_EMPLOYEES[subscription];
 
     if (!config) {
-      throw new Error(`Unknown or missing subscription selected: "${rawSubscription}". Cannot provision AI.`);
+      throw new Error(`Unknown or missing subscription selected: "${rawSubscriptionPayload}". Cannot provision AI.`);
     }
 
-    // Inject the configuration into the body payload
-    body.agent_name = config.agent_name;
-    body.agent_gender = config.gender;
-    body.voice_tone = config.tone;
-    body.agent_role = config.role;
-    body.template_llm_id = config.template_llm_id;
-    body.number_tier = config.number_tier;
+    // Inject the configuration into the body payload ONLY if not already provided
+    body.agent_name ??= config.agent_name;
+    body.agent_gender ??= config.gender;
+    body.voice_tone ??= config.tone;
+    body.agent_role ??= config.role;
+    body.template_llm_id ??= config.template_llm_id;
+    body.number_tier ??= config.number_tier;
     // ---------------------------------------------------------
 
     const bizName = pick(body, ["business_name", "biz_name", "company"], "Roots and Daiseys");
