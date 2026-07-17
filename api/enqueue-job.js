@@ -1,4 +1,3 @@
-// /api/enqueue-job.js
 const axios = require("axios");
 
 // Universal policy applied to all inbound agents
@@ -162,35 +161,31 @@ module.exports = async function handler(req, res) {
     [`${roleKey}_setup`]: roleSetup,
   };
 
-  // Strictly enforce env variable for production security
-  const agentCreatorWebhookUrl = process.env.AGENT_CREATOR_WEBHOOK_URL;
-  if (!agentCreatorWebhookUrl) {
-    return res.status(500).json({
-      ok: false,
-      error: "Missing AGENT_CREATOR_WEBHOOK_URL",
-      hint: "Set AGENT_CREATOR_WEBHOOK_URL in Vercel env to your Zapier catch hook.",
-    });
-  }
+  // Point to the Provisioning URL instead of Zapier
+  const provisionUrl = process.env.PROVISION_URL || "https://retell-landingsite-iota.vercel.app/api/provision";
 
   try {
-    const resp = await axios.post(agentCreatorWebhookUrl, {
+    // Increased timeout to 60 seconds (60000) because provisioning Retell/LLM takes time
+    const resp = await axios.post(provisionUrl, {
       ...provisionPayload,
       idempotency_key: idempotencyKey,
       job_id: idempotencyKey,
       status: "queued",
       mode: "agent_and_number",
       purchase_number: "true",
-    }, { timeout: 15000 });
+    }, { timeout: 60000 }); 
     
     const result = resp.data;
 
-    // Cache the webhook response for idempotency
+    // Cache the provision response for idempotency
     seen.set(idempotencyKey, result);
 
+    // Return the actual agent_id, phone_number, etc., directly to Zapier
     return res.status(200).json({
+      ...result,
       ok: true,
       queued: true,
-      handed_off_to_agent_creator: true,
+      handed_off_to_provisioner: true,
       idempotency_key: idempotencyKey,
       role: roleKey
     });
@@ -198,7 +193,7 @@ module.exports = async function handler(req, res) {
     const details = err?.response?.data || err?.message || String(err);
     return res.status(500).json({
       ok: false,
-      error: "Enqueue failed to forward to Zapier",
+      error: "Failed to provision agent via /api/provision",
       idempotency_key: idempotencyKey,
       role: roleKey,
       details,
