@@ -140,7 +140,6 @@ function normalizeRole(roleRaw) {
     return "operations";
   }
 
-  if (r.includes("estimate")) return "estimator";
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
   if (r.includes("intake")) return "intake";
@@ -162,7 +161,6 @@ function normalizeRole(roleRaw) {
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
-    estimator: "estimator",
   };
 
   return map[r] || "receptionist";
@@ -823,15 +821,13 @@ module.exports = async (req, res) => {
       .toLowerCase()
       .replace(/\s+/g, " ");
 
-    const MASTER_TEMPLATE_LLM_ID = "llm_18a432fcc18b235399fc298809ef";
-
     const AI_EMPLOYEES = {
       "peter — estimator": {
         agent_name: "Peter",
         gender: "male",
         tone: "calm",
         role: "estimator",
-        template_llm_id: MASTER_TEMPLATE_LLM_ID,
+        template_llm_id: "llm_18a432fcc18b235399fc298809ef",
         number_tier: "standard"
       },
       "marcus — front desk receptionist": {
@@ -839,7 +835,7 @@ module.exports = async (req, res) => {
         gender: "male",
         tone: "calm",
         role: "receptionist",
-        template_llm_id: MASTER_TEMPLATE_LLM_ID,
+        template_llm_id: "PASTE_MARCUS_REAL_LLM_ID_HERE",
         number_tier: "standard",
       },
       "ava — ai scheduler": {
@@ -847,7 +843,7 @@ module.exports = async (req, res) => {
         gender: "female",
         tone: "warm",
         role: "scheduler",
-        template_llm_id: MASTER_TEMPLATE_LLM_ID,
+        template_llm_id: "llm_99z882xyz",
         number_tier: "premium"
       }
       // Add future AI employees here
