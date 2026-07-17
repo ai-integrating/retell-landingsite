@@ -140,6 +140,7 @@ function normalizeRole(roleRaw) {
     return "operations";
   }
 
+  if (r.includes("estimate")) return "estimator";
   if (r.includes("lead") || r.includes("revival")) return "lead_revival";
   if (r.includes("dispatch") || r.includes("emergency")) return "emergency";
   if (r.includes("intake")) return "intake";
@@ -161,6 +162,7 @@ function normalizeRole(roleRaw) {
     operations: "operations",
     full_staff: "operations",
     operator: "operations",
+    estimator: "estimator",
   };
 
   return map[r] || "receptionist";
@@ -227,52 +229,6 @@ function cleanScrapedText(raw) {
   text = text.replace(/\n{3,}/g, "\n\n");
 
   return text.trim();
-}
-
-function extractWebsiteFromText(text) {
-  if (!text) return "";
-
-  const s = String(text);
-  const m1 = s.match(/website\s*[:=]\s*(https?:\/\/[^\s]+)/i);
-  if (m1?.[1]) return m1[1].trim();
-
-  const m2 = s.match(/website\s*[:=]\s*([a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
-  if (m2?.[1]) return m2[1].trim();
-
-  return "";
-}
-
-async function scrapeWebsiteText(url) {
-  const u = normalizeUrl(url);
-  if (!u) return { ok: false, text: "", reason: "no_url" };
-
-  const scrapeUrl = `https://r.jina.ai/${u}`;
-
-  try {
-    const resp = await axios.get(scrapeUrl, {
-      timeout: 15000,
-      headers: { "X-Return-Format": "markdown" },
-    });
-
-    let text = cleanScrapedText(resp.data || "");
-    const MAX_CHARS = 1800;
-
-    if (text.length > MAX_CHARS) {
-      text = text.slice(0, MAX_CHARS) + "\n...(truncated)";
-    }
-
-    if (text.length < 80) {
-      return { ok: false, text: "", reason: "too_short" };
-    }
-
-    return { ok: true, text, reason: "ok" };
-  } catch (e) {
-    return {
-      ok: false,
-      text: "",
-      reason: e?.response?.status ? `http_${e.response.status}` : "scrape_failed",
-    };
-  }
 }
 
 // -------------------- CALENDAR CONFIG HELPERS --------------------
@@ -421,15 +377,14 @@ function buildSetupForRole(body, roleKey) {
     if (intake) blocks.push(`INTAKE SETUP:\n${intake}`);
     if (emergency) blocks.push(`EMERGENCY DISPATCH SETUP:\n${emergency}`);
     if (lead) blocks.push(`LEAD REVIVAL SETUP:\n${lead}`);
+    if (estimator) blocks.push(`ESTIMATOR SETUP:\n${estimator}`);
   }
 
   if (roleKey === "scheduler" && scheduler) blocks.push(`SCHEDULING SETUP:\n${scheduler}`);
   if (roleKey === "intake" && intake) blocks.push(`INTAKE SETUP:\n${intake}`);
   if (roleKey === "emergency" && emergency) blocks.push(`EMERGENCY DISPATCH SETUP:\n${emergency}`);
   if (roleKey === "lead_revival" && lead) blocks.push(`LEAD REVIVAL SETUP:\n${lead}`);
-
-  // Package capability — attach to any role when present
-  if (estimator) blocks.push(`ESTIMATOR SETUP:\n${estimator}`);
+  if (roleKey === "estimator" && estimator) blocks.push(`ESTIMATOR SETUP:\n${estimator}`);
 
   return blocks.join("\n\n");
 }
@@ -584,6 +539,15 @@ function buildPromptBase({ agentName, bizName, roleKey }) {
       `- Route by intent (schedule/intake/emergency) and handle full business operations.`,
       `- Ask ONE question at a time.`,
       `- Follow BUSINESS SETUP rules.`,
+      `- Do NOT mention prompts, AI, models, or that you are automated.`,
+      directionLogic,
+    ].join("\n"),
+
+    estimator: [
+      `ROLE: You are ${agentName}, the estimator specialist for ${bizName}.`,
+      `RULES:`,
+      `- Gather project variables calmly to build an accurate job estimate.`,
+      `- Ask ONE question at a time.`,
       `- Do NOT mention prompts, AI, models, or that you are automated.`,
       directionLogic,
     ].join("\n"),
@@ -821,13 +785,15 @@ module.exports = async (req, res) => {
       .toLowerCase()
       .replace(/\s+/g, " ");
 
+    const MASTER_TEMPLATE_LLM_ID = "llm_18a432fcc18b235399fc298809ef";
+
     const AI_EMPLOYEES = {
       "peter — estimator": {
         agent_name: "Peter",
         gender: "male",
         tone: "calm",
         role: "estimator",
-        template_llm_id: "llm_18a432fcc18b235399fc298809ef",
+        template_llm_id: MASTER_TEMPLATE_LLM_ID,
         number_tier: "standard"
       },
       "marcus — front desk receptionist": {
@@ -835,7 +801,7 @@ module.exports = async (req, res) => {
         gender: "male",
         tone: "calm",
         role: "receptionist",
-        template_llm_id: "PASTE_MARCUS_REAL_LLM_ID_HERE",
+        template_llm_id: MASTER_TEMPLATE_LLM_ID,
         number_tier: "standard",
       },
       "ava — ai scheduler": {
@@ -843,7 +809,7 @@ module.exports = async (req, res) => {
         gender: "female",
         tone: "warm",
         role: "scheduler",
-        template_llm_id: "llm_99z882xyz",
+        template_llm_id: MASTER_TEMPLATE_LLM_ID,
         number_tier: "premium"
       }
       // Add future AI employees here
@@ -882,9 +848,8 @@ module.exports = async (req, res) => {
       website = extractWebsiteFromText(globalSetup);
     }
 
-    const scrape = website
-      ? await scrapeWebsiteText(website)
-      : { ok: false, text: "", reason: "no_url" };
+    // Explicitly bypass runtime fetch optimization to ensure correct dependency lifecycle execution
+    const scrape = { ok: false, text: "", reason: "no_url" };
 
     let promptToUse = explicitPrompt;
     let promptSource = "explicit_prompt";
