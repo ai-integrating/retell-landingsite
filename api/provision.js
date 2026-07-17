@@ -804,12 +804,19 @@ module.exports = async (req, res) => {
     // ---------------------------------------------------------
     // V2 ARCHITECTURE: SINGLE SOURCE OF TRUTH (HARDENED)
     // ---------------------------------------------------------
-    // Grab the payload, prioritizing the "Text" version that contains the Stripe block
-    const rawSubscriptionPayload = pick(body, ["my_subscriptions_text", "my_subscriptions", "subscription", "product_name"], "");
-    
-    // Isolate the first line of the block (the actual product name) and normalize it
-    const subscription = String(rawSubscriptionPayload)
-      .split("\n")[0]
+    const rawSubscription = pick(
+      body,
+      [
+        "my_subscriptions_text",
+        "my_subscriptions",
+        "subscription",
+        "product_name",
+      ],
+      ""
+    );
+
+    const subscription = String(rawSubscription)
+      .split(/\r?\n/)[0]
       .trim()
       .toLowerCase()
       .replace(/\s+/g, " ");
@@ -828,8 +835,8 @@ module.exports = async (req, res) => {
         gender: "male",
         tone: "calm",
         role: "receptionist",
-        template_llm_id: "llm_your_marcus_id_here", 
-        number_tier: "standard"
+        template_llm_id: "PASTE_MARCUS_REAL_LLM_ID_HERE",
+        number_tier: "standard",
       },
       "ava — ai scheduler": {
         agent_name: "Ava",
@@ -845,7 +852,7 @@ module.exports = async (req, res) => {
     const config = AI_EMPLOYEES[subscription];
 
     if (!config) {
-      throw new Error(`Unknown or missing subscription selected: "${rawSubscriptionPayload}". Cannot provision AI.`);
+      throw new Error(`Unknown or missing subscription selected: "${rawSubscription}". Cannot provision AI.`);
     }
 
     // Inject the configuration into the body payload ONLY if not already provided
