@@ -7,6 +7,7 @@ module.exports = async function handler(req, res) {
       error: "Method not allowed",
     });
   }
+
   try {
     // Retell custom functions normally send:
     // {
