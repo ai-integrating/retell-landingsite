@@ -10,6 +10,7 @@ function setCors(res) {
 
 async function readJsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
+
   if (req.body && typeof req.body === "string") {
     try {
       return JSON.parse(req.body);
@@ -17,11 +18,17 @@ async function readJsonBody(req) {
       return {};
     }
   }
+
   return await new Promise((resolve) => {
     let data = "";
-    req.on("data", (c) => (data += c));
+
+    req.on("data", (chunk) => {
+      data += chunk;
+    });
+
     req.on("end", () => {
       if (!data) return resolve({});
+
       try {
         resolve(JSON.parse(data));
       } catch {
@@ -38,17 +45,51 @@ function okJson(res, status, payload) {
 }
 
 // -------------------- HELPERS --------------------
-function asString(v, fallback = "") {
-  if (v === undefined || v === null) return fallback;
-  const s = String(v).trim();
-  return s ? s : fallback;
+function asString(value, fallback = "") {
+  if (value === undefined || value === null) return fallback;
+
+  const result = String(value).trim();
+
+  return result || fallback;
 }
 
 // -------------------- AUTH --------------------
 function isAdmin(body) {
   const secret = process.env.KV_ADMIN_SECRET;
+
   if (!secret) return false;
+
   return asString(body?.admin_secret) === asString(secret);
+}
+
+// -------------------- SAVE OPTIONAL VALUES --------------------
+async function saveOptionalClientValues({
+  agentId,
+  clientId,
+  plan,
+  sheetId,
+  phone,
+  enrollmentLink,
+}) {
+  const sheetKey = `client:${clientId}:sheet`;
+  const phoneKey = `agent:${agentId}:phone`;
+  const enrollmentKey = `client:${clientId}:enrollment_link`;
+
+  if (plan) {
+    await kv.set(`plan:${agentId}`, plan);
+  }
+
+  if (sheetId) {
+    await kv.set(sheetKey, sheetId);
+  }
+
+  if (phone) {
+    await kv.set(phoneKey, phone);
+  }
+
+  if (enrollmentLink) {
+    await kv.set(enrollmentKey, enrollmentLink);
+  }
 }
 
 // -------------------- HANDLER --------------------
@@ -61,58 +102,64 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    return okJson(res, 405, { ok: false, error: "Use POST" });
+    return okJson(res, 405, {
+      ok: false,
+      error: "Use POST",
+    });
   }
 
   try {
     const body = await readJsonBody(req);
 
     if (!isAdmin(body)) {
-      return okJson(res, 401, { ok: false, error: "Unauthorized" });
+      return okJson(res, 401, {
+        ok: false,
+        error: "Unauthorized",
+      });
     }
 
-    const agent_id = asString(body?.agent_id);
-    const client_id = asString(body?.client_id);
+    const agentId = asString(body?.agent_id);
+    const clientId = asString(body?.client_id);
     const plan = asString(body?.plan);
-    const sheet_id = asString(body?.sheet_id);
-    const phone = asString(body?.phone); // ✅ ADDED
+    const sheetId = asString(body?.sheet_id);
+    const phone = asString(body?.phone);
+    const enrollmentLink = asString(body?.enrollment_link);
 
-    if (!agent_id || !client_id) {
+    if (!agentId || !clientId) {
       return okJson(res, 400, {
         ok: false,
         error: "Missing agent_id or client_id",
       });
     }
 
-    const mapKey = `agent:${agent_id}:client`;
-    const sheetKey = `client:${client_id}:sheet`;
-    const phoneKey = `agent:${agent_id}:phone`; // ✅ ADDED
-
+    const mapKey = `agent:${agentId}:client`;
     const existing = await kv.get(mapKey);
 
     // -------------------- EXISTING SAME --------------------
-    if (existing && String(existing) === client_id) {
-      if (plan) await kv.set(`plan:${agent_id}`, plan);
+    if (existing && String(existing) === clientId) {
+      await saveOptionalClientValues({
+        agentId,
+        clientId,
+        plan,
+        sheetId,
+        phone,
+        enrollmentLink,
+      });
 
-      if (sheet_id) {
-        await kv.set(sheetKey, sheet_id);
-      }
-
-      if (phone) {
-        await kv.set(phoneKey, phone); // ✅ ADDED
-      }
-return okJson(res, 200, {
-  ok: true,
-  agent_id,
-  client_id,
-  phone_saved: !!phone,
-  phone,
-  already_set: true,
-});
+      return okJson(res, 200, {
+        ok: true,
+        agent_id: agentId,
+        client_id: clientId,
+        phone_saved: Boolean(phone),
+        enrollment_link_saved: Boolean(enrollmentLink),
+        phone,
+        enrollment_link: enrollmentLink,
+        already_set: true,
+      });
     }
 
     // -------------------- EXISTING DIFFERENT --------------------
-    if (existing && String(existing) !== client_id) {
+    if (existing && String(existing) !== clientId) {
       return okJson(res, 409, {
         ok: false,
         error: "agent_already_mapped_to_different_client",
@@ -120,32 +167,33 @@ return okJson(res, 200, {
     }
 
     // -------------------- NEW SET --------------------
-    await kv.set(mapKey, client_id);
+    await kv.set(mapKey, clientId);
 
-    if (plan) await kv.set(`plan:${agent_id}`, plan);
+    await saveOptionalClientValues({
+      agentId,
+      clientId,
+      plan,
+      sheetId,
+      phone,
+      enrollmentLink,
+    });
 
-    if (sheet_id) {
-      await kv.set(sheetKey, sheet_id);
-    }
+    return okJson(res, 200, {
+      ok: true,
+      agent_id: agentId,
+      client_id: clientId,
+      phone_saved: Boolean(phone),
+      enrollment_link_saved: Boolean(enrollmentLink),
+      phone,
+      enrollment_link: enrollmentLink,
+      set: true,
+    });
+  } catch (error) {
+    console.error("kv-set-agent-client ERROR", error);
 
-    if (phone) {
-      await kv.set(phoneKey, phone); // ✅ ADDED
-    }
-
-return okJson(res, 200, {
-  ok: true,
-  agent_id,
-  client_id,
-  phone_saved: !!phone,
-  phone,
-  set: true,
-});
-
-  } catch (err) {
-    console.error("kv-set-agent-client ERROR", err);
     return okJson(res, 500, {
       ok: false,
-      error: err?.message || "Server error",
+      error: error?.message || "Server error",
     });
   }
 };
