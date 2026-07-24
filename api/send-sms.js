@@ -69,22 +69,22 @@ function createMessageBody({
   }
 }
 
-async function getClientLink(clientId, messageType) {
+async function getAgentLink(agentId, messageType) {
   const supportedKeys = {
     enrollment_link:
-      `client:${clientId}:enrollment_link`,
+      `agent:${agentId}:enrollment_link`,
 
     booking_link:
-      `client:${clientId}:booking_link`,
+      `agent:${agentId}:booking_link`,
 
     website:
-      `client:${clientId}:website`,
+      `agent:${agentId}:website`,
 
     photo_upload_link:
-      `client:${clientId}:photo_upload_link`,
+      `agent:${agentId}:photo_upload_link`,
 
     financing_link:
-      `client:${clientId}:financing_link`,
+      `agent:${agentId}:financing_link`,
   };
 
   const key = supportedKeys[messageType];
@@ -165,12 +165,12 @@ module.exports = async function handler(req, res) {
     const businessName =
       clean(
         await kv.get(
-          `client:${clientId}:business_name`
+          `agent:${agentId}:business_name`
         )
       ) || "the business";
 
-    const link = await getClientLink(
-      clientId,
+    const link = await getAgentLink(
+      agentId,
       messageType
     );
 
@@ -178,8 +178,8 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({
         success: false,
         error:
-          `${messageType} is not configured for client ` +
-          `${clientId}`,
+          `${messageType} is not configured for agent ` +
+          `${agentId}`,
         agent_response:
           "That link has not been configured for this business yet.",
       });
