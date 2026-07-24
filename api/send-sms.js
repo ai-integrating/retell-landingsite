@@ -1,21 +1,9 @@
+// /api/send-sms.js
 const twilio = require("twilio");
-const { google } = require("googleapis");
-
-const SPREADSHEET_ID =
-  process.env.CLIENT_CONFIG_SHEET_ID ||
-  "1BVn3KetFMqJjN1FhG5NC-zOMPcV9v1m4Y8plTdtjeSI";
-
-const SHEET_NAME = "Sheet1";
+const { kv } = require("@vercel/kv");
 
 function clean(value) {
   return String(value ?? "").trim();
-}
-
-function normalizeHeader(value) {
-  return clean(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
 }
 
 function normalizePhone(value) {
@@ -38,120 +26,28 @@ function normalizePhone(value) {
   return "";
 }
 
-function getGoogleCredentials() {
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const credentials = JSON.parse(
-      process.env.GOOGLE_SERVICE_ACCOUNT_JSON
-    );
-
-    credentials.private_key = clean(credentials.private_key)
-      .replace(/\\n/g, "\n");
-
-    return credentials;
-  }
-
-  if (
-    process.env.GOOGLE_CLIENT_EMAIL &&
-    process.env.GOOGLE_PRIVATE_KEY
-  ) {
-    return {
-      client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(
-        /\\n/g,
-        "\n"
-      ),
-    };
-  }
-
-  throw new Error("Google credentials are missing");
-}
-
-async function readClientConfig() {
-  const credentials = getGoogleCredentials();
-
-  const auth = new google.auth.JWT({
-    email: credentials.client_email,
-    key: credentials.private_key,
-    scopes: [
-      "https://www.googleapis.com/auth/spreadsheets.readonly",
-    ],
-  });
-
-  const sheets = google.sheets({
-    version: "v4",
-    auth,
-  });
-
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:ZZ`,
-  });
-
-  const values = response.data.values || [];
-
-  if (values.length < 2) {
-    return [];
-  }
-
-  const headers = values[0].map(normalizeHeader);
-
-  return values.slice(1).map((row) => {
-    const record = {};
-
-    headers.forEach((header, index) => {
-      if (header) {
-        record[header] = clean(row[index]);
-      }
-    });
-
-    return record;
-  });
-}
-
-function getMessageLink(client, messageType) {
-  const links = {
-    booking_link:
-      client.booking_link ||
-      client.scheduling_link ||
-      client.calendar_link,
-
-    enrollment_link:
-      client.enrollment_link ||
-      client.enrollment_url ||
-      client.secure_enrollment_link,
-
-    website:
-      client.website ||
-      client.website_link,
-
-    photo_upload_link:
-      client.photo_upload_link ||
-      client.upload_link,
-
-    financing_link:
-      client.financing_link ||
-      client.finance_link,
-  };
-
-  return clean(links[messageType]);
-}
-
 function createMessageBody({
   businessName,
   messageType,
   link,
 }) {
   switch (messageType) {
+    case "enrollment_link":
+      return (
+        `Here is the secure enrollment link you requested from ` +
+        `${businessName}: ${link} Reply STOP to opt out.`
+      );
+
     case "booking_link":
       return (
         `Here is the scheduling link you requested from ` +
         `${businessName}: ${link} Reply STOP to opt out.`
       );
 
-    case "enrollment_link":
+    case "website":
       return (
-        `Here is the secure enrollment link you requested from ` +
-        `${businessName}: ${link} Reply STOP to opt out.`
+        `Here is the website for ${businessName}: ` +
+        `${link} Reply STOP to opt out.`
       );
 
     case "photo_upload_link":
@@ -166,17 +62,40 @@ function createMessageBody({
         `${businessName}: ${link} Reply STOP to opt out.`
       );
 
-    case "website":
-      return (
-        `Here is the website for ${businessName}: ` +
-        `${link} Reply STOP to opt out.`
-      );
-
     default:
       throw new Error(
         `Unsupported message type: ${messageType}`
       );
   }
+}
+
+async function getClientLink(clientId, messageType) {
+  const supportedKeys = {
+    enrollment_link:
+      `client:${clientId}:enrollment_link`,
+
+    booking_link:
+      `client:${clientId}:booking_link`,
+
+    website:
+      `client:${clientId}:website`,
+
+    photo_upload_link:
+      `client:${clientId}:photo_upload_link`,
+
+    financing_link:
+      `client:${clientId}:financing_link`,
+  };
+
+  const key = supportedKeys[messageType];
+
+  if (!key) {
+    throw new Error(
+      `Unsupported message type: ${messageType}`
+    );
+  }
+
+  return clean(await kv.get(key));
 }
 
 module.exports = async function handler(req, res) {
@@ -209,7 +128,7 @@ module.exports = async function handler(req, res) {
     const messageType = clean(
       args.message_type ||
         body.message_type ||
-        "booking_link"
+        "enrollment_link"
     );
 
     if (!callerPhone) {
@@ -230,31 +149,37 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const clients = await readClientConfig();
-
-    const client = clients.find(
-      (row) => clean(row.agent_id) === agentId
+    const clientId = clean(
+      await kv.get(`agent:${agentId}:client`)
     );
 
-    if (!client) {
+    if (!clientId) {
       return res.status(404).json({
         success: false,
-        error: `No Client Config row found for agent ID: ${agentId}`,
+        error: `No client mapping found for agent ID: ${agentId}`,
         agent_response:
           "I could not locate the business texting configuration.",
       });
     }
 
-    const clientId = clean(client.client_id);
     const businessName =
-      clean(client.business_name) || "the business";
+      clean(
+        await kv.get(
+          `client:${clientId}:business_name`
+        )
+      ) || "the business";
 
-    const link = getMessageLink(client, messageType);
+    const link = await getClientLink(
+      clientId,
+      messageType
+    );
 
     if (!link) {
       return res.status(400).json({
         success: false,
-        error: `${messageType} is not configured for ${businessName}`,
+        error:
+          `${messageType} is not configured for client ` +
+          `${clientId}`,
         agent_response:
           "That link has not been configured for this business yet.",
       });
