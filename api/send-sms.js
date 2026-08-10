@@ -236,16 +236,18 @@ module.exports = async function handler(req, res) {
       callId: call.call_id || null,
     });
 
-    return res.status(200).json({
-      success: true,
-      message: "Text message sent successfully",
-      message_sid: message.sid,
-      sent_to: callerPhone,
-      client_id: clientId,
-      business_name: businessName,
-      message_type: messageType,
-      agent_response:
-        "The text was sent successfully. Confirm that it has been sent.",
+return res.status(200).json({
+  success: true,
+  sms_successful: true,
+  message: "Text message sent successfully",
+  message_sid: message.sid,
+  sent_to: callerPhone,
+  client_id: clientId,
+  business_name: businessName,
+  message_type: messageType,
+  agent_response:
+    "The text was sent successfully. Confirm that it has been sent.",
+});
     });
   } catch (error) {
     console.error("SMS sending error:", {
