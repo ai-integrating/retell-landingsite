@@ -247,7 +247,6 @@ return res.status(200).json({
   message_type: messageType,
   agent_response:
     "The text was sent successfully. Confirm that it has been sent.",
-});
     });
   } catch (error) {
     console.error("SMS sending error:", {
