@@ -62,6 +62,32 @@ function normalizeEmailInput(email = "") {
     .replace(/\s+/g, "");
 }
 
+// ADDED: Normalize phone numbers for Cal.com booking payloads
+function normalizePhoneNumber(phone = "") {
+  const raw = String(phone || "").trim();
+
+  if (!raw) return "";
+
+  const digits = raw.replace(/\D/g, "");
+
+  // US 10-digit number
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+
+  // US number already includes country code
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `+${digits}`;
+  }
+
+  // Already looks international
+  if (raw.startsWith("+")) {
+    return `+${digits}`;
+  }
+
+  return raw;
+}
+
 function ymd(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
@@ -360,6 +386,7 @@ async function handleAvailability(req, res, body) {
     body.start_date || body.args?.start_date,
     ymd(Date.now())
   );
+
   const end = asString(
     body.end_date || body.args?.end_date,
     ymd(Date.now() + 7 * 24 * 60 * 60 * 1000)
@@ -406,13 +433,18 @@ async function handleBook(req, res, body) {
 
   const args = body.args || body;
   const rawStart = asString(args.start || args.slot || args.selected_start);
+
   if (!rawStart) {
     return json(res, 400, { error: "Missing selected start time" });
   }
 
   const name = asString(args.attendee_name || args.name);
   const email = normalizeEmailInput(args.attendee_email || args.email);
-  const phone = asString(args.phone || args.attendee_phone || "");
+
+  // UPDATED: Normalize phone before sending it to Cal.com
+  const phone = normalizePhoneNumber(
+    args.phone || args.attendee_phone || ""
+  );
 
   if (!name) {
     return json(res, 400, { error: "Missing attendee name" });
@@ -497,8 +529,12 @@ async function handleBook(req, res, body) {
 async function handleEventTypes(req, res, url, body) {
   const args = body.args || body || {};
   const agentId = cleanAgentId(
-    url.searchParams.get("agent_id") || req.headers["x-agent-id"] || args.agent_id || args.agentId
+    url.searchParams.get("agent_id") ||
+      req.headers["x-agent-id"] ||
+      args.agent_id ||
+      args.agentId
   );
+
   if (!agentId) return json(res, 400, { error: "Missing agent_id" });
 
   const clientId = await kv.get(`agent:${agentId}:client`);
@@ -508,11 +544,14 @@ async function handleEventTypes(req, res, url, body) {
   if (!token?.access_token) return json(res, 400, { error: "No OAuth token" });
 
   const fetchedSlugs = await fetchAllEventTypeSlugs(token.access_token);
-  
+
   const existingConfig = (await kv.get(`client:${clientId}:cal`)) || {};
   await kv.set(`client:${clientId}:cal`, {
     ...existingConfig,
-    eventTypeSlugs: Object.keys(fetchedSlugs).length > 0 ? fetchedSlugs : existingConfig.eventTypeSlugs,
+    eventTypeSlugs:
+      Object.keys(fetchedSlugs).length > 0
+        ? fetchedSlugs
+        : existingConfig.eventTypeSlugs,
     updated_at: new Date().toISOString()
   });
 
@@ -522,22 +561,29 @@ async function handleEventTypes(req, res, url, body) {
 async function handleSelectEventType(req, res, url, body) {
   const args = body.args || body || {};
   const agentId = cleanAgentId(
-    url.searchParams.get("agent_id") || req.headers["x-agent-id"] || args.agent_id || args.agentId
+    url.searchParams.get("agent_id") ||
+      req.headers["x-agent-id"] ||
+      args.agent_id ||
+      args.agentId
   );
+
   if (!agentId) return json(res, 400, { error: "Missing agent_id" });
 
   const slug = asString(
     args.selectedEventTypeSlug ||
-    args.eventTypeSlug ||
-    args.slug
+      args.eventTypeSlug ||
+      args.slug
   );
-  if (!slug) return json(res, 400, { error: "Missing selected event type slug" });
+
+  if (!slug) {
+    return json(res, 400, { error: "Missing selected event type slug" });
+  }
 
   const clientId = await kv.get(`agent:${agentId}:client`);
   if (!clientId) return json(res, 400, { error: "No client_id found" });
 
   const existingConfig = (await kv.get(`client:${clientId}:cal`)) || {};
-  
+
   // ADDED: Validation block ensuring saved slug exists within known values
   const eventTypeSlugs = existingConfig.eventTypeSlugs || {};
   const validSlugs = Object.values(eventTypeSlugs);
@@ -556,25 +602,51 @@ async function handleSelectEventType(req, res, url, body) {
     updated_at: new Date().toISOString()
   });
 
-  return json(res, 200, { ok: true, selectedEventTypeSlug: slug });
+  return json(res, 200, {
+    ok: true,
+    selectedEventTypeSlug: slug
+  });
 }
 
 // -------------------- ROUTER --------------------
 module.exports = async (req, res) => {
   setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
 
   const body = req.method === "POST" ? await readJsonBody(req) : {};
   const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
   const action = url.searchParams.get("action")?.toLowerCase();
 
-  if (action === "oauth_start") return await handleOauthStart(req, res, url);
-  if (action === "oauth_callback") return await handleOauthCallback(req, res, url);
-  if (action === "availability") return await handleAvailability(req, res, body);
-  if (action === "book") return await handleBook(req, res, body);
-  // ADDED: Extends route patterns explicitly
-  if (action === "event_types") return await handleEventTypes(req, res, url, body);
-  if (action === "select_event_type") return await handleSelectEventType(req, res, url, body);
+  if (action === "oauth_start") {
+    return await handleOauthStart(req, res, url);
+  }
 
-  return json(res, 400, { error: "Unknown action", method: req.method });
+  if (action === "oauth_callback") {
+    return await handleOauthCallback(req, res, url);
+  }
+
+  if (action === "availability") {
+    return await handleAvailability(req, res, body);
+  }
+
+  if (action === "book") {
+    return await handleBook(req, res, body);
+  }
+
+  // ADDED: Extends route patterns explicitly
+  if (action === "event_types") {
+    return await handleEventTypes(req, res, url, body);
+  }
+
+  if (action === "select_event_type") {
+    return await handleSelectEventType(req, res, url, body);
+  }
+
+  return json(res, 400, {
+    error: "Unknown action",
+    method: req.method
+  });
 };
