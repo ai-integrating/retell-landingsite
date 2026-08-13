@@ -31,10 +31,6 @@ function normalizePhone(value) {
   return "";
 }
 
-function normalizeEmail(value) {
-  return clean(value).toLowerCase().replace(/\s+/g, "");
-}
-
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
 }
