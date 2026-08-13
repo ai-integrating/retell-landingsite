@@ -6,8 +6,13 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeEmail(value) {
+  return clean(value).toLowerCase().replace(/\s+/g, "");
+}
+
 function normalizePhone(value) {
   const phone = clean(value);
+
 
   if (/^\+\d{10,15}$/.test(phone)) {
     return phone;
