@@ -482,7 +482,7 @@ async function handleBook(req, res, body) {
         Authorization: `Bearer ${ctx.accessToken}`
       }
     });
-
+console.log("CAL BOOKING RESPONSE:", JSON.stringify(resp.data, null, 2));
     return json(res, 200, { ok: true, booking: resp.data });
   } catch (err) {
     const status = err?.response?.status || null;
