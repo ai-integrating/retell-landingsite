@@ -170,7 +170,24 @@ module.exports = async (req, res) => {
     "reason",
     "call_reason",
   ]);
+  const appointment_type = pick(body, [
+    "appointment_type",
+    "appointmentType",
+  ]);
 
+  const appointment_date = pick(body, [
+    "appointment_date",
+    "appointmentDate",
+  ]);
+
+  const appointment_time = pick(body, [
+    "appointment_time",
+    "appointmentTime",
+  ]);
+  const booking_uid = pick(body, [
+  "booking_uid",
+  "bookingUid",
+]);
   const notes = pick(body, [
     "notes",
     "note",
@@ -238,6 +255,11 @@ module.exports = async (req, res) => {
       business_name: asString(business_name, ""),
       agent_name: asString(agent_name, ""),
       reason_for_call: asString(reason_for_call, ""),
+      appointment_type: asString(appointment_type, ""),
+appointment_date: asString(appointment_date, ""),
+appointment_time: asString(appointment_time, ""),
+      booking_uid: asString(booking_uid, ""),
+
       notes: asString(notes, ""),
     };
 
@@ -249,6 +271,7 @@ module.exports = async (req, res) => {
       metadata: {
         direction: "outbound",
         CALL_DIRECTION: "outbound",
+        booking_uid: asString(booking_uid, ""),
       },
     };
 
