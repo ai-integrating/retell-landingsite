@@ -376,7 +376,60 @@ async function handleOauthCallback(req, res, url) {
     });
   }
 }
+// -------------------- BOOKING STORAGE --------------------
+async function saveBookingForConfirmation(ctx, calResponse) {
+  const booking = calResponse?.data;
 
+  if (!booking?.uid) {
+    console.log("BOOKING STORAGE SKIPPED: No Cal.com booking UID", calResponse);
+    return null;
+  }
+
+  const attendee = Array.isArray(booking.attendees)
+    ? booking.attendees[0]
+    : null;
+
+  const bookingRecord = {
+    booking_uid: booking.uid,
+    booking_id: booking.id || null,
+
+    client_id: ctx.clientId,
+    agent_id: ctx.agentId,
+
+    customer_name: attendee?.name || "",
+    customer_phone: attendee?.phoneNumber || "",
+    customer_email: attendee?.email || "",
+
+    appointment_start: booking.start || "",
+    appointment_end: booking.end || "",
+    appointment_type: booking.eventType?.slug || ctx.serviceKey || "",
+
+    confirmation_status: "pending",
+    confirmation_attempted_at: null,
+
+    created_at: new Date().toISOString()
+  };
+
+  // Store the complete booking record by Cal.com UID
+  await kv.set(`booking:${booking.uid}`, bookingRecord);
+
+  // Create an index so we can find appointments by appointment date
+  if (booking.start) {
+    const appointmentDate = booking.start.slice(0, 10);
+    const dateIndexKey =
+      `client:${ctx.clientId}:confirmations:${appointmentDate}`;
+
+    await kv.sadd(dateIndexKey, booking.uid);
+  }
+
+  console.log(
+    "BOOKING SAVED FOR CONFIRMATION:",
+    booking.uid,
+    booking.start
+  );
+
+  return bookingRecord;
+}
 // -------------------- CORE ACTIONS --------------------
 async function handleAvailability(req, res, body) {
   const ctx = await resolveCalContext(req, body);
@@ -482,8 +535,12 @@ async function handleBook(req, res, body) {
         Authorization: `Bearer ${ctx.accessToken}`
       }
     });
-console.log("CAL BOOKING RESPONSE:", JSON.stringify(resp.data, null, 2));
-    return json(res, 200, { ok: true, booking: resp.data });
+const savedBooking = await saveBookingForConfirmation(ctx, resp.data);
+return json(res, 200, {
+  ok: true,
+  booking: resp.data,
+  confirmation_record_saved: !!savedBooking
+});
   } catch (err) {
     const status = err?.response?.status || null;
 
@@ -498,11 +555,14 @@ console.log("CAL BOOKING RESPONSE:", JSON.stringify(resp.data, null, 2));
             Authorization: `Bearer ${refreshed.access_token}`
           }
         });
-
-        return json(res, 200, {
+const savedBooking = await saveBookingForConfirmation(ctx, retryResp.data);
+        
+               return json(res, 200, {
           ok: true,
           booking: retryResp.data,
-          token_refreshed: true
+          token_refreshed: true,
+          confirmation_record_saved: !!savedBooking
+      
         });
       } catch (retryErr) {
         return json(res, 500, {
