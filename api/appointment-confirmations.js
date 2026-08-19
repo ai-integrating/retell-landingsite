@@ -1,29 +1,17 @@
 // /api/appointment-confirmations.js
 //
-// Finds upcoming Cal.com bookings that were saved in Vercel KV
-// and sends appointments needing confirmation to Zapier.
+// DAILY DAY-BEFORE CONFIRMATION CHECKER
 //
-// This does NOT place the Retell call itself.
-// Zapier continues to call the existing /api/outgoing-call endpoint.
+// Zapier runs this endpoint once per day at 1:30 PM.
+// This endpoint:
+// 1. Looks at tomorrow's Cal.com bookings stored in Vercel KV
+// 2. Finds bookings whose confirmation_status is "pending"
+// 3. Returns those appointments to Zapier
+//
+// This endpoint DOES NOT place the call.
+// The existing /api/outgoing-call remains responsible for calling Retell.
 
-const axios = require("axios");
 const { kv } = require("@vercel/kv");
-
-// --------------------------------------------------
-// SETTINGS
-// --------------------------------------------------
-
-// Zapier Catch Hook that starts the existing confirmation-call Zap.
-// Add this in Vercel as:
-// APPOINTMENT_CONFIRMATION_ZAP_URL=https://hooks.zapier.com/...
-const ZAP_URL = process.env.APPOINTMENT_CONFIRMATION_ZAP_URL;
-
-// For the first version, confirmations are approximately 24 hours before.
-const TARGET_HOURS_BEFORE = 24;
-
-// Because this endpoint may run periodically, allow a window.
-// Example: if it runs hourly, appointments 23.5–24.5 hours away qualify.
-const WINDOW_MINUTES = 30;
 
 // --------------------------------------------------
 // HELPERS
@@ -54,7 +42,6 @@ function formatAppointmentTime(date, timeZone = "America/New_York") {
 }
 
 function getDateKey(date, timeZone = "America/New_York") {
-  // Produces YYYY-MM-DD in the client's timezone.
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -63,6 +50,7 @@ function getDateKey(date, timeZone = "America/New_York") {
   }).formatToParts(date);
 
   const values = {};
+
   for (const part of parts) {
     if (part.type !== "literal") {
       values[part.type] = part.value;
@@ -72,177 +60,222 @@ function getDateKey(date, timeZone = "America/New_York") {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function hoursUntil(date) {
-  return (date.getTime() - Date.now()) / (1000 * 60 * 60);
-}
-
-function isInsideConfirmationWindow(appointmentDate) {
-  const difference = hoursUntil(appointmentDate);
-  const toleranceHours = WINDOW_MINUTES / 60;
-
-  return (
-    difference >= TARGET_HOURS_BEFORE - toleranceHours &&
-    difference <= TARGET_HOURS_BEFORE + toleranceHours
-  );
-}
-
 // --------------------------------------------------
 // CLIENT CONFIG
 // --------------------------------------------------
-//
-// For now this looks for confirmation settings in KV:
-//
-// client:{clientId}:confirmation_config
-//
-// Example:
-// {
-//   enabled: true,
-//   business_name: "Len's office",
-//   agent_name: "Ava",
-//   outbound_agent_id: "agent_xxxxx",
-//   from_number: "+1617xxxxxxx",
-//   reason_for_call: "your upcoming appointment with Len",
-//   time_zone: "America/New_York"
-// }
-//
-// Later these settings can be controlled from your portal.
 
 async function getConfirmationConfig(clientId) {
-  const config = await kv.get(`client:${clientId}:confirmation_config`);
-
-  if (!config) {
-    return null;
-  }
-
-  return config;
+  return await kv.get(`client:${clientId}:confirmation_config`);
 }
 
 // --------------------------------------------------
-// PROCESS ONE BOOKING
+// MAIN HANDLER
 // --------------------------------------------------
 
-async function processBooking(bookingUid) {
-  const bookingKey = `booking:${bookingUid}`;
-  const booking = await kv.get(bookingKey);
+module.exports = async (req, res) => {
+  try {
+    if (req.method !== "GET" && req.method !== "POST") {
+      return json(res, 405, {
+        ok: false,
+        error: "Method not allowed",
+      });
+    }
 
-  if (!booking) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "booking_not_found",
-    };
-  }
+    const url = new URL(
+      req.url,
+      `https://${req.headers.host || "localhost"}`
+    );
 
-  // Already handled = do not call again.
-  if (booking.confirmation_status !== "pending") {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: `status_${booking.confirmation_status}`,
-    };
-  }
+    const clientId =
+      url.searchParams.get("client_id") ||
+      req.body?.client_id ||
+      "";
 
-  if (!booking.appointment_start) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "missing_appointment_start",
-    };
-  }
+    if (!clientId) {
+      return json(res, 400, {
+        ok: false,
+        error: "Missing client_id",
+      });
+    }
 
-  if (!booking.customer_phone) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "missing_customer_phone",
-    };
-  }
+    // --------------------------------------------------
+    // GET CLIENT CONFIRMATION SETTINGS
+    // --------------------------------------------------
 
-  const appointmentDate = new Date(booking.appointment_start);
+    const config = await getConfirmationConfig(clientId);
 
-  if (Number.isNaN(appointmentDate.getTime())) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "invalid_appointment_start",
-    };
-  }
+    if (!config) {
+      return json(res, 400, {
+        ok: false,
+        error: "No confirmation configuration found for client",
+        client_id: clientId,
+      });
+    }
 
-  // Only trigger appointments inside our 24-hour window.
-  if (!isInsideConfirmationWindow(appointmentDate)) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "outside_confirmation_window",
-      hours_until: hoursUntil(appointmentDate),
-    };
-  }
+    if (config.enabled === false) {
+      return json(res, 200, {
+        ok: true,
+        client_id: clientId,
+        confirmations_enabled: false,
+        appointments_found: 0,
+        appointments: [],
+      });
+    }
 
-  const config = await getConfirmationConfig(booking.client_id);
+    const timeZone =
+      config.time_zone ||
+      config.timeZone ||
+      "America/New_York";
 
-  if (!config) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "missing_confirmation_config",
-    };
-  }
+    // --------------------------------------------------
+    // FIND TOMORROW
+    // --------------------------------------------------
 
-  if (config.enabled === false) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "confirmations_disabled",
-    };
-  }
+    const now = new Date();
 
-  if (!config.outbound_agent_id) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "missing_outbound_agent_id",
-    };
-  }
+    const tomorrow = new Date(
+      now.getTime() + 24 * 60 * 60 * 1000
+    );
 
-  if (!config.from_number) {
-    return {
-      booking_uid: bookingUid,
-      action: "skipped",
-      reason: "missing_from_number",
-    };
-  }
-
-  const timeZone =
-    config.time_zone ||
-    config.timeZone ||
-    "America/New_York";
-
-  // This payload matches the fields in your working Zap.
-  const zapPayload = {
-    agent_id: config.outbound_agent_id,
-    to_number: booking.customer_phone,
-    from_number: config.from_number,
-
-    client_name: booking.customer_name || "",
-
-    business_name: config.business_name || "",
-    agent_name: config.agent_name || "",
-
-    reason_for_call:
-      config.reason_for_call || "your upcoming appointment",
-
-    appointment_type: booking.appointment_type || "",
-
-    appointment_date: formatAppointmentDate(
-      appointmentDate,
+    const tomorrowDateKey = getDateKey(
+      tomorrow,
       timeZone
-    ),
+    );
 
-    appointment_time: formatAppointmentTime(
-      appointmentDate,
-      timeZone
-    ),
+    // cal.js already creates this index when Ava books.
+    const indexKey =
+      `client:${clientId}:confirmations:${tomorrowDateKey}`;
 
-    booking_uid: booking.booking_uid || bookingUid,
+    const bookingUids =
+      (await kv.smembers(indexKey)) || [];
 
-    // Extra identifiers Zap
+    // --------------------------------------------------
+    // READ TOMORROW'S BOOKINGS
+    // --------------------------------------------------
+
+    const appointments = [];
+
+    for (const bookingUid of bookingUids) {
+      const bookingKey = `booking:${bookingUid}`;
+
+      const booking = await kv.get(bookingKey);
+
+      if (!booking) {
+        continue;
+      }
+
+      // Do not send appointments already handled.
+      if (booking.confirmation_status !== "pending") {
+        continue;
+      }
+
+      if (!booking.appointment_start) {
+        continue;
+      }
+
+      if (!booking.customer_phone) {
+        continue;
+      }
+
+      const appointmentDate =
+        new Date(booking.appointment_start);
+
+      if (Number.isNaN(appointmentDate.getTime())) {
+        continue;
+      }
+
+      // Safety check:
+      // Make sure the booking itself is actually tomorrow
+      // in the client's timezone.
+      const actualAppointmentDateKey =
+        getDateKey(appointmentDate, timeZone);
+
+      if (actualAppointmentDateKey !== tomorrowDateKey) {
+        continue;
+      }
+
+      // --------------------------------------------------
+      // BUILD THE DATA ZAPIER NEEDS
+      // --------------------------------------------------
+
+      appointments.push({
+        agent_id:
+          config.outbound_agent_id || "",
+
+        to_number:
+          booking.customer_phone || "",
+
+        from_number:
+          config.from_number || "",
+
+        client_name:
+          booking.customer_name || "",
+
+        business_name:
+          config.business_name || "",
+
+        agent_name:
+          config.agent_name || "",
+
+        reason_for_call:
+          config.reason_for_call ||
+          "your upcoming appointment",
+
+        appointment_type:
+          booking.appointment_type || "",
+
+        appointment_date:
+          formatAppointmentDate(
+            appointmentDate,
+            timeZone
+          ),
+
+        appointment_time:
+          formatAppointmentTime(
+            appointmentDate,
+            timeZone
+          ),
+
+        booking_uid:
+          booking.booking_uid || bookingUid,
+
+        client_id:
+          booking.client_id || clientId,
+      });
+    }
+
+    // --------------------------------------------------
+    // RETURN RESULTS TO ZAPIER
+    // --------------------------------------------------
+
+    return json(res, 200, {
+      ok: true,
+
+      client_id: clientId,
+
+      confirmations_enabled: true,
+
+      confirmation_type: "day_before",
+
+      appointment_date_checked:
+        tomorrowDateKey,
+
+      appointments_found:
+        appointments.length,
+
+      appointments,
+    });
+  } catch (error) {
+    console.error(
+      "APPOINTMENT CONFIRMATION CHECK ERROR",
+      error
+    );
+
+    return json(res, 500, {
+      ok: false,
+      error:
+        "Appointment confirmation check failed",
+      message: error.message,
+    });
+  }
+};
