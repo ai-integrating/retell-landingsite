@@ -112,6 +112,10 @@ function tokenKeyForAgent(agentId) {
   const a = asString(agentId);
   return a ? `cal:tokens:agent:${a}` : "";
 }
+  function tokenKeyForClient(clientId) {
+  const c = asString(clientId);
+  return c ? `cal:tokens:client:${c}` : "";
+}
 
 function tokenKeyForEmail(email) {
   const e = asString(email).toLowerCase();
@@ -172,31 +176,37 @@ async function fetchAllEventTypeSlugs(accessToken) {
 
   return slugMap;
 }
-
-async function refreshAccessTokenForAgent(agentId) {
-  const existing = await kv.get(tokenKeyForAgent(agentId));
+async function refreshAccessTokenForClient(clientId) {
+  const existing = await kv.get(tokenKeyForClient(clientId));
   const refreshToken = asString(existing?.refresh_token);
-  if (!refreshToken) throw new Error("No refresh token available");
 
-  const clientId = process.env.CAL_CLIENT_ID;
+  if (!refreshToken) {
+    throw new Error("No refresh token available");
+  }
+
+  const oauthClientId = process.env.CAL_CLIENT_ID;
   const clientSecret = process.env.CAL_CLIENT_SECRET;
 
   const resp = await axios.post("https://api.cal.com/v2/auth/oauth2/token", {
-    client_id: clientId,
+    client_id: oauthClientId,
     client_secret: clientSecret,
     grant_type: "refresh_token",
     refresh_token: refreshToken
   });
 
   const data = resp.data || {};
+
   const refreshed = {
     access_token: asString(data.access_token),
     refresh_token: asString(data.refresh_token || refreshToken),
     token_type: asString(data.token_type, "bearer"),
-    expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0
+    expires_at: data.expires_in
+      ? Date.now() + Number(data.expires_in) * 1000
+      : 0
   };
 
-  await kv.set(tokenKeyForAgent(agentId), refreshed);
+  await kv.set(tokenKeyForClient(clientId), refreshed);
+
   return refreshed;
 }
 
@@ -223,12 +233,15 @@ async function resolveCalContext(req, body) {
   if (!calConfig || !calConfig.username) {
     return { error: "No Cal config found for client", agentId, clientId };
   }
+let token = await kv.get(tokenKeyForClient(clientId));
 
-  const token = await kv.get(tokenKeyForAgent(agentId));
-  if (!token?.access_token) {
-    return { error: "No OAuth token found for agent", agentId, clientId };
-  }
+if (!token?.access_token) {
+  token = await kv.get(tokenKeyForAgent(agentId));
+}
 
+if (!token?.access_token) {
+  return { error: "No OAuth token found for client", agentId, clientId };
+}
   const rawServiceKey = asString(
     args.service_key ||
       body.service_key ||
@@ -339,9 +352,19 @@ async function handleOauthCallback(req, res, url) {
       expires_at: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : 0
     };
 
-    await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
+const client_id = await kv.get(`agent:${agent_id}:client`);
 
-    const client_id = await kv.get(`agent:${agent_id}:client`);
+if (!client_id) {
+  return json(res, 400, {
+    error: "No client_id found for agent",
+    agent_id
+  });
+}
+
+await kv.set(tokenKeyForClient(client_id), tokenPayload);
+
+// Keep legacy agent token temporarily during migration
+await kv.set(tokenKeyForAgent(agent_id), tokenPayload);
 
     const meResp = await axios.get("https://api.cal.com/v2/me", {
       headers: {
@@ -546,7 +569,7 @@ return json(res, 200, {
 
     if (status === 401) {
       try {
-        const refreshed = await refreshAccessTokenForAgent(ctx.agentId);
+      const refreshed = await refreshAccessTokenForClient(ctx.clientId);
 
         const retryResp = await axios.post(bookingUrl, payload, {
           headers: {
@@ -600,8 +623,15 @@ async function handleEventTypes(req, res, url, body) {
   const clientId = await kv.get(`agent:${agentId}:client`);
   if (!clientId) return json(res, 400, { error: "No client_id found" });
 
-  const token = await kv.get(tokenKeyForAgent(agentId));
-  if (!token?.access_token) return json(res, 400, { error: "No OAuth token" });
+let token = await kv.get(tokenKeyForClient(clientId));
+
+if (!token?.access_token) {
+  token = await kv.get(tokenKeyForAgent(agentId));
+}
+
+if (!token?.access_token) {
+  return json(res, 400, { error: "No OAuth token" });
+}
 
   const fetchedSlugs = await fetchAllEventTypeSlugs(token.access_token);
 
