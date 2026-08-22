@@ -4,6 +4,15 @@ const crypto = require("crypto");
 const { kv } = require("@vercel/kv");
 
 const CAL_API_VERSION = "2024-09-04";
+const WEEKDAYS = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6
+};
 const CAL_EVENT_TYPES_API_VERSION = "2024-06-14";
 const CAL_BOOKINGS_API_VERSION = "2026-02-25";
 
@@ -209,7 +218,65 @@ async function refreshAccessTokenForClient(clientId) {
 
   return refreshed;
 }
+function resolveDateRange({
+  requestedWeekday,
+  explicitStartDate,
+  explicitEndDate,
+  timeZone = "America/New_York"
+}) {
+  // A caller gave an exact date.
+  // Trust the explicit date rather than doing weekday math.
+  if (explicitStartDate) {
+    return {
+      start: explicitStartDate,
+      end: explicitEndDate || explicitStartDate
+    };
+  }
 
+  // Determine "today" in the client's timezone.
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+
+  const year = Number(parts.find((p) => p.type === "year")?.value);
+  const month = Number(parts.find((p) => p.type === "month")?.value);
+  const day = Number(parts.find((p) => p.type === "day")?.value);
+
+  const today = new Date(Date.UTC(year, month - 1, day));
+
+  const cleanDay = String(requestedWeekday || "")
+    .trim()
+    .toLowerCase();
+
+  // Named weekday: backend determines the real calendar date.
+  if (cleanDay in WEEKDAYS) {
+    const targetDayIndex = WEEKDAYS[cleanDay];
+    const currentDayIndex = today.getUTCDay();
+    const daysUntil = (targetDayIndex - currentDayIndex + 7) % 7;
+
+    const targetDate = new Date(today);
+    targetDate.setUTCDate(today.getUTCDate() + daysUntil);
+
+    const targetIsoDate = targetDate.toISOString().slice(0, 10);
+
+    return {
+      start: targetIsoDate,
+      end: targetIsoDate
+    };
+  }
+
+  // No specific date or weekday = normal next-available search.
+  const fallbackEnd = new Date(today);
+  fallbackEnd.setUTCDate(today.getUTCDate() + 7);
+
+  return {
+    start: today.toISOString().slice(0, 10),
+    end: fallbackEnd.toISOString().slice(0, 10)
+  };
+}
 // -------------------- CONTEXT RESOLUTION --------------------
 async function resolveCalContext(req, body) {
   const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
@@ -254,10 +321,10 @@ if (!token?.access_token) {
   const serviceKey = normalizeServiceKey(rawServiceKey);
 
   // ADDED: Overrides fallback hierarchy if portal explicit mapping exists
-  let eventTypeSlug = calConfig?.selectedEventTypeSlug;
+let eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
 
-  if (!eventTypeSlug) {
-    eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
+if (!eventTypeSlug) {
+  eventTypeSlug = calConfig?.selectedEventTypeSlug;
 
     if (!eventTypeSlug && calConfig?.eventTypeSlugs) {
       const keys = Object.keys(calConfig.eventTypeSlugs);
@@ -458,15 +525,17 @@ async function handleAvailability(req, res, body) {
   const ctx = await resolveCalContext(req, body);
   if (ctx.error) return json(res, 400, { error: ctx.error });
 
-  const start = asString(
-    body.start_date || body.args?.start_date,
-    ymd(Date.now())
-  );
+const args = body.args || body || {};
 
-  const end = asString(
-    body.end_date || body.args?.end_date,
-    ymd(Date.now() + 7 * 24 * 60 * 60 * 1000)
-  );
+const { start, end } = resolveDateRange({
+  requestedWeekday:
+    args.requested_weekday ||
+    args.weekday ||
+    args.day_of_week,
+  explicitStartDate: asString(args.start_date),
+  explicitEndDate: asString(args.end_date),
+  timeZone: ctx.timeZone
+});
 
   const url = `https://api.cal.com/v2/slots?username=${encodeURIComponent(
     ctx.username
