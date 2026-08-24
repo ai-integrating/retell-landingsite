@@ -252,21 +252,24 @@ function resolveDateRange({
     .toLowerCase();
 
   // Named weekday: backend determines the real calendar date.
-  if (cleanDay in WEEKDAYS) {
-    const targetDayIndex = WEEKDAYS[cleanDay];
-    const currentDayIndex = today.getUTCDay();
-    const daysUntil = (targetDayIndex - currentDayIndex + 7) % 7;
+if (cleanDay in WEEKDAYS) {
+  const targetDayIndex = WEEKDAYS[cleanDay];
+  const currentDayIndex = today.getUTCDay();
+  const daysUntil = (targetDayIndex - currentDayIndex + 7) % 7;
 
-    const targetDate = new Date(today);
-    targetDate.setUTCDate(today.getUTCDate() + daysUntil);
+  const targetDate = new Date(today);
+  targetDate.setUTCDate(today.getUTCDate() + daysUntil);
 
-    const targetIsoDate = targetDate.toISOString().slice(0, 10);
+  const targetIsoDate = targetDate.toISOString().slice(0, 10);
 
-    return {
-      start: targetIsoDate,
-      end: targetIsoDate
-    };
-  }
+  const searchEnd = new Date(targetDate);
+  searchEnd.setUTCDate(targetDate.getUTCDate() + 28);
+
+  return {
+    start: targetIsoDate,
+    end: searchEnd.toISOString().slice(0, 10)
+  };
+}
 
   // No specific date or weekday = normal next-available search.
   const fallbackEnd = new Date(today);
@@ -553,11 +556,36 @@ const { start, end } = resolveDateRange({
       }
     });
 
-    const slotsByDate = resp.data?.data || {};
-    const starts = Object.values(slotsByDate)
-      .flat()
-      .map((s) => s.start)
-      .filter(Boolean);
+const slotsByDate = resp.data?.data || {};
+
+let starts = Object.values(slotsByDate)
+  .flat()
+  .map((s) => s.start)
+  .filter(Boolean);
+
+// If the caller requested a weekday, only return slots
+// that actually fall on that weekday.
+const cleanRequestedWeekday = String(
+  args.requested_weekday ||
+  args.weekday ||
+  args.day_of_week ||
+  ""
+)
+  .trim()
+  .toLowerCase();
+
+if (cleanRequestedWeekday in WEEKDAYS) {
+  starts = starts.filter((slotStart) => {
+    const weekdayName = new Intl.DateTimeFormat("en-US", {
+      timeZone: ctx.timeZone,
+      weekday: "long"
+    })
+      .format(new Date(slotStart))
+      .toLowerCase();
+
+    return weekdayName === cleanRequestedWeekday;
+  });
+}
 
     return json(res, 200, {
       ok: true,
