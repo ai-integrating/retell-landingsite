@@ -263,7 +263,7 @@ if (cleanDay in WEEKDAYS) {
   const targetIsoDate = targetDate.toISOString().slice(0, 10);
 
   const searchEnd = new Date(targetDate);
-  searchEnd.setUTCDate(targetDate.getUTCDate() + 28);
+  searchEnd.setUTCDate(targetDate.getUTCDate() + 120);
 
   return {
     start: targetIsoDate,
@@ -273,7 +273,7 @@ if (cleanDay in WEEKDAYS) {
 
   // No specific date or weekday = normal next-available search.
   const fallbackEnd = new Date(today);
-  fallbackEnd.setUTCDate(today.getUTCDate() + 7);
+  fallbackEnd.setUTCDate(today.getUTCDate() + 120);
 
   return {
     start: today.toISOString().slice(0, 10),
