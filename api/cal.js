@@ -116,7 +116,12 @@ function normalizeServiceKey(value = "") {
     .replace(/\s+/g, "_")
     .replace(/-/g, "_");
 }
-
+// East Providence display/service names map to Len's existing Cal.com slugs.
+const SERVICE_KEY_ALIASES = {
+  new_prospect_east_providence: "new_prospect_providence",
+  existing_client_east_providence: "existing_client_providence",
+  new_couple_east_providence: "new_couple_providence"
+};
 function tokenKeyForAgent(agentId) {
   const a = asString(agentId);
   return a ? `cal:tokens:agent:${a}` : "";
@@ -321,10 +326,13 @@ if (!token?.access_token) {
       args.slug
   );
 
-  const serviceKey = normalizeServiceKey(rawServiceKey);
+ const serviceKey = normalizeServiceKey(rawServiceKey);
 
-  // ADDED: Overrides fallback hierarchy if portal explicit mapping exists
-let eventTypeSlug = calConfig?.eventTypeSlugs?.[serviceKey];
+const mappedServiceKey =
+  SERVICE_KEY_ALIASES[serviceKey] || serviceKey;
+
+// ADDED: Overrides fallback hierarchy if portal explicit mapping exists
+let eventTypeSlug = calConfig?.eventTypeSlugs?.[mappedServiceKey];
 
 if (!eventTypeSlug) {
   eventTypeSlug = calConfig?.selectedEventTypeSlug;
