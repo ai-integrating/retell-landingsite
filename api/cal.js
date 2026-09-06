@@ -538,11 +538,27 @@ async function handleAvailability(req, res, body) {
 
 const args = body.args || body || {};
 
+const rawRequestedWeekday = asString(
+  args.requested_weekday ||
+  args.weekday ||
+  args.day_of_week
+).toLowerCase();
+
+const executionMessage = asString(
+  args.execution_message
+).toLowerCase();
+
+const isGeneralAvailabilityRequest =
+  /\b(soonest|next available|first available|earliest available|any day)\b/i.test(
+    executionMessage
+  );
+
+const requestedWeekday = isGeneralAvailabilityRequest
+  ? ""
+  : rawRequestedWeekday;
+
 const { start, end } = resolveDateRange({
-  requestedWeekday:
-    args.requested_weekday ||
-    args.weekday ||
-    args.day_of_week,
+  requestedWeekday,
   explicitStartDate: asString(args.start_date),
   explicitEndDate: asString(args.end_date),
   timeZone: ctx.timeZone
