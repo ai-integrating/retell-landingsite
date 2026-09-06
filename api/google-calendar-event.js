@@ -76,21 +76,33 @@ function extractPhone(...values) {
 }
 
 function extractName(attendeeName, title) {
-  if (asString(attendeeName)) {
-    return asString(attendeeName);
-  }
-
   const cleanTitle = asString(title);
+  const cleanAttendee = asString(attendeeName);
 
-  if (!cleanTitle) {
-    return "";
+  // Example: "Google Ads Consultation (Rose Dos Santos)"
+  const parenthesesMatch = cleanTitle.match(
+    /\(([^()]+)\)\s*$/
+  );
+
+  if (parenthesesMatch) {
+    return parenthesesMatch[1].trim();
   }
 
-  // Example:
-  // "Rose Dos Santos-Zoom Video-Medicare Meeting"
-  const firstSection = cleanTitle.split(/\s*[-–—]\s*/)[0];
+  // Example: "Rose Dos Santos-Zoom Video-Medicare Meeting"
+  const firstTitleSection =
+    cleanTitle.split(/\s*[-–—]\s*/)[0];
 
-  return firstSection || cleanTitle;
+  // Ignore Zapier's combined attendee-information block.
+  const attendeeLooksStructured =
+    /email:|responsestatus:|organizer:|self:/i.test(
+      cleanAttendee
+    );
+
+  if (cleanAttendee && !attendeeLooksStructured) {
+    return cleanAttendee;
+  }
+
+  return firstTitleSection || cleanTitle;
 }
 
 function getDateKey(date, timeZone = "America/New_York") {
