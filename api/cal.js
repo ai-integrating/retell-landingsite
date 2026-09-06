@@ -589,15 +589,8 @@ let starts = Object.values(slotsByDate)
 
 // If the caller requested a weekday, only return slots
 // that actually fall on that weekday.
-const cleanRequestedWeekday = String(
-  args.requested_weekday ||
-  args.weekday ||
-  args.day_of_week ||
-  ""
-)
-  .trim()
-  .toLowerCase();
-
+const cleanRequestedWeekday = requestedWeekday;
+    
 if (cleanRequestedWeekday in WEEKDAYS) {
   starts = starts.filter((slotStart) => {
     const weekdayName = new Intl.DateTimeFormat("en-US", {
