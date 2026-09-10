@@ -46,7 +46,11 @@ function createMessageBody({
         `Here is the Scope of Appointment from ${businessName}: ` +
         `${link} Reply STOP to opt out.`
       );
-
+case "video_meeting_link":
+  return (
+    `Here is the link for your video appointment with ${businessName}: ` +
+    `${link} Reply STOP to opt out.`
+  );
     case "enrollment_link":
       return (
         `Here is the secure enrollment link you requested from ` +
@@ -102,7 +106,18 @@ function createEmailContent({
           `<p><a href="${link}">Open Scope of Appointment</a></p>` +
           `<p>Please complete it before your appointment.</p>`,
       };
-
+case "video_meeting_link":
+  return {
+    subject: `Your video appointment link from ${businessName}`,
+    text:
+      `Here is the link for your video appointment with ${businessName}:\n\n` +
+      `${link}\n\n` +
+      `Please keep this email so you can join your appointment.`,
+    html:
+      `<p>Here is the link for your video appointment with ${businessName}.</p>` +
+      `<p><a href="${link}">Join video appointment</a></p>` +
+      `<p>Please keep this email so you can join your appointment.</p>`,
+  };
     case "enrollment_link":
       return {
         subject: `Secure enrollment link from ${businessName}`,
