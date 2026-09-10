@@ -603,10 +603,19 @@ if (cleanRequestedWeekday in WEEKDAYS) {
     return weekdayName === cleanRequestedWeekday;
   });
 }
+if (starts.length === 0) {
+  return json(res, 200, {
+    ok: false,
+    error: "NO_AVAILABILITY_RETURNED",
+    available_slots: [],
+    agent_response:
+      "No appointment times were returned. Do not offer or invent any dates or times, and do not call Book_Appointment."
+  });
+}
 
-    return json(res, 200, {
-      ok: true,
-      available_slots: starts
+return json(res, 200, {
+  ok: true,
+  available_slots: starts
     });
   } catch (err) {
     return json(res, 500, {
