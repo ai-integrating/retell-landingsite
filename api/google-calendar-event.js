@@ -230,6 +230,12 @@ module.exports = async (req, res) => {
     const timeZone =
       asString(body.time_zone) || "America/New_York";
 
+    const normalizedTitle = normalizeText(title);
+
+const isWebsitePhoneAppointment =
+  normalizedTitle.includes("turning 65") ||
+  normalizedTitle.includes("welcome to medicare");
+
     if (!clientId || !googleEventId || !appointmentStart) {
       return json(res, 400, {
         ok: false,
@@ -357,10 +363,19 @@ module.exports = async (req, res) => {
 
       appointment_start: appointmentStart,
       appointment_end: appointmentEnd,
-      appointment_type:
-        title ||
-        existingBooking?.appointment_type ||
-        "Appointment",
+    service_key: isWebsitePhoneAppointment
+  ? "existing_client"
+  : existingBooking?.service_key || "",
+
+appointment_type: isWebsitePhoneAppointment
+  ? "Phone Appointment"
+  : title ||
+    existingBooking?.appointment_type ||
+    "Appointment",
+
+meeting_method: isWebsitePhoneAppointment
+  ? "Phone"
+  : existingBooking?.meeting_method || "",
 
       location,
       calendar_description: description,
