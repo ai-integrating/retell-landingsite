@@ -233,6 +233,7 @@ module.exports = async (req, res) => {
     const normalizedTitle = normalizeText(title);
 
 const isWebsitePhoneAppointment =
+  normalizedTitle.includes("website contact follow-up") ||
   normalizedTitle.includes("turning 65") ||
   normalizedTitle.includes("welcome to medicare");
 
