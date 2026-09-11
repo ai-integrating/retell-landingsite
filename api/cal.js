@@ -586,7 +586,10 @@ let starts = Object.values(slotsByDate)
   .flat()
   .map((s) => s.start)
   .filter(Boolean);
-
+// Remove duplicate slots, sort chronologically, and keep the
+// tool response small enough for the voice agent.
+starts = [...new Set(starts)]
+  .sort((a, b) => new Date(a) - new Date(b));
 // If the caller requested a weekday, only return slots
 // that actually fall on that weekday.
 const cleanRequestedWeekday = requestedWeekday;
@@ -603,6 +606,7 @@ if (cleanRequestedWeekday in WEEKDAYS) {
     return weekdayName === cleanRequestedWeekday;
   });
 }
+starts = starts.slice(0, 12);
 if (starts.length === 0) {
   return json(res, 200, {
     ok: false,
