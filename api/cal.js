@@ -531,6 +531,35 @@ async function saveBookingForConfirmation(ctx, calResponse) {
 
   return bookingRecord;
 }
+async function markOriginalBookingRescheduled(
+  originalBookingUid,
+  replacementBookingUid
+) {
+  if (!originalBookingUid || !replacementBookingUid) {
+    return false;
+  }
+
+  const originalKey = `booking:${originalBookingUid}`;
+  const originalBooking = await kv.get(originalKey);
+
+  if (!originalBooking) {
+    console.warn("ORIGINAL BOOKING NOT FOUND", {
+      originalBookingUid,
+    });
+    return false;
+  }
+
+  await kv.set(originalKey, {
+    ...originalBooking,
+    confirmation_status: "rescheduled",
+    needs_manual_cancellation: true,
+    replacement_booking_uid: replacementBookingUid,
+    updated_at: new Date().toISOString(),
+  });
+
+  return true;
+}
+
 // -------------------- CORE ACTIONS --------------------
 async function handleAvailability(req, res, body) {
   const ctx = await resolveCalContext(req, body);
@@ -635,6 +664,10 @@ async function handleBook(req, res, body) {
   if (ctx.error) return json(res, 400, { error: ctx.error });
 
   const args = body.args || body;
+  const originalBookingUid = asString(
+  args.original_booking_uid ||
+  args.originalBookingUid
+);
   const rawStart = asString(args.start || args.slot || args.selected_start);
 
   if (!rawStart) {
@@ -685,11 +718,23 @@ async function handleBook(req, res, body) {
         Authorization: `Bearer ${ctx.accessToken}`
       }
     });
-const savedBooking = await saveBookingForConfirmation(ctx, resp.data);
+const savedBooking = await saveBookingForConfirmation(
+  ctx,
+  resp.data
+);
+
+const originalBookingMarked =
+  await markOriginalBookingRescheduled(
+    originalBookingUid,
+    savedBooking?.booking_uid
+  );
+
 return json(res, 200, {
   ok: true,
   booking: resp.data,
-  confirmation_record_saved: !!savedBooking
+  confirmation_record_saved: !!savedBooking,
+  original_booking_marked_rescheduled:
+    originalBookingMarked,
 });
   } catch (err) {
     const status = err?.response?.status || null;
@@ -705,15 +750,25 @@ return json(res, 200, {
             Authorization: `Bearer ${refreshed.access_token}`
           }
         });
-const savedBooking = await saveBookingForConfirmation(ctx, retryResp.data);
-        
-               return json(res, 200, {
-          ok: true,
-          booking: retryResp.data,
-          token_refreshed: true,
-          confirmation_record_saved: !!savedBooking
-      
-        });
+const savedBooking = await saveBookingForConfirmation(
+  ctx,
+  retryResp.data
+);
+
+const originalBookingMarked =
+  await markOriginalBookingRescheduled(
+    originalBookingUid,
+    savedBooking?.booking_uid
+  );
+
+return json(res, 200, {
+  ok: true,
+  booking: retryResp.data,
+  token_refreshed: true,
+  confirmation_record_saved: !!savedBooking,
+  original_booking_marked_rescheduled:
+    originalBookingMarked,
+});
       } catch (retryErr) {
         return json(res, 500, {
           error: "Booking failed after token refresh",
