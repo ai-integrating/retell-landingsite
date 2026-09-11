@@ -74,6 +74,28 @@ function extractPhone(...values) {
 
   return "";
 }
+function extractLabeledName(description = "") {
+  const match = asString(description).match(
+    /^Name:\s*(.+)$/im
+  );
+
+  return match ? match[1].trim() : "";
+}
+
+function extractEmail(...values) {
+  for (const value of values) {
+    const match = asString(value).match(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+    );
+
+    if (match) {
+      return match[0].toLowerCase();
+    }
+  }
+
+  return "";
+}
+
 
 function extractName(attendeeName, title) {
   const cleanTitle = asString(title);
@@ -253,18 +275,22 @@ const isWebsitePhoneAppointment =
         error: "Invalid appointment start",
       });
     }
+const customerName =
+  extractLabeledName(description) ||
+  extractName(attendeeName, title);
 
-    const customerName = extractName(
-      attendeeName,
-      title
-    );
+const customerEmail = extractEmail(
+  body.email,
+  attendeeEmail,
+  description
+);
 
-    const customerPhone = extractPhone(
-      body.phone,
-      description,
-      location,
-      title
-    );
+const customerPhone = extractPhone(
+  body.phone,
+  description,
+  location,
+  title
+);
 
     const appointmentDateKey = getDateKey(
       startDate,
@@ -293,7 +319,7 @@ const isWebsitePhoneAppointment =
         dateIndexKey,
         appointmentStart,
         customerName,
-        customerEmail: attendeeEmail,
+        customerEmail,
       });
 
       if (match) {
@@ -357,10 +383,10 @@ const isWebsitePhoneAppointment =
         existingBooking?.customer_phone ||
         "",
 
-      customer_email:
-        attendeeEmail ||
-        existingBooking?.customer_email ||
-        "",
+customer_email:
+  customerEmail ||
+  existingBooking?.customer_email ||
+  "",
 
       appointment_start: appointmentStart,
       appointment_end: appointmentEnd,
