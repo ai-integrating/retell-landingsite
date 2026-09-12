@@ -126,7 +126,97 @@ function extractName(attendeeName, title) {
 
   return firstTitleSection || cleanTitle;
 }
+function parseManualCalendarTitle(title = "") {
+  const parts = asString(title)
+    .split("/")
+    .map((part) => part.trim());
 
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const name = parts[0];
+  const phone = normalizePhoneNumber(parts[1]);
+  const locationKey = parts
+    .slice(2)
+    .join("/")
+    .trim()
+    .toUpperCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  const locationMappings = {
+    NB: {
+      serviceKey: "existing_client_new_bedford",
+      appointmentType: "New Bedford In-Person Appointment",
+      meetingMethod: "In Person",
+      appointmentLocation: "New Bedford",
+    },
+
+    EPSC: {
+      serviceKey: "existing_client_east_providence",
+      appointmentType: "East Providence In-Person Appointment",
+      meetingMethod: "In Person",
+      appointmentLocation: "East Providence",
+    },
+
+    ZOOM: {
+      serviceKey: "existing_client_video",
+      appointmentType: "Video Appointment",
+      meetingMethod: "Video",
+      appointmentLocation: "Zoom",
+    },
+
+    VIDEO: {
+      serviceKey: "existing_client_video",
+      appointmentType: "Video Appointment",
+      meetingMethod: "Video",
+      appointmentLocation: "Zoom",
+    },
+
+    PHONE: {
+      serviceKey: "existing_client",
+      appointmentType: "Phone Appointment",
+      meetingMethod: "Phone",
+      appointmentLocation: "Phone",
+    },
+
+    "IN HOME": {
+      serviceKey: "existing_client",
+      appointmentType: "In-Home Appointment",
+      meetingMethod: "In Person",
+      appointmentLocation: "Client's Home",
+    },
+
+    HOME: {
+      serviceKey: "existing_client",
+      appointmentType: "In-Home Appointment",
+      meetingMethod: "In Person",
+      appointmentLocation: "Client's Home",
+    },
+  };
+
+  const mapping = locationMappings[locationKey];
+
+  if (!name || !phone || !mapping) {
+    return {
+      detected: true,
+      valid: false,
+      name,
+      phone,
+      locationKey,
+    };
+  }
+
+  return {
+    detected: true,
+    valid: true,
+    name,
+    phone,
+    locationKey,
+    ...mapping,
+  };
+}
 function getDateKey(date, timeZone = "America/New_York") {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -253,7 +343,13 @@ module.exports = async (req, res) => {
       asString(body.time_zone) || "America/New_York";
 
     const normalizedTitle = normalizeText(title);
+const manualCalendarEvent =
+  parseManualCalendarTitle(title);
 
+const validManualCalendarEvent =
+  manualCalendarEvent?.valid
+    ? manualCalendarEvent
+    : null;
 const isWebsitePhoneAppointment =
   normalizedTitle.includes("website contact follow-up") ||
   normalizedTitle.includes("turning 65") ||
@@ -276,21 +372,24 @@ const isWebsitePhoneAppointment =
       });
     }
 const customerName =
+  validManualCalendarEvent?.name ||
   extractLabeledName(description) ||
   extractName(attendeeName, title);
-
+    
 const customerEmail = extractEmail(
   body.email,
   attendeeEmail,
   description
 );
 
-const customerPhone = extractPhone(
-  body.phone,
-  description,
-  location,
-  title
-);
+const customerPhone =
+  validManualCalendarEvent?.phone ||
+  extractPhone(
+    body.phone,
+    description,
+    location,
+    title
+  );
 
     const appointmentDateKey = getDateKey(
       startDate,
@@ -390,21 +489,28 @@ customer_email:
 
       appointment_start: appointmentStart,
       appointment_end: appointmentEnd,
-    service_key: isWebsitePhoneAppointment
+ service_key: isWebsitePhoneAppointment
   ? "existing_client"
-  : existingBooking?.service_key || "",
+  : validManualCalendarEvent?.serviceKey ||
+    existingBooking?.service_key ||
+    "",
 
 appointment_type: isWebsitePhoneAppointment
   ? "Phone Appointment"
-  : title ||
+  : validManualCalendarEvent?.appointmentType ||
     existingBooking?.appointment_type ||
+    title ||
     "Appointment",
 
 meeting_method: isWebsitePhoneAppointment
   ? "Phone"
-  : existingBooking?.meeting_method || "",
+  : validManualCalendarEvent?.meetingMethod ||
+    existingBooking?.meeting_method ||
+    "",
 
-      location,
+location:
+  validManualCalendarEvent?.appointmentLocation ||
+  location,
       calendar_description: description,
       calendar_status: status || "confirmed",
 
@@ -445,6 +551,20 @@ meeting_method: isWebsitePhoneAppointment
       booking_uid: bookingUid,
       matched_existing_cal_booking:
         !String(bookingUid).startsWith("gcal:"),
+      manual_title_detected:
+  Boolean(manualCalendarEvent?.detected),
+
+manual_title_valid:
+  Boolean(validManualCalendarEvent),
+
+manual_location_key:
+  manualCalendarEvent?.locationKey || "",
+
+manual_title_needs_review:
+  Boolean(
+    manualCalendarEvent?.detected &&
+    !manualCalendarEvent?.valid
+  ),
       phone_found: Boolean(
         bookingRecord.customer_phone
       ),
