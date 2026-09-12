@@ -251,8 +251,9 @@ module.exports = async (req, res) => {
       first_line: firstLine,
 
       // Standard context variables
-      client_name: asString(client_name, ""),
-      business_name: asString(business_name, ""),
+client_name: asString(client_name, ""),
+client_phone: to_number,
+business_name: asString(business_name, ""),
       agent_name: asString(agent_name, ""),
       reason_for_call: asString(reason_for_call, ""),
       appointment_type: asString(appointment_type, ""),
