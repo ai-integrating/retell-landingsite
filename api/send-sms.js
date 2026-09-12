@@ -41,11 +41,12 @@ function createMessageBody({
   link,
 }) {
   switch (messageType) {
-    case "scope_of_appointment":
-      return (
-        `Here is the Scope of Appointment from ${businessName}: ` +
-        `${link} Reply STOP to opt out.`
-      );
+case "scope_of_appointment":
+  return (
+    `Here is your Needs Assessment from ${businessName}: ${link} ` +
+    `It is not mandatory to complete it right now, but completing it before your appointment helps the meeting move faster and provides the pertinent information Len will request during the meeting. ` +
+    `Open the link, tap PlanEnroll, then tap Get Synced, and follow the prompts. Reply STOP to opt out.`
+  );
 case "video_meeting_link":
   return (
     `Here is the link for your video appointment with ${businessName}: ` +
@@ -94,18 +95,22 @@ function createEmailContent({
   link,
 }) {
   switch (messageType) {
-    case "scope_of_appointment":
-      return {
-        subject: `Scope of Appointment from ${businessName}`,
-        text:
-          `Here is your Scope of Appointment from ${businessName}:\n\n` +
-          `${link}\n\n` +
-          `Please complete it before your appointment.`,
-        html:
-          `<p>Here is your Scope of Appointment from ${businessName}.</p>` +
-          `<p><a href="${link}">Open Scope of Appointment</a></p>` +
-          `<p>Please complete it before your appointment.</p>`,
-      };
+case "scope_of_appointment":
+  return {
+    subject: `Needs Assessment for Your Appointment with Len Walker`,
+
+    text:
+      `Here is your Needs Assessment from ${businessName}.\n\n` +
+      `It is not mandatory to complete it right now. However, completing it before your appointment will help the meeting move faster and provide the pertinent information Len will be requesting during the meeting.\n\n` +
+      `Open the link below, tap PlanEnroll, then tap Get Synced, and follow the prompts:\n\n` +
+      `${link}`,
+
+    html:
+      `<p>Here is your Needs Assessment from ${businessName}.</p>` +
+      `<p>It is not mandatory to complete it right now. However, completing it before your appointment will help the meeting move faster and provide the pertinent information Len will be requesting during the meeting.</p>` +
+      `<p><a href="${link}">Open Needs Assessment</a></p>` +
+      `<p>After opening the link, tap <strong>PlanEnroll</strong>, then tap <strong>Get Synced</strong>, and follow the prompts.</p>`,
+  };
 case "video_meeting_link":
   return {
     subject: `Your video appointment link from ${businessName}`,
@@ -329,12 +334,19 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const businessName =
-      clean(
-        await kv.get(
-          `agent:${agentId}:business_name`
-        )
-      ) || "the business";
+  const confirmationConfig =
+  (await kv.get(
+    `client:${clientId}:confirmation_config`
+  )) || {};
+
+const businessName =
+  clean(
+    await kv.get(
+      `agent:${agentId}:business_name`
+    )
+  ) ||
+  clean(confirmationConfig.business_name) ||
+  "the business";
 
     // Allow an explicit link from the tool, otherwise use KV.
     const link =
