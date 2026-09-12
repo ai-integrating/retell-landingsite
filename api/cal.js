@@ -118,9 +118,18 @@ function normalizeServiceKey(value = "") {
 }
 // East Providence display/service names map to Len's existing Cal.com slugs.
 const SERVICE_KEY_ALIASES = {
-  new_prospect_east_providence: "new_prospect_providence",
-  existing_client_east_providence: "existing_client_providence",
-  new_couple_east_providence: "new_couple_providence"
+  existing_client: "existing_client_phone",
+  new_prospect: "new_prospect_phone",
+  new_couple: "new_couple_phone",
+
+  new_prospect_east_providence:
+    "new_prospect_providence",
+
+  existing_client_east_providence:
+    "existing_client_providence",
+
+  new_couple_east_providence:
+    "new_couple_providence"
 };
 function tokenKeyForAgent(agentId) {
   const a = asString(agentId);
