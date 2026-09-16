@@ -370,9 +370,8 @@ const isWebsitePhoneAppointment =
         ok: false,
         error: "Invalid appointment start",
       });
-    }
 const customerName =
-  validManualCalendarEvent?.name ||
+  manualCalendarEvent?.name ||
   extractLabeledName(description) ||
   extractName(attendeeName, title);
     
@@ -383,7 +382,7 @@ const customerEmail = extractEmail(
 );
 
 const customerPhone =
-  validManualCalendarEvent?.phone ||
+  manualCalendarEvent?.phone ||
   extractPhone(
     body.phone,
     description,
