@@ -137,13 +137,11 @@ function parseManualCalendarTitle(title = "") {
 
   const name = parts[0];
   const phone = normalizePhoneNumber(parts[1]);
-  const locationKey = parts
-    .slice(2)
-    .join("/")
-    .trim()
-    .toUpperCase()
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ");
+  const locationKey = parts[2]
+  .trim()
+  .toUpperCase()
+  .replace(/[_-]+/g, " ")
+  .replace(/\s+/g, " ");
 
   const locationMappings = {
     NB: {
