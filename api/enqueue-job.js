@@ -790,19 +790,53 @@ module.exports = async function enqueueJob(req, res) {
       existingEnqueue?.attempt_count || 0
     );
 
-    const roleKey = normalizeRole(
-      pick(
-        body,
-        ["agent_role", "role", "a_role"],
-        "receptionist"
-      )
-    );
+ const explicitRole = pick(
+  body,
+  ["agent_role", "role", "a_role"],
+  ""
+);
 
+const agentSelection = pick(
+  body,
+  [
+    "purchased_package",
+    "package",
+    "subscription",
+    "subscription_plan",
+    "agent_name",
+    "a_name",
+    "voice_name",
+  ],
+  ""
+);
+
+const agentName = String(
+  pick(
+    body,
+    ["agent_name", "a_name", "voice_name"],
+    ""
+  )
+)
+  .trim()
+  .toLowerCase();
+
+const roleByAgentName = {
+  ava: "scheduler",
+  peter: "estimator",
+  marcus: "receptionist",
+};
+
+const roleKey = normalizeRole(
+  explicitRole ||
+  roleByAgentName[agentName] ||
+  agentSelection ||
+  "receptionist"
+);
     const cleanPayload = buildCleanPayload(
-      body,
-      submissionId,
-      roleKey
-    );
+  body,
+  submissionId,
+  roleKey
+);
 
     // Record the forwarding attempt for observability.
     await kv.set(
