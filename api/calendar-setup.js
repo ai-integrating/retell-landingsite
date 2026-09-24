@@ -1,0 +1,267 @@
+const { kv } = require("@vercel/kv");
+
+const ALLOWED_ORIGINS = new Set([
+  "https://www.aiintegrating.com",
+  "https://aiintegrating.com"
+]);
+
+function getRequestOrigin(req) {
+  return String(req.headers.origin || "").trim();
+}
+
+function setCorsHeaders(req, res) {
+  const origin = getRequestOrigin(req);
+
+  if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+function send(res, status, body) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.status(status).json(body);
+}
+
+async function readBody(req) {
+  if (req.body && typeof req.body === "object") {
+    return req.body;
+  }
+
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
+  }
+
+  return await new Promise((resolve) => {
+    let data = "";
+
+    req.on("data", (chunk) => {
+      data += chunk;
+    });
+
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+function requestBaseUrl(req) {
+  const proto = String(
+    req.headers["x-forwarded-proto"] || "https"
+  )
+    .split(",")[0]
+    .trim();
+
+  const host = String(
+    req.headers["x-forwarded-host"] || req.headers.host || ""
+  )
+    .split(",")[0]
+    .trim();
+
+  return `${proto}://${host}`;
+}
+
+function isAllowedOrigin(req) {
+  const origin = getRequestOrigin(req);
+
+  if (!origin) {
+    return true;
+  }
+
+  try {
+    const normalizedOrigin = new URL(origin).origin;
+
+    return (
+      normalizedOrigin === new URL(requestBaseUrl(req)).origin ||
+      ALLOWED_ORIGINS.has(normalizedOrigin)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function checkRateLimit(submissionId, req) {
+  const ip = String(
+    req.headers["x-forwarded-for"] || "unknown"
+  )
+    .split(",")[0]
+    .trim();
+
+  const minute = Math.floor(Date.now() / 60000);
+  const key = `cal:setup:rate:${submissionId}:${ip}:${minute}`;
+
+  const count = await kv.incr(key);
+
+  if (count === 1) {
+    await kv.expire(key, 90);
+  }
+
+  return count <= 15;
+}
+
+module.exports = async (req, res) => {
+  setCorsHeaders(req, res);
+
+  if (req.method === "OPTIONS") {
+    if (!isAllowedOrigin(req)) {
+      return res.status(403).end();
+    }
+
+    return res.status(204).end();
+  }
+
+  if (req.method !== "POST") {
+    return send(res, 405, {
+      ok: false,
+      error: "Method not allowed"
+    });
+  }
+
+  if (!isAllowedOrigin(req)) {
+    return send(res, 403, {
+      ok: false,
+      error: "Invalid request origin"
+    });
+  }
+
+  const body = await readBody(req);
+  const submissionId = String(body.submission_id || "").trim();
+
+  if (!/^\d{10,25}$/.test(submissionId)) {
+    return send(res, 400, {
+      ok: false,
+      error: "Invalid submission"
+    });
+  }
+
+  if (!(await checkRateLimit(submissionId, req))) {
+    return send(res, 429, {
+      ok: false,
+      error: "Too many requests. Please wait a minute."
+    });
+  }
+
+  const record = await kv.get(`prov:${submissionId}`);
+
+  if (!record || typeof record !== "object") {
+    return send(res, 202, {
+      ok: true,
+      ready: false,
+      status: "waiting_for_provisioning",
+      message: "We are still locating your scheduler setup."
+    });
+  }
+
+  if (record.role !== "scheduler") {
+    return send(res, 403, {
+      ok: false,
+      error: "Calendar setup is not available for this package."
+    });
+  }
+
+  if (record.status === "failed") {
+    return send(res, 409, {
+      ok: false,
+      error:
+        "Your scheduler needs our attention before the calendar can be connected."
+    });
+  }
+
+  if (record.status !== "completed" || !record.agent_id) {
+    return send(res, 202, {
+      ok: true,
+      ready: false,
+      status: record.status || "provisioning",
+      message:
+        "Ava is still being prepared. This page will keep checking automatically."
+    });
+  }
+
+  const agentId = String(record.agent_id).trim();
+  const clientId = await kv.get(`agent:${agentId}:client`);
+
+  if (!clientId) {
+    return send(res, 202, {
+      ok: true,
+      ready: false,
+      status: "finishing_workspace",
+      message:
+        "Ava is ready. We are finishing the secure workspace connection."
+    });
+  }
+
+  const existingToken = await kv.get(
+    `cal:tokens:client:${clientId}`
+  );
+
+  if (existingToken?.access_token) {
+    return send(res, 200, {
+      ok: true,
+      ready: true,
+      connected: true
+    });
+  }
+
+  const setupSecret = String(
+    process.env.AI_INTEGRATING_SETUP_SECRET || ""
+  ).trim();
+
+  if (!setupSecret) {
+    return send(res, 503, {
+      ok: false,
+      error: "Calendar setup is temporarily unavailable."
+    });
+  }
+
+  const response = await fetch(
+    `${requestBaseUrl(
+      req
+    )}/api/cal-strengthened?action=create_oauth_link`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-setup-key": setupSecret
+      },
+      body: JSON.stringify({
+        agent_id: agentId
+      })
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data.authorizationUrl) {
+    console.error(
+      "CALENDAR SETUP LINK ERROR",
+      response.status,
+      data
+    );
+
+    return send(res, 502, {
+      ok: false,
+      error:
+        "We could not prepare the calendar connection yet."
+    });
+  }
+
+  return send(res, 200, {
+    ok: true,
+    ready: true,
+    connected: false,
+    authorizationUrl: data.authorizationUrl,
+    expiresInSeconds: data.expiresInSeconds || 600
+  });
+};
