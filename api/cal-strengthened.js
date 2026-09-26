@@ -14,7 +14,11 @@ const WEEKDAYS = {
   saturday: 6
 };
 const CAL_EVENT_TYPES_API_VERSION = "2024-06-14";
+const CAL_SCHEDULES_API_VERSION = "2024-06-11";
 const CAL_BOOKINGS_API_VERSION = "2026-02-25";
+const SCHEDULER_CONFIG_FEATURE_VERSION = 1;
+const DEFAULT_SCHEDULER_CONFIG_PAIR =
+  "lets-go-6659962517436476386:agent_67e9dc0ab56576c4b9d3264eaa";
 
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
@@ -22,7 +26,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug, X-Setup-Key"
+    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug, X-Setup-Key, X-Idempotency-Key"
   );
 }
 
@@ -269,6 +273,99 @@ function requireSetupKey(req) {
   return ok
     ? { ok: true }
     : { ok: false, status: 401, error: "Unauthorized setup request" };
+}
+
+function isSchedulerConfigPairAllowed(clientId, agentId) {
+  const configured = asString(process.env.SCHEDULER_CONFIG_ALLOWED_PAIRS);
+  const pairs = (configured || DEFAULT_SCHEDULER_CONFIG_PAIR)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return pairs.includes(`${clientId}:${agentId}`);
+}
+
+function isValidTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeAvailability(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw new Error("availability must contain between 1 and 50 time windows");
+  }
+
+  const canonicalDays = {
+    sunday: "Sunday",
+    monday: "Monday",
+    tuesday: "Tuesday",
+    wednesday: "Wednesday",
+    thursday: "Thursday",
+    friday: "Friday",
+    saturday: "Saturday"
+  };
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  const normalized = value.map((window, index) => {
+    const rawDays = Array.isArray(window?.days)
+      ? window.days
+      : window?.day
+        ? [window.day]
+        : [];
+    const days = [...new Set(rawDays.map((day) => canonicalDays[asString(day).toLowerCase()]))];
+    const startTime = asString(window?.startTime || window?.start_time);
+    const endTime = asString(window?.endTime || window?.end_time);
+
+    if (!days.length || days.some((day) => !day)) {
+      throw new Error(`availability[${index}] contains an invalid day`);
+    }
+    if (!timePattern.test(startTime) || !timePattern.test(endTime)) {
+      throw new Error(`availability[${index}] must use 24-hour HH:MM times`);
+    }
+    if (startTime >= endTime) {
+      throw new Error(`availability[${index}] startTime must be before endTime`);
+    }
+    return { days, startTime, endTime };
+  });
+
+  const byDay = {};
+  for (const window of normalized) {
+    for (const day of window.days) {
+      byDay[day] = byDay[day] || [];
+      byDay[day].push([window.startTime, window.endTime]);
+    }
+  }
+  for (const [day, windows] of Object.entries(byDay)) {
+    windows.sort((a, b) => a[0].localeCompare(b[0]));
+    for (let index = 1; index < windows.length; index += 1) {
+      if (windows[index][0] < windows[index - 1][1]) {
+        throw new Error(`${day} availability windows overlap`);
+      }
+    }
+  }
+  return normalized;
+}
+
+function integerSetting(value, name, minimum, maximum, fallback = 0) {
+  const number = value === undefined || value === null || value === ""
+    ? fallback
+    : Number(value);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) {
+    throw new Error(`${name} must be a whole number from ${minimum} to ${maximum}`);
+  }
+  return number;
+}
+
+function buildAppointmentLocations(meetingMethod, location) {
+  if (meetingMethod === "video") return undefined;
+  if (meetingMethod === "phone") return [{ type: "attendeePhone" }];
+  return [{ type: "address", address: location, public: true }];
+}
+
+function stableHash(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function resolveDateRange({
   requestedWeekday,
@@ -1132,6 +1229,443 @@ async function handleUpsertEventType(req, res, url, body) {
   });
 }
 
+async function resolveSchedulerConfigIdentity(req, res, url, args) {
+  const agentId = cleanAgentId(
+    url.searchParams.get("agent_id") ||
+      req.headers["x-agent-id"] ||
+      args.agent_id ||
+      args.agentId
+  );
+  const suppliedClientId = asString(
+    url.searchParams.get("client_id") || args.client_id || args.clientId
+  );
+  if (!agentId || !suppliedClientId) {
+    json(res, 400, { error: "Both client_id and agent_id are required" });
+    return null;
+  }
+
+  const mappedClientId = asString(await kv.get(`agent:${agentId}:client`));
+  if (!mappedClientId || mappedClientId !== suppliedClientId) {
+    json(res, 403, { error: "Client and Scheduler agent mapping does not match" });
+    return null;
+  }
+  if (!isSchedulerConfigPairAllowed(mappedClientId, agentId)) {
+    json(res, 403, { error: "Appointment-type configuration is not enabled for this client" });
+    return null;
+  }
+  return { clientId: mappedClientId, agentId };
+}
+
+async function handleManagedAppointmentTypes(req, res, url, body) {
+  const auth = requireSetupKey(req);
+  if (!auth.ok) return json(res, auth.status, { error: auth.error });
+
+  const args = body.args || body || {};
+  const identity = await resolveSchedulerConfigIdentity(req, res, url, args);
+  if (!identity) return;
+
+  const existingConfig = (await kv.get(`client:${identity.clientId}:cal`)) || {};
+  const appointmentTypes = Object.entries(existingConfig.serviceMap || {})
+    .filter(([, item]) => item?.managedBy === "ai-integrating-appointment-types")
+    .map(([serviceKey, item]) => ({ serviceKey, ...item }));
+
+  return json(res, 200, {
+    ok: true,
+    clientId: identity.clientId,
+    agentId: identity.agentId,
+    appointmentTypes
+  });
+}
+
+// Isolated portal configuration action. This does not replace or alter the
+// existing upsert_event_type action used by other workflows.
+async function handleUpsertAppointmentType(req, res, url, body) {
+  const auth = requireSetupKey(req);
+  if (!auth.ok) return json(res, auth.status, { error: auth.error });
+  if (req.method !== "POST") {
+    return json(res, 405, { error: "POST required" });
+  }
+
+  const args = body.args || body || {};
+  const identity = await resolveSchedulerConfigIdentity(req, res, url, args);
+  if (!identity) return;
+  const { clientId, agentId } = identity;
+
+  const serviceKey = normalizeServiceKey(args.service_key || args.serviceKey);
+  const title = asString(args.title);
+  const slug = normalizeSlug(args.slug || title);
+  const lengthInMinutes = Number(args.lengthInMinutes || args.duration);
+  const timeZone = asString(args.timeZone || args.time_zone);
+  const meetingMethod = asString(args.meetingMethod || args.meeting_method).toLowerCase();
+  const location = asString(args.location);
+  const idempotencyKey = asString(
+    req.headers["x-idempotency-key"] || args.idempotency_key || args.idempotencyKey
+  );
+
+  if (!serviceKey || !/^[a-z0-9_]+$/.test(serviceKey)) {
+    return json(res, 400, { error: "Invalid service_key" });
+  }
+  if (!title || title.length > 120) {
+    return json(res, 400, { error: "title is required and must be 120 characters or fewer" });
+  }
+  if (!slug || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    return json(res, 400, { error: "Invalid event type slug" });
+  }
+  if (!Number.isInteger(lengthInMinutes) || lengthInMinutes < 5 || lengthInMinutes > 720) {
+    return json(res, 400, { error: "duration must be a whole number from 5 to 720" });
+  }
+  if (!timeZone || !isValidTimeZone(timeZone)) {
+    return json(res, 400, { error: "A valid IANA timeZone is required" });
+  }
+  if (!["phone", "video", "in_person"].includes(meetingMethod)) {
+    return json(res, 400, { error: "meetingMethod must be phone, video, or in_person" });
+  }
+  if (meetingMethod === "in_person" && !location) {
+    return json(res, 400, { error: "location is required for in-person appointments" });
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey)) {
+    return json(res, 400, {
+      error: "An idempotency key containing 8 to 128 safe characters is required"
+    });
+  }
+
+  let availability;
+  let beforeEventBuffer;
+  let afterEventBuffer;
+  let minimumBookingNotice;
+  try {
+    availability = normalizeAvailability(args.availability);
+    beforeEventBuffer = integerSetting(
+      args.beforeEventBuffer ?? args.before_event_buffer,
+      "beforeEventBuffer",
+      0,
+      1440
+    );
+    afterEventBuffer = integerSetting(
+      args.afterEventBuffer ?? args.after_event_buffer,
+      "afterEventBuffer",
+      0,
+      1440
+    );
+    minimumBookingNotice = integerSetting(
+      args.minimumBookingNotice ?? args.minimum_booking_notice,
+      "minimumBookingNotice",
+      0,
+      525600
+    );
+  } catch (err) {
+    return json(res, 400, { error: err.message });
+  }
+
+  const normalizedRequest = {
+    clientId,
+    agentId,
+    serviceKey,
+    title,
+    slug,
+    lengthInMinutes,
+    timeZone,
+    meetingMethod,
+    location: meetingMethod === "in_person" ? location : "",
+    availability,
+    beforeEventBuffer,
+    afterEventBuffer,
+    minimumBookingNotice
+  };
+  const payloadHash = stableHash(normalizedRequest);
+  const operationKey = `scheduler:appointment-type-op:${clientId}:${idempotencyKey}`;
+  const existingOperation = await kv.get(operationKey);
+
+  const calKey = `client:${clientId}:cal`;
+  let existingConfig = (await kv.get(calKey)) || {};
+  let serviceMap = { ...(existingConfig.serviceMap || {}) };
+  let priorMapping = serviceMap[serviceKey] || {};
+
+  const finalizeOperation = async (remoteResult) => {
+    const currentConfig = (await kv.get(calKey)) || {};
+    const currentMap = { ...(currentConfig.serviceMap || {}) };
+    const previousVersion = Number(currentMap[serviceKey]?.version || 0);
+    const alreadyFinalized = currentMap[serviceKey]?.configurationHash === payloadHash;
+    const mapping = {
+      eventTypeId: Number(remoteResult.eventTypeId),
+      scheduleId: Number(remoteResult.scheduleId),
+      slug,
+      title,
+      lengthInMinutes,
+      timeZone,
+      meetingMethod,
+      location: meetingMethod === "in_person" ? location : "",
+      availability,
+      beforeEventBuffer,
+      afterEventBuffer,
+      minimumBookingNotice,
+      managedBy: "ai-integrating-appointment-types",
+      featureVersion: SCHEDULER_CONFIG_FEATURE_VERSION,
+      configurationHash: payloadHash,
+      version: alreadyFinalized ? previousVersion : previousVersion + 1,
+      updated_at: new Date().toISOString()
+    };
+    currentMap[serviceKey] = mapping;
+    await kv.set(calKey, {
+      ...currentConfig,
+      serviceMap: currentMap,
+      eventTypeSlugs: {
+        ...(currentConfig.eventTypeSlugs || {}),
+        [serviceKey]: slug
+      },
+      eventTypeIds: {
+        ...(currentConfig.eventTypeIds || {}),
+        [serviceKey]: mapping.eventTypeId
+      },
+      updated_at: new Date().toISOString()
+    });
+    const response = {
+      ok: true,
+      operation: remoteResult.operation,
+      serviceKey,
+      appointmentType: mapping
+    };
+    await kv.set(operationKey, {
+      payloadHash,
+      status: "completed",
+      response,
+      completed_at: new Date().toISOString()
+    });
+    return response;
+  };
+
+  if (existingOperation) {
+    if (existingOperation.payloadHash !== payloadHash) {
+      return json(res, 409, { error: "Idempotency key was already used for different settings" });
+    }
+    if (existingOperation.status === "completed") {
+      return json(res, 200, existingOperation.response);
+    }
+    if (existingOperation.status === "remote_completed" && existingOperation.remoteResult) {
+      try {
+        return json(res, 200, await finalizeOperation(existingOperation.remoteResult));
+      } catch (err) {
+        return json(res, 503, { error: "Remote changes succeeded but local finalization must be retried" });
+      }
+    }
+    if (existingOperation.status === "ambiguous") {
+      return json(res, 409, {
+        error: "A prior Cal.com request has an ambiguous result and requires manual review",
+        operation: existingOperation
+      });
+    }
+    return json(res, 409, { error: "This configuration request is already processing" });
+  }
+
+  const lockResult = await kv.set(
+    operationKey,
+    { payloadHash, status: "processing", started_at: new Date().toISOString() },
+    { nx: true }
+  );
+  if (!lockResult) {
+    return json(res, 409, { error: "This configuration request is already processing" });
+  }
+
+  const isUpdate = Boolean(priorMapping.eventTypeId || priorMapping.scheduleId);
+  const expectedVersionRaw = args.expected_version ?? args.expectedVersion;
+  if (isUpdate) {
+    if (
+      priorMapping.managedBy !== "ai-integrating-appointment-types" ||
+      Number(priorMapping.featureVersion) !== SCHEDULER_CONFIG_FEATURE_VERSION ||
+      !Number.isInteger(Number(priorMapping.eventTypeId)) ||
+      !Number.isInteger(Number(priorMapping.scheduleId))
+    ) {
+      await kv.set(operationKey, { payloadHash, status: "rejected", reason: "unowned_resource" });
+      return json(res, 409, { error: "Existing resources are not owned by this appointment-type feature" });
+    }
+    if (expectedVersionRaw === undefined || Number(expectedVersionRaw) !== Number(priorMapping.version)) {
+      await kv.set(operationKey, { payloadHash, status: "rejected", reason: "version_mismatch" });
+      return json(res, 409, {
+        error: "Appointment type version changed; refresh before saving",
+        currentVersion: priorMapping.version
+      });
+    }
+  }
+
+  let accessToken;
+  try {
+    accessToken = await getValidAccessToken(clientId, agentId);
+  } catch (err) {
+    await kv.set(operationKey, { payloadHash, status: "failed", reason: "oauth" });
+    return json(res, 401, { error: "Cal.com authorization is missing or expired", detail: err.message });
+  }
+
+  let rows;
+  try {
+    rows = await fetchAllEventTypes(accessToken);
+  } catch (err) {
+    await kv.set(operationKey, { payloadHash, status: "failed", reason: "event_type_read" });
+    return json(res, err?.response?.status || 502, {
+      error: "Unable to read Cal.com event types",
+      detail: err?.response?.data || err.message
+    });
+  }
+
+  const targetEventTypeId = Number(priorMapping.eventTypeId);
+  const target = isUpdate
+    ? rows.find((eventType) => Number(eventType?.id) === targetEventTypeId)
+    : null;
+  if (isUpdate && !target) {
+    await kv.set(operationKey, { payloadHash, status: "rejected", reason: "managed_event_missing" });
+    return json(res, 409, { error: "The managed Cal.com event type no longer exists" });
+  }
+  const slugOwner = rows.find((eventType) => normalizeSlug(eventType?.slug) === slug);
+  if (slugOwner && (!target || Number(slugOwner.id) !== Number(target.id))) {
+    await kv.set(operationKey, { payloadHash, status: "rejected", reason: "slug_conflict" });
+    return json(res, 409, {
+      error: "Slug already belongs to another Cal.com event type",
+      slug
+    });
+  }
+
+  const scheduleHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    "cal-api-version": CAL_SCHEDULES_API_VERSION
+  };
+  const eventTypeHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    "cal-api-version": CAL_EVENT_TYPES_API_VERSION
+  };
+  const schedulePayload = {
+    name: `AI Integrating - ${serviceKey}`,
+    timeZone,
+    isDefault: false,
+    availability
+  };
+
+  let scheduleId = Number(priorMapping.scheduleId);
+  try {
+    if (isUpdate) {
+      await axios.patch(
+        `https://api.cal.com/v2/schedules/${encodeURIComponent(scheduleId)}`,
+        schedulePayload,
+        { headers: scheduleHeaders }
+      );
+    } else {
+      const scheduleResponse = await axios.post(
+        "https://api.cal.com/v2/schedules",
+        schedulePayload,
+        { headers: scheduleHeaders }
+      );
+      scheduleId = Number(scheduleResponse.data?.data?.id || scheduleResponse.data?.id);
+      if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+        throw new Error("Cal.com response did not include a schedule ID");
+      }
+      await kv.set(operationKey, {
+        payloadHash,
+        status: "schedule_created",
+        scheduleId,
+        updated_at: new Date().toISOString()
+      });
+    }
+  } catch (err) {
+    const ambiguous = !err?.response;
+    await kv.set(operationKey, {
+      payloadHash,
+      status: ambiguous ? "ambiguous" : "failed",
+      stage: "schedule",
+      scheduleId: Number.isInteger(scheduleId) ? scheduleId : null,
+      detail: err?.response?.data || err.message,
+      updated_at: new Date().toISOString()
+    });
+    return json(res, ambiguous ? 409 : err?.response?.status || 502, {
+      error: ambiguous
+        ? "Schedule result is ambiguous and requires manual review"
+        : "Cal.com rejected the schedule change",
+      detail: err?.response?.data || err.message
+    });
+  }
+
+  const eventTypePayload = {
+    title,
+    slug,
+    lengthInMinutes,
+    scheduleId,
+    beforeEventBuffer,
+    afterEventBuffer,
+    minimumBookingNotice
+  };
+  const locations = buildAppointmentLocations(meetingMethod, location);
+  if (locations) eventTypePayload.locations = locations;
+
+  let savedEventType;
+  try {
+    if (isUpdate) {
+      const response = await axios.patch(
+        `https://api.cal.com/v2/event-types/${encodeURIComponent(targetEventTypeId)}`,
+        eventTypePayload,
+        { headers: eventTypeHeaders }
+      );
+      savedEventType = response.data?.data || response.data;
+    } else {
+      const response = await axios.post(
+        "https://api.cal.com/v2/event-types",
+        eventTypePayload,
+        { headers: eventTypeHeaders }
+      );
+      savedEventType = response.data?.data || response.data;
+    }
+  } catch (err) {
+    const ambiguous = !err?.response;
+    await kv.set(operationKey, {
+      payloadHash,
+      status: ambiguous ? "ambiguous" : "failed",
+      stage: "event_type",
+      scheduleId,
+      orphanedSchedulePossible: !isUpdate,
+      detail: err?.response?.data || err.message,
+      updated_at: new Date().toISOString()
+    });
+    return json(res, ambiguous ? 409 : err?.response?.status || 502, {
+      error: ambiguous
+        ? "Event type result is ambiguous and requires manual review"
+        : "Cal.com rejected the event type change",
+      detail: err?.response?.data || err.message,
+      scheduleId,
+      cleanupRequired: !isUpdate
+    });
+  }
+
+  const eventTypeId = Number(savedEventType?.id || targetEventTypeId);
+  if (!Number.isInteger(eventTypeId) || eventTypeId <= 0) {
+    await kv.set(operationKey, {
+      payloadHash,
+      status: "ambiguous",
+      stage: "event_type_response",
+      scheduleId
+    });
+    return json(res, 409, { error: "Cal.com response did not include an event type ID" });
+  }
+
+  const remoteResult = {
+    operation: isUpdate ? "updated" : "created",
+    eventTypeId,
+    scheduleId
+  };
+  await kv.set(operationKey, {
+    payloadHash,
+    status: "remote_completed",
+    remoteResult,
+    updated_at: new Date().toISOString()
+  });
+
+  try {
+    return json(res, 200, await finalizeOperation(remoteResult));
+  } catch (err) {
+    return json(res, 503, {
+      error: "Cal.com changes succeeded but local finalization must be retried",
+      detail: err.message
+    });
+  }
+}
+
 async function handleSelectEventType(req, res, url, body) {
   const args = body.args || body || {};
   const agentId = cleanAgentId(
@@ -1221,6 +1755,14 @@ module.exports = async (req, res) => {
 
   if (action === "upsert_event_type") {
     return await handleUpsertEventType(req, res, url, body);
+  }
+
+  if (action === "managed_appointment_types") {
+    return await handleManagedAppointmentTypes(req, res, url, body);
+  }
+
+  if (action === "upsert_appointment_type") {
+    return await handleUpsertAppointmentType(req, res, url, body);
   }
 
   if (action === "select_event_type") {
