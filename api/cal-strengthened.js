@@ -1325,6 +1325,8 @@ async function handleAgentAppointmentTypes(req, res, url, body) {
   const agentId = cleanAgentId(
     url.searchParams.get("agent_id") ||
       req.headers["x-agent-id"] ||
+      body.agent_id ||
+      body?.call?.agent_id ||
       args.agent_id ||
       args.agentId
   );
