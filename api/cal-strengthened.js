@@ -19,6 +19,7 @@ const CAL_BOOKINGS_API_VERSION = "2026-02-25";
 const SCHEDULER_CONFIG_FEATURE_VERSION = 1;
 const DEFAULT_SCHEDULER_CONFIG_PAIR =
   "lets-go-6659962517436476386:agent_67e9dc0ab56576c4b9d3264eaa";
+const DEFAULT_AGENT_TOOL_PAIR = DEFAULT_SCHEDULER_CONFIG_PAIR;
 
 // -------------------- CORS & RESPONSES --------------------
 function setCors(res) {
@@ -26,7 +27,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug, X-Setup-Key, X-Idempotency-Key"
+    "Content-Type, Authorization, X-Agent-Id, X-Cal-Username, X-Cal-Slug, X-Setup-Key, X-Agent-Tool-Key, X-Idempotency-Key"
   );
 }
 
@@ -275,6 +276,20 @@ function requireSetupKey(req) {
     : { ok: false, status: 401, error: "Unauthorized setup request" };
 }
 
+function requireAgentToolKey(req) {
+  const expected = asString(process.env.AI_INTEGRATING_AGENT_TOOL_SECRET);
+  const supplied = asString(req.headers["x-agent-tool-key"]);
+  if (!expected) {
+    return { ok: false, status: 503, error: "Agent appointment-type tool is not configured" };
+  }
+  const a = Buffer.from(expected);
+  const b = Buffer.from(supplied);
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+  return ok
+    ? { ok: true }
+    : { ok: false, status: 401, error: "Unauthorized agent tool request" };
+}
+
 function isSchedulerConfigPairAllowed(clientId, agentId) {
   const configured = asString(process.env.SCHEDULER_CONFIG_ALLOWED_PAIRS);
   const pairs = (configured || DEFAULT_SCHEDULER_CONFIG_PAIR)
@@ -282,6 +297,29 @@ function isSchedulerConfigPairAllowed(clientId, agentId) {
     .map((value) => value.trim())
     .filter(Boolean);
   return pairs.includes(`${clientId}:${agentId}`);
+}
+
+function isAgentToolPairAllowed(clientId, agentId) {
+  const configured = asString(process.env.AGENT_APPOINTMENT_TYPES_ALLOWED_PAIRS);
+  const pairs = (configured || DEFAULT_AGENT_TOOL_PAIR)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return pairs.includes(`${clientId}:${agentId}`);
+}
+
+function normalizeAgentUseDescription(value) {
+  const description = asString(value);
+  if (description.length < 10 || description.length > 300) {
+    throw new Error("agentUseDescription must be between 10 and 300 characters");
+  }
+  if (/[<>]/.test(description)) {
+    throw new Error("agentUseDescription must be plain text without markup delimiters");
+  }
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(description)) {
+    throw new Error("agentUseDescription contains unsupported control characters");
+  }
+  return description;
 }
 
 function isValidTimeZone(timeZone) {
@@ -1277,6 +1315,63 @@ async function handleManagedAppointmentTypes(req, res, url, body) {
   });
 }
 
+// Read-only catalog for the Scheduler agent. This uses a separate credential
+// from the portal setup API and derives the client solely from the agent map.
+async function handleAgentAppointmentTypes(req, res, url, body) {
+  const auth = requireAgentToolKey(req);
+  if (!auth.ok) return json(res, auth.status, { error: auth.error });
+
+  const args = body.args || body || {};
+  const agentId = cleanAgentId(
+    url.searchParams.get("agent_id") ||
+      req.headers["x-agent-id"] ||
+      args.agent_id ||
+      args.agentId
+  );
+  if (!agentId) return json(res, 400, { error: "Missing agent_id" });
+
+  const clientId = asString(await kv.get(`agent:${agentId}:client`));
+  if (!clientId) return json(res, 403, { error: "Scheduler agent is not mapped to a client" });
+  if (!isAgentToolPairAllowed(clientId, agentId)) {
+    return json(res, 403, { error: "Agent appointment types are not enabled for this mapping" });
+  }
+
+  const existingConfig = (await kv.get(`client:${clientId}:cal`)) || {};
+  let needsConfigurationCount = 0;
+  const appointmentTypes = [];
+
+  for (const [serviceKey, item] of Object.entries(existingConfig.serviceMap || {})) {
+    if (item?.managedBy !== "ai-integrating-appointment-types") continue;
+    let agentUseDescription;
+    try {
+      agentUseDescription = normalizeAgentUseDescription(item.agentUseDescription);
+    } catch {
+      needsConfigurationCount += 1;
+      continue;
+    }
+
+    const appointmentType = {
+      serviceKey,
+      title: asString(item.title),
+      agentUseDescription,
+      duration: Number(item.lengthInMinutes),
+      meetingMethod: asString(item.meetingMethod),
+      timeZone: asString(item.timeZone)
+    };
+    if (appointmentType.meetingMethod === "in_person") {
+      appointmentType.location = asString(item.location);
+    }
+    appointmentTypes.push(appointmentType);
+  }
+
+  return json(res, 200, {
+    ok: true,
+    appointmentTypes,
+    count: appointmentTypes.length,
+    needsConfigurationCount
+  });
+}
+
 // Isolated portal configuration action. This does not replace or alter the
 // existing upsert_event_type action used by other workflows.
 async function handleUpsertAppointmentType(req, res, url, body) {
@@ -1298,6 +1393,7 @@ async function handleUpsertAppointmentType(req, res, url, body) {
   const timeZone = asString(args.timeZone || args.time_zone);
   const meetingMethod = asString(args.meetingMethod || args.meeting_method).toLowerCase();
   const location = asString(args.location);
+  let agentUseDescription;
   const idempotencyKey = asString(
     req.headers["x-idempotency-key"] || args.idempotency_key || args.idempotencyKey
   );
@@ -1322,6 +1418,13 @@ async function handleUpsertAppointmentType(req, res, url, body) {
   }
   if (meetingMethod === "in_person" && !location) {
     return json(res, 400, { error: "location is required for in-person appointments" });
+  }
+  try {
+    agentUseDescription = normalizeAgentUseDescription(
+      args.agentUseDescription ?? args.agent_use_description
+    );
+  } catch (err) {
+    return json(res, 400, { error: err.message });
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey)) {
     return json(res, 400, {
@@ -1367,6 +1470,7 @@ async function handleUpsertAppointmentType(req, res, url, body) {
     timeZone,
     meetingMethod,
     location: meetingMethod === "in_person" ? location : "",
+    agentUseDescription,
     availability,
     beforeEventBuffer,
     afterEventBuffer,
@@ -1395,6 +1499,7 @@ async function handleUpsertAppointmentType(req, res, url, body) {
       timeZone,
       meetingMethod,
       location: meetingMethod === "in_person" ? location : "",
+      agentUseDescription,
       availability,
       beforeEventBuffer,
       afterEventBuffer,
@@ -1759,6 +1864,10 @@ module.exports = async (req, res) => {
 
   if (action === "managed_appointment_types") {
     return await handleManagedAppointmentTypes(req, res, url, body);
+  }
+
+  if (action === "agent_appointment_types") {
+    return await handleAgentAppointmentTypes(req, res, url, body);
   }
 
   if (action === "upsert_appointment_type") {
