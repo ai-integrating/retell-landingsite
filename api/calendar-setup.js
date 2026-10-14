@@ -160,34 +160,35 @@ module.exports = async (req, res) => {
       ok: true,
       ready: false,
       status: "waiting_for_provisioning",
-      message: "We are still locating your scheduler setup."
+      message: "We are still locating your AI employee setup."
     });
   }
-
-  if (record.role !== "scheduler") {
-    return send(res, 403, {
-      ok: false,
-      error: "Calendar setup is not available for this package."
-    });
-  }
-
   if (record.status === "failed") {
     return send(res, 409, {
       ok: false,
-      error:
-        "Your scheduler needs our attention before the calendar can be connected."
+        error: "Your AI employee setup needs our attention."
     });
   }
+const phoneNumber = String(record.phone_number || "").trim();
+const validPhone = /^\+[1-9]\d{7,14}$/.test(phoneNumber);
 
-  if (record.status !== "completed" || !record.agent_id) {
-    return send(res, 202, {
-      ok: true,
-      ready: false,
-      status: record.status || "provisioning",
-      message:
-        "Ava is still being prepared. This page will keep checking automatically."
-    });
-  }
+if (
+  record.status !== "completed" ||
+  !record.agent_id ||
+  !validPhone
+) {
+  return send(res, 202, {
+    ok: true,
+    ready: false,
+    status:
+      record.status === "completed"
+        ? "finishing_phone_setup"
+        : record.status || "provisioning",
+    message:
+      "Your AI employee and phone number are still being prepared. This page will keep checking automatically."
+  });
+}
+
 
   const agentId = String(record.agent_id).trim();
   const clientId = await kv.get(`agent:${agentId}:client`);
@@ -198,22 +199,42 @@ module.exports = async (req, res) => {
       ready: false,
       status: "finishing_workspace",
       message:
-        "Ava is ready. We are finishing the secure workspace connection."
+        "Your phone number is ready. We are finishing your workspace connection."
     });
   }
+const needsCalendar =
+  record.role === "scheduler" ||
+  record.role === "operations";
 
+const publicDetails = {
+  status: "completed",
+  role: record.role,
+  phone_number: phoneNumber,
+  agent_name: String(record.agent_name || "Your AI employee"),
+  needsCalendar,
+  portalUrl: "https://aiintegrating-portal.replit.app"
+};
+
+if (!needsCalendar) {
+  return send(res, 200, {
+    ok: true,
+    ready: true,
+    connected: false,
+    ...publicDetails
+  });
+}
   const existingToken = await kv.get(
     `cal:tokens:client:${clientId}`
   );
 
   if (existingToken?.access_token) {
-    return send(res, 200, {
-      ok: true,
-      ready: true,
-      connected: true
-    });
+return send(res, 200, {
+  ok: true,
+  ready: true,
+  connected: true,
+  ...publicDetails
+});
   }
-
   const setupSecret = String(
     process.env.AI_INTEGRATING_SETUP_SECRET || ""
   ).trim();
@@ -256,12 +277,12 @@ module.exports = async (req, res) => {
         "We could not prepare the calendar connection yet."
     });
   }
-
-  return send(res, 200, {
-    ok: true,
-    ready: true,
-    connected: false,
-    authorizationUrl: data.authorizationUrl,
-    expiresInSeconds: data.expiresInSeconds || 600
+return send(res, 200, {
+  ok: true,
+  ready: true,
+  connected: false,
+  ...publicDetails,
+  authorizationUrl: data.authorizationUrl,
+  expiresInSeconds: data.expiresInSeconds || 600
   });
 };
