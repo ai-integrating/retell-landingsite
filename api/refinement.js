@@ -1,4 +1,4 @@
-// /api/retell-refine-agent.js
+// /api/refinement.js
 const axios = require("axios");
 
 // --- 1. CORE UTILITIES (match your create-call style) ---
@@ -163,10 +163,7 @@ module.exports = async function handler(req, res) {
         message: null,
         refinement_request_id: null,
         error: "Unauthorized (bad secret).",
-        detail: {
-          // TEMP DEBUG (remove after you confirm it works)
-          got: secret ? `${secret.slice(0, 4)}…(${secret.length})` : "(missing)",
-        },
+        detail: null,
       });
     }
 
@@ -284,7 +281,7 @@ module.exports = async function handler(req, res) {
     const llmResp = await axios.get(`${RETELL_BASE}/get-retell-llm/${llm_id}`, {
       headers: retellHeaders(),
     });
-    const currentPrompt = String(llmResp.data?.general_prompt || "").trim();
+    const currentPrompt = String(llmResp.data?.general_prompt || "");
 
     // Idempotency guard: prevent duplicate application of same request
     if (
@@ -317,13 +314,26 @@ module.exports = async function handler(req, res) {
       `\n` +
       `${update_text}\n`;
 
-    // Optional: cap prompt growth
+    // Reject oversized updates without removing any existing instructions.
     const MAX_CHARS = 24000;
-    let nextPrompt = currentPrompt ? currentPrompt + patch : patch.trim();
+    const nextPrompt = currentPrompt ? currentPrompt + patch : patch.trim();
     if (nextPrompt.length > MAX_CHARS) {
-      nextPrompt =
-        `...TRUNCATED OLDER CONTENT...\n` +
-        nextPrompt.slice(nextPrompt.length - MAX_CHARS);
+      return res.status(413).json({
+        ok: false,
+        skipped: false,
+        agent_id,
+        llm_id,
+        published: false,
+        message: null,
+        refinement_request_id: refinement_request_id || null,
+        error: "Prompt limit exceeded. Existing instructions were not changed.",
+        detail: {
+          code: "PROMPT_LIMIT_EXCEEDED",
+          max_chars: MAX_CHARS,
+          current_chars: currentPrompt.length,
+          proposed_chars: nextPrompt.length,
+        },
+      });
     }
 
     // D) update llm
