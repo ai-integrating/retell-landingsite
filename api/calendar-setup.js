@@ -111,7 +111,63 @@ async function checkRateLimit(submissionId, req) {
 
   return count <= 15;
 }
+async function checkPortalReadiness(clientId) {
+  const secret = String(
+    process.env.PORTAL_READINESS_SECRET || ""
+  ).trim();
 
+  if (!secret) {
+    return { portal_ready: false, portal_status: "unavailable" };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(
+      "https://aiintegrating-portal.replit.app/api/internal/portal-readiness",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Portal-Readiness-Secret": secret
+        },
+        body: JSON.stringify({
+          client_id: String(clientId).trim()
+        }),
+        signal: controller.signal,
+        redirect: "error"
+      }
+    );
+
+    if (!response.ok) {
+      return { portal_ready: false, portal_status: "unavailable" };
+    }
+
+    const data = await response.json();
+
+    if (data.portal_ready !== true) {
+      return { portal_ready: false, portal_status: "pending" };
+    }
+
+    if (
+      data.portal_login_url !==
+      "https://aiintegrating-portal.replit.app/login"
+    ) {
+      return { portal_ready: false, portal_status: "unavailable" };
+    }
+
+    return {
+      portal_ready: true,
+      portal_status: "ready",
+      portalUrl: data.portal_login_url
+    };
+  } catch {
+    return { portal_ready: false, portal_status: "unavailable" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 module.exports = async (req, res) => {
   setCorsHeaders(req, res);
 
@@ -213,13 +269,15 @@ const needsCalendar =
   record.role === "scheduler" ||
   record.role === "operations";
 
+const portalDetails = await checkPortalReadiness(clientId);
+
 const publicDetails = {
   status: "completed",
   role: record.role,
   phone_number: phoneNumber,
   agent_name: String(record.agent_name || "Your AI employee"),
   needsCalendar,
-  portalUrl: "https://aiintegrating-portal.replit.app"
+  ...portalDetails
 };
 
 if (!needsCalendar) {
