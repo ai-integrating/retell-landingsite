@@ -170,7 +170,13 @@ module.exports = async (req, res) => {
         error: "Your AI employee setup needs our attention."
     });
   }
-const phoneNumber = String(record.phone_number || "").trim();
+const savedPhone = record.agent_id
+  ? await kv.get(`agent:${String(record.agent_id).trim()}:phone`)
+  : "";
+
+const phoneNumber = String(
+  record.phone_number || savedPhone || ""
+).trim();
 const validPhone = /^\+[1-9]\d{7,14}$/.test(phoneNumber);
 
 if (
