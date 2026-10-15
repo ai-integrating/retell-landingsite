@@ -284,7 +284,7 @@ module.exports = async function handler(req, res) {
     const llmResp = await axios.get(`${RETELL_BASE}/get-retell-llm/${llm_id}`, {
       headers: retellHeaders(),
     });
-    const currentPrompt = String(llmResp.data?.general_prompt || "").trim();
+  const currentPrompt = String(llmResp.data?.general_prompt || "");
 
     // Idempotency guard: prevent duplicate application of same request
     if (
@@ -317,14 +317,28 @@ module.exports = async function handler(req, res) {
       `\n` +
       `${update_text}\n`;
 
-    // Optional: cap prompt growth
-    const MAX_CHARS = 24000;
-    let nextPrompt = currentPrompt ? currentPrompt + patch : patch.trim();
-    if (nextPrompt.length > MAX_CHARS) {
-      nextPrompt =
-        `...TRUNCATED OLDER CONTENT...\n` +
-        nextPrompt.slice(nextPrompt.length - MAX_CHARS);
-    }
+// Preserve existing instructions. Reject oversized updates.
+const MAX_CHARS = 24000;
+const nextPrompt = currentPrompt ? currentPrompt + patch : patch.trim();
+
+if (nextPrompt.length > MAX_CHARS) {
+  return res.status(413).json({
+    ok: false,
+    skipped: false,
+    agent_id,
+    llm_id,
+    published: false,
+    message: null,
+    refinement_request_id: refinement_request_id || null,
+    error: "Prompt limit exceeded. Existing instructions were not changed.",
+    detail: {
+      code: "PROMPT_LIMIT_EXCEEDED",
+      max_chars: MAX_CHARS,
+      current_chars: currentPrompt.length,
+      proposed_chars: nextPrompt.length,
+    },
+  });
+}
 
     // D) update llm
     const upd = await axios.patch(
