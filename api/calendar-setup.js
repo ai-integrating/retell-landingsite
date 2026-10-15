@@ -2,7 +2,8 @@ const { kv } = require("@vercel/kv");
 
 const ALLOWED_ORIGINS = new Set([
   "https://www.aiintegrating.com",
-  "https://aiintegrating.com"
+  "https://aiintegrating.com",
+  "https://app.landingsite.ai"
 ]);
 
 function getRequestOrigin(req) {
