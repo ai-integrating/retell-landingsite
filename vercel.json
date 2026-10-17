@@ -1,2 +1,8 @@
-{}
+{
+  "functions": {
+    "api/refinement.js": { "maxDuration": 60 },
+    "api/refinement-maintenance.js": { "maxDuration": 60 },
+    "api/provision.js": { "maxDuration": 60 }
+  }
+}
 

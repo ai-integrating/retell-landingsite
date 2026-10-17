@@ -4,7 +4,8 @@
   "description": "Backend for Retell AI WebCall",
   "main": "api/create-call.js",
   "scripts": {
-    "dev": "vercel dev"
+    "dev": "vercel dev",
+    "test:refinement": "node --require ./test/network-block.cjs --test test/refinement.test.js"
   },
   "dependencies": {
     "@vercel/kv": "^1.0.0",
