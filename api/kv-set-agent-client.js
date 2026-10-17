@@ -69,12 +69,58 @@ async function saveOptionalClientValues({
   plan,
   sheetId,
   phone,
+  submissionId,
+  phoneNumberId,
   enrollmentLink,
 }) {
   const sheetKey = `client:${clientId}:sheet`;
   const phoneKey = `agent:${agentId}:phone`;
   const enrollmentKey = `client:${clientId}:enrollment_link`;
+  // Update the matching provisioning record without replacing other fields.
+  if (submissionId && phone) {
+    const result = await kv.eval(
+      `
+      local raw = redis.call("GET", KEYS[1])
+      if not raw then
+        return "Provisioning record not found"
+      end
 
+      local record = cjson.decode(raw)
+      if type(record) ~= "table" then
+        return "Invalid provisioning record"
+      end
+
+      if record.agent_id ~= ARGV[1] then
+        return "Provisioning agent ID does not match"
+      end
+
+      local savedPhone = record.phone_number
+      if savedPhone and savedPhone ~= cjson.null
+        and savedPhone ~= ""
+        and savedPhone ~= "(not purchased)"
+        and savedPhone ~= ARGV[2] then
+        return "Provisioning record already has a different phone"
+      end
+
+      record.phone_number = ARGV[2]
+
+      if ARGV[3] ~= "" then
+        record.phone_number_id = ARGV[3]
+      end
+
+      record.updated_at = ARGV[4]
+
+      redis.call("SET", KEYS[1], cjson.encode(record), "KEEPTTL")
+      return "updated"
+      `,
+      [`prov:${submissionId}`],
+      [agentId, phone, phoneNumberId, new Date().toISOString()]
+    );
+
+    if (result !== "updated") {
+      throw new Error(String(result));
+    }
+  }
   if (plan) {
     await kv.set(`plan:${agentId}`, plan);
   }
@@ -123,6 +169,8 @@ module.exports = async function handler(req, res) {
     const plan = asString(body?.plan);
     const sheetId = asString(body?.sheet_id);
     const phone = asString(body?.phone);
+    const submissionId = asString(body?.submission_id);
+const phoneNumberId = asString(body?.phone_number_id);
     const enrollmentLink = asString(body?.enrollment_link);
 
     if (!agentId || !clientId) {
@@ -143,6 +191,8 @@ module.exports = async function handler(req, res) {
         plan,
         sheetId,
         phone,
+        submissionId,
+        phoneNumberId,
         enrollmentLink,
       });
 
@@ -175,6 +225,8 @@ module.exports = async function handler(req, res) {
       plan,
       sheetId,
       phone,
+      submissionId,
+      phoneNumberId,
       enrollmentLink,
     });
 
