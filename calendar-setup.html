@@ -50,7 +50,7 @@
     <ul class="steps">
   <li><span class="dot">1</span><span>Wait for your AI phone number to appear.</span></li>
   <li><span class="dot">2</span><span>Connect your calendar if your package includes scheduling.</span></li>
-  <li><span class="dot">3</span><span>Open your portal, finish your business settings, install the app, and make a test call.</span></li>
+  <li><span class="dot">3</span><span>Set your portal password, sign in, finish your business settings, and make a test call.</span></li>
 </ul>
 <div id="phone-panel" class="status" hidden>
   <strong>Your new AI phone number</strong>
@@ -59,10 +59,20 @@
 </div>
       <div id="status" class="status" role="status" aria-live="polite"><span class="loader"></span>Checking your AI employee setup…</div>
       <a id="connect" class="button" href="#" rel="nofollow">Connect Your Calendar →</a>
-      <a id="portal" class="button" style="margin-top:12px"
-   href="https://aiintegrating-portal.replit.app">
-  Open Your Portal →
-</a>
+      <section id="portal-setup" class="status" hidden aria-labelledby="portal-setup-title">
+        <h2 id="portal-setup-title">First time here?</h2>
+        <p>Your portal account is ready. You do not need to know a temporary password. This setup flow does not email one to you.</p>
+        <p>Enter the email address you used during signup. We’ll email you a secure link to create your password.</p>
+        <ol style="padding-left:22px;line-height:1.6">
+          <li>Select <strong>Create Your Password</strong> below. It opens the portal’s Forgot Password page.</li>
+          <li>Enter the email address you used during onboarding and request reset instructions.</li>
+          <li>Check your inbox and spam folder, follow the instructions to choose a password, then sign in.</li>
+        </ol>
+        <p>Already have a portal password? Keep using it and choose Sign In instead.</p>
+        <a id="portal-password" class="button">Create Your Password</a>
+        <p class="help">If this browser is already signed in to a different portal account, use a private/incognito window for your new account. No email is sent just by opening this page.</p>
+      </section>
+      <a id="portal" class="button" style="margin-top:12px">Already Have a Password? Sign In →</a>
       <button id="retry" class="button" type="button">Check Again</button>
 
       <p class="help">You can safely leave this page open. Need help? <a href="mailto:aiintegrating@gmail.com">aiintegrating@gmail.com</a></p>
@@ -71,131 +81,6 @@
 
   <footer>© 2026 AI Integrating · Secure business setup</footer>
 
-<script>
-(() => {
-  const params = new URLSearchParams(location.search);
-  const submissionId = params.get("submission_id") || "";
-  const statusEl = document.getElementById("status");
-  const connectEl = document.getElementById("connect");
-  const portalEl = document.getElementById("portal");
-  const phonePanel = document.getElementById("phone-panel");
-  const phoneEl = document.getElementById("phone-number");
-  const retryEl = document.getElementById("retry");
-
-  let attempts = 0;
-  let timer = null;
-  let expiryTimer = null;
-
-  function message(text, loading = false) {
-    statusEl.replaceChildren();
-    if (loading) {
-      const spinner = document.createElement("span");
-      spinner.className = "loader";
-      statusEl.append(spinner);
-    }
-    statusEl.append(document.createTextNode(text));
-  }
-
-  function prettyPhone(number) {
-    const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(number);
-    return match
-      ? `(${match[1]}) ${match[2]}-${match[3]}`
-      : number;
-  }
-
-  async function check() {
-    clearTimeout(timer);
-    clearTimeout(expiryTimer);
-    retryEl.classList.remove("show");
-    connectEl.classList.remove("show");
-    connectEl.removeAttribute("href");
-
-    if (!/^\d{10,25}$/.test(submissionId)) {
-      message("This setup link is incomplete. Please use the link shown after submitting your setup form.");
-      return;
-    }
-
-    message("Checking your AI employee setup…", true);
-    attempts += 1;
-
-    try {
-      const response = await fetch("https://retell-landingsite-iota.vercel.app/api/calendar-setup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ submission_id: submissionId })
-      });
-      const data = await response.json();
-
-      if (response.status === 202 && data.ready === false) {
-        message(data.message || "Your setup is still being prepared.", true);
-        if (attempts < 36) {
-          timer = setTimeout(check, 5000);
-        } else {
-          message("Setup is taking longer than usual. Select Check Again, or contact us for help.");
-          retryEl.classList.add("show");
-        }
-        return;
-      }
-
-      if (!response.ok || !data.ok) {
-        throw new Error(data.error || "Setup is not ready.");
-      }
-
-      if (!data.ready || !/^\+[1-9]\d{7,14}$/.test(data.phone_number || "")) {
-        throw new Error("Your phone number is not ready yet.");
-      }
-
-      phoneEl.textContent = prettyPhone(data.phone_number);
-      phonePanel.hidden = false;
-      portalEl.classList.add("show");
-
-      if (data.needsCalendar === false) {
-        message("Your phone number is ready. Open your portal to finish your business settings, install the app, and make a test call.");
-        return;
-      }
-
-      if (data.connected) {
-        message("✓ Your calendar is connected. Open your portal to finish your appointment types and booking rules.");
-        return;
-      }
-
-      if (!data.authorizationUrl) {
-        throw new Error("Your number is ready, but the calendar connection link is not available yet.");
-      }
-
-      const authUrl = new URL(data.authorizationUrl);
-      if (authUrl.protocol !== "https:") {
-        throw new Error("The calendar connection link is invalid.");
-      }
-
-      connectEl.href = authUrl.href;
-      connectEl.classList.add("show");
-      message("Your phone number is ready. Connect your calendar, then finish setup in your portal.");
-
-      const expiresIn = Number(data.expiresInSeconds);
-      const lifetime = Number.isFinite(expiresIn) && expiresIn > 0
-        ? Math.min(expiresIn, 600)
-        : 600;
-
-      expiryTimer = setTimeout(() => {
-        connectEl.classList.remove("show");
-        connectEl.removeAttribute("href");
-        message("Your calendar connection link has expired. Select Check Again to get a fresh link.");
-        retryEl.classList.add("show");
-      }, lifetime * 1000);
-    } catch (error) {
-      message(error.message || "We could not check your setup yet.");
-      retryEl.classList.add("show");
-    }
-  }
-
-  retryEl.addEventListener("click", () => {
-    attempts = 0;
-    check();
-  });
-
-  check();
-})();
-</script>
+<script src="/onboarding-status.js"></script>
 </body>
 </html>

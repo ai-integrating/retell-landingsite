@@ -1,5 +1,16 @@
-// /api/retell-refine-agent.js
-const axios = require("axios");
+// /api/refinement — legacy requests remain supported; explicit operations fail closed.
+const { createHash, timingSafeEqual } = require("node:crypto");
+const { replaceBusiness, OPERATION } = require("../lib/refinement-business");
+const { withLlm } = require("../lib/refinement-coordinator");
+const { hash, BEGIN, END, fail } = require("../lib/refinement-section");
+const { publishLegacy } = require("../lib/refinement-publication");
+const { publishBusiness, PUBLISH_OPERATION } = require("../lib/business-publication");
+const { legacyPublicationGuard } = require("../lib/legacy-publication-guard");
+const { BUSINESS_SECTION_PILOT_ENABLED, PILOT, pilotMatches } = require("../lib/business-rollout");
+
+// RELEASE BLOCKER: no remote CAS / protection from uncoordinated Retell writers.
+// Not controlled by request data or environment. Test factory can exercise mocks.
+const SECTION_REPLACEMENT_ENABLED = false;
 
 // --- 1. CORE UTILITIES (match your create-call style) ---
 function setCors(res) {
@@ -86,8 +97,7 @@ function findUpgradeHits(text) {
 
 // --- 3. RETELL HELPERS ---
 const RETELL_BASE = "https://api.retellai.com";
-const RETELL_API_KEY = process.env.RETELL_API_KEY;
-const REFINEMENT_SECRET = process.env.REFINEMENT_SECRET;
+function createHandler({ axios, kv, apiKey: RETELL_API_KEY, secret: REFINEMENT_SECRET, enableSection = false, enablePilot = false }) {
 
 function retellHeaders() {
   return {
@@ -97,8 +107,9 @@ function retellHeaders() {
 }
 
 // --- 4. MAIN HANDLER ---
-module.exports = async function handler(req, res) {
+return async function handler(req, res) {
   setCors(res);
+  res.setHeader("Cache-Control", "no-store");
 
   if (req.method === "OPTIONS") return res.status(200).send("ok");
   if (req.method !== "POST")
@@ -119,6 +130,8 @@ module.exports = async function handler(req, res) {
   let llm_id = null;
   let refinement_request_id = null;
   let published = false;
+  let draft_applied = false;
+  let publication_requested = false;
 
   try {
     if (!RETELL_API_KEY)
@@ -153,7 +166,9 @@ module.exports = async function handler(req, res) {
       .toString()
       .trim();
 
-    if (secret !== (REFINEMENT_SECRET || "").trim()) {
+    const digest = value => createHash("sha256").update(value).digest();
+    if (!secret || !REFINEMENT_SECRET.trim() ||
+        !timingSafeEqual(digest(secret), digest(REFINEMENT_SECRET.trim()))) {
       return res.status(401).json({
         ok: false,
         skipped: false,
@@ -163,14 +178,29 @@ module.exports = async function handler(req, res) {
         message: null,
         refinement_request_id: null,
         error: "Unauthorized (bad secret).",
-        detail: {
-          // TEMP DEBUG (remove after you confirm it works)
-          got: secret ? `${secret.slice(0, 4)}…(${secret.length})` : "(missing)",
-        },
+        detail: null,
       });
     }
 
     const body = await readJsonBody(req);
+    if (!body || typeof body !== "object" || Array.isArray(body)) fail(400, "INVALID_REQUEST");
+
+    // Dispatch before ANY legacy parsing or append code. Unknown explicit
+    // operations cannot silently fall back to legacy, even when null/empty.
+    if (Object.hasOwn(body, "operation")) {
+      if (![OPERATION, PUBLISH_OPERATION].includes(body.operation)) fail(400, "UNKNOWN_OPERATION");
+      if (!enableSection && !enablePilot) fail(503, "SECTION_REPLACEMENT_DISABLED");
+      if (!enableSection && !pilotMatches(body)) fail(403, "PILOT_SCOPE_DENIED");
+      const expectedLlm = enableSection ? undefined : PILOT.llmId;
+      if (body.operation === PUBLISH_OPERATION) return res.status(200).json(await publishBusiness({
+        expectedLlm,
+        body, kv, axios, base: RETELL_BASE, headers: retellHeaders(),
+      }));
+      return res.status(200).json(await replaceBusiness({
+        expectedLlm,
+        body, kv, axios, base: RETELL_BASE, headers: retellHeaders(), findUpgradeHits,
+      }));
+    }
 
     refinement_request_id = decodeHtml(
       body.refinement_request_id || body.request_id || ""
@@ -183,6 +213,9 @@ module.exports = async function handler(req, res) {
       body.communication_preference || ""
     ).trim();
     const publish = body.publish === true; // optional
+    publication_requested = publish;
+    if ([refinement_request_id, update_text, communication_preference].some(value =>
+      value.includes(BEGIN) || value.includes(END))) fail(400, "RESERVED_SECTION_MARKER");
 
     if (!agent_id)
       return res.status(400).json({
@@ -258,6 +291,7 @@ module.exports = async function handler(req, res) {
     // A) get agent -> llm_id
     const agentResp = await axios.get(`${RETELL_BASE}/get-agent/${agent_id}`, {
       headers: retellHeaders(),
+      timeout: 10000,
     });
     const agent = agentResp.data;
 
@@ -276,28 +310,53 @@ module.exports = async function handler(req, res) {
         refinement_request_id: refinement_request_id || null,
         error:
           "Agent is not using retell-llm response engine (cannot apply refinement via prompt patch).",
-        detail: { response_engine: responseEngine || null },
+        detail: null,
       });
     }
 
-    // B) get llm -> current prompt
-    const llmResp = await axios.get(`${RETELL_BASE}/get-retell-llm/${llm_id}`, {
-      headers: retellHeaders(),
+    // Same per-LLM lease and unresolved-write journal as section replacement.
+    return await withLlm({
+      kv, llmId: llm_id,
+      getPrompt: async () => (await axios.get(`${RETELL_BASE}/get-retell-llm/${llm_id}`,
+        { headers: retellHeaders(), timeout: 10000 })).data?.general_prompt,
+      patchPrompt: prompt => axios.patch(`${RETELL_BASE}/update-retell-llm/${llm_id}`,
+        { general_prompt: prompt }, { headers: retellHeaders(), timeout: 10000 }),
+    }, async ({ prompt: currentPrompt, apply, journal, assertLease, getPublication, storePublication }) => {
+    const fingerprint = hash(JSON.stringify({ agent_id, refinement_request_id, categories, update_text, communication_preference, publish }));
+    const publishDraft = async prompt => publishLegacy({
+      axios, base: RETELL_BASE, headers: retellHeaders(), agentId: agent_id, llmId: llm_id,
+      fingerprint, prompt, getPublication, storePublication, assertLease,
+      verifyConfiguration: await legacyPublicationGuard({
+        axios, base: RETELL_BASE, options: { headers: retellHeaders(), timeout: 10000 },
+        agentId: agent_id, llmId: llm_id, targetPrompt: prompt,
+        baseHash: journal?.receipt?.legacyFingerprint === fingerprint ? journal.baseHash : hash(currentPrompt),
+      }),
     });
-  const currentPrompt = String(llmResp.data?.general_prompt || "");
 
     // Idempotency guard: prevent duplicate application of same request
     if (
-      refinement_request_id &&
-      currentPrompt.includes(`Request ID: ${refinement_request_id}`)
+      (refinement_request_id && currentPrompt.includes(`Request ID: ${refinement_request_id}`)) ||
+      (journal?.receipt?.legacyFingerprint === fingerprint && journal.targetHash === hash(currentPrompt))
     ) {
+      draft_applied = true;
+      if (publish) {
+        // An old Request ID marker alone cannot prove which draft should be
+        // published. Require durable evidence for this exact request.
+        if (journal?.receipt?.legacyFingerprint !== fingerprint &&
+            (await getPublication())?.fingerprint !== fingerprint) {
+          fail(409, "PUBLICATION_DRAFT_UNVERIFIED");
+        }
+        published = await publishDraft(currentPrompt);
+      }
       return res.status(200).json({
         ok: true,
         skipped: true,
         agent_id,
         llm_id,
-        published: false,
-        message: "Refinement already applied.",
+        published,
+        draft_applied,
+        publication_status: published ? "confirmed" : "not_requested",
+        message: published ? "Draft already applied; publication confirmed." : "Refinement already applied (draft).",
         refinement_request_id,
         error: null,
         detail: null,
@@ -341,23 +400,13 @@ if (nextPrompt.length > MAX_CHARS) {
 }
 
     // D) update llm
-    const upd = await axios.patch(
-      `${RETELL_BASE}/update-retell-llm/${llm_id}`,
-      { general_prompt: nextPrompt },
-      { headers: retellHeaders() }
-    );
+    await apply(nextPrompt, { legacyFingerprint: fingerprint });
+    draft_applied = true;
 
     // E) publish (optional)
-    let pub = null;
     if (publish) {
-      const pubResp = await axios.post(
-        `${RETELL_BASE}/publish-agent/${agent_id}`,
-        {},
-        { headers: retellHeaders() }
-      );
-      pub = pubResp.data;
+      published = await publishDraft(nextPrompt);
     }
-    published = Boolean(pub);
 
     return res.status(200).json({
       ok: true,
@@ -365,27 +414,39 @@ if (nextPrompt.length > MAX_CHARS) {
       agent_id,
       llm_id,
       published,
+      draft_applied,
+      publication_status: published ? "confirmed" : "not_requested",
       message: publish
         ? "Refinement applied + published."
         : "Refinement applied (draft).",
       refinement_request_id: refinement_request_id || null,
       error: null,
       detail: null,
-      retell_update: upd.data,
+    });
     });
   } catch (err) {
-    const status = err?.response?.status || 500;
-    const detail = err?.response?.data || err?.message || "Unknown error";
+    const status = err?.status || (err?.response?.status === 429 ? 429 : 502);
     return res.status(status).json({
       ok: false,
       skipped: false,
       agent_id: agent_id || null,
       llm_id: llm_id || null,
       published: published || false,
+      draft_applied,
+      publication_status: !publication_requested ? "not_requested" : draft_applied ? "not_confirmed" : "not_attempted",
       message: null,
       refinement_request_id: refinement_request_id || null,
-      error: "Refinement failed.",
-      detail,
+      error: draft_applied && publication_requested ? "Draft applied; publication not confirmed." : "Refinement failed.",
+      detail: { code: err?.code && err?.status ? err.code : "UPSTREAM_UNAVAILABLE" },
     });
   }
 };
+}
+
+module.exports = (req, res) => createHandler({
+  axios: require("axios"), kv: require("@vercel/kv").kv,
+  apiKey: process.env.RETELL_API_KEY, secret: process.env.REFINEMENT_SECRET,
+  enableSection: SECTION_REPLACEMENT_ENABLED,
+  enablePilot: BUSINESS_SECTION_PILOT_ENABLED,
+})(req, res);
+module.exports.createHandler = createHandler;
