@@ -92,6 +92,37 @@ function fixture({ prompt = "SYSTEM\r\nScheduler: keep appointment types, calend
 const legacy = overrides => ({ agent_id: "agent_example", category: "pricing", update_text: "Prices require a written estimate", request_id: "legacy-fixture", ...overrides });
 const code = result => result.body.detail?.code;
 
+test("v2 upgrades on new revision only, retains rule on future saves and rejects downgrade", async () => {
+  const v2 = require("../lib/business-render-v2");
+  const f = fixture();
+  await f.invoke(body(4));
+  const oldJournal = structuredClone(f.values.get("refinement:v1:llm:llm_example:journal"));
+  function next(revision) {
+    const p = body(revision);
+    p.business_information = Object.fromEntries(v2.FIELDS.map(k => [k, p.business_information[k] ?? null]));
+    p.snapshot_hash = hash(JSON.stringify(p.business_information));
+    p.operation = v2.OPERATION;
+    p.renderer_version = v2.RENDERER;
+    p.field_states = Object.fromEntries(v2.FIELDS.map(k => [k, p.business_information[k] ? "value" : "not_supplied"]));
+    p.request_hash = v2.identity(p); p.idempotency_key = v2.key(p);
+    return p;
+  }
+  assert.equal((await f.invoke(next(4))).status, 409);
+  assert.deepEqual(f.values.get("refinement:v1:llm:llm_example:journal"), oldJournal);
+  const p = next(5);
+  const applied = await f.invoke(p);
+  assert.equal(applied.status, 200);
+  assert.deepEqual(f.values.get(`refinement:v1:llm:llm_example:journal-history:${hash(JSON.stringify(oldJournal))}`), oldJournal);
+  assert.equal(applied.body.rendered_section_hash, hash(v2.section(p)));
+  const count = f.state.patches;
+  assert.deepEqual((await f.invoke(p)).body, applied.body);
+  assert.equal(f.state.patches, count);
+  assert.equal((await f.invoke(body(6))).status, 409);
+  assert.equal((await f.invoke(next(6))).status, 200);
+  assert.ok(f.state.prompt.includes(v2.RULE));
+  assert.equal(f.state.publishCalls, 0);
+});
+
 test("test runner blocks real networking", async () => {
   await assert.rejects(async () => fetch("https://example.invalid"), /TEST_NETWORK_BLOCKED/);
   assert.throws(() => require("node:https").get("https://example.invalid"), /TEST_NETWORK_BLOCKED/);

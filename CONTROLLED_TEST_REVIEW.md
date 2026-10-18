@@ -34,6 +34,7 @@ Before a real draft update:
 - Obtain explicit approval for the pending development mapping update and for
   the separately gated live draft-only write. Never enable global synchronization.
 
-Dependency recovery caveat: full npm ci is blocked by the package firewall on
+Historical dependency recovery caveat (resolved in this candidate; see
+DEPENDENCY_SECURITY_REVIEW.md): full npm ci was blocked by the package firewall on
 proxy-addr 2.0.7. Do not bypass the firewall. Mock tests can use an isolated install
 of @vercel/kv 1.0.1 via NODE_PATH; this does not validate the full backend install.
