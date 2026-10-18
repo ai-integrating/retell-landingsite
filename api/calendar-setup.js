@@ -93,7 +93,7 @@ function isAllowedOrigin(req) {
   }
 }
 
-async function checkRateLimit(submissionId, req) {
+async function checkRateLimit(submissionId, req, kv) {
   const ip = String(
     req.headers["x-forwarded-for"] || "unknown"
   )
@@ -111,9 +111,9 @@ async function checkRateLimit(submissionId, req) {
 
   return count <= 15;
 }
-async function checkPortalReadiness(clientId) {
+async function checkPortalReadiness(clientId, fetch, env) {
   const secret = String(
-    process.env.PORTAL_READINESS_SECRET || ""
+    env.PORTAL_READINESS_SECRET || ""
   ).trim();
 
   if (!secret) {
@@ -168,7 +168,10 @@ async function checkPortalReadiness(clientId) {
     clearTimeout(timeout);
   }
 }
-module.exports = async (req, res) => {
+function createHandler({ store = kv, request = globalThis.fetch, env = process.env } = {}) {
+const kv = store;
+const fetch = request;
+return async (req, res) => {
   setCorsHeaders(req, res);
 
   if (req.method === "OPTIONS") {
@@ -203,7 +206,7 @@ module.exports = async (req, res) => {
     });
   }
 
-  if (!(await checkRateLimit(submissionId, req))) {
+  if (!(await checkRateLimit(submissionId, req, kv))) {
     return send(res, 429, {
       ok: false,
       error: "Too many requests. Please wait a minute."
@@ -247,6 +250,7 @@ if (
       record.status === "completed"
         ? "finishing_phone_setup"
         : record.status || "provisioning",
+    ...(validPhone ? { phone_number: phoneNumber } : {}),
     message:
       "Your AI employee and phone number are still being prepared. This page will keep checking automatically."
   });
@@ -261,6 +265,7 @@ if (
       ok: true,
       ready: false,
       status: "finishing_workspace",
+      phone_number: phoneNumber,
       message:
         "Your phone number is ready. We are finishing your workspace connection."
     });
@@ -269,7 +274,7 @@ const needsCalendar =
   record.role === "scheduler" ||
   record.role === "operations";
 
-const portalDetails = await checkPortalReadiness(clientId);
+const portalDetails = await checkPortalReadiness(clientId, fetch, env);
 
 const publicDetails = {
   status: "completed",
@@ -300,8 +305,14 @@ return send(res, 200, {
   ...publicDetails
 });
   }
+  // Status polling never creates OAuth states or provisions accounts/agents.
+  if (body.status_only === true) {
+    return send(res, 200, {
+      ok: true, ready: true, connected: false, ...publicDetails
+    });
+  }
   const setupSecret = String(
-    process.env.AI_INTEGRATING_SETUP_SECRET || ""
+    env.AI_INTEGRATING_SETUP_SECRET || ""
   ).trim();
 
   if (!setupSecret) {
@@ -311,7 +322,9 @@ return send(res, 200, {
     });
   }
 
-  const response = await fetch(
+  let response;
+  try {
+  response = await fetch(
     `${requestBaseUrl(
       req
     )}/api/cal-strengthened?action=create_oauth_link`,
@@ -323,21 +336,22 @@ return send(res, 200, {
       },
       body: JSON.stringify({
         agent_id: agentId
-      })
+      }),
+      signal: AbortSignal.timeout(10000),
+      redirect: "error"
     }
   );
+  } catch {
+    return send(res, 502, { ok: false, ...publicDetails,
+      error: "Calendar connection is temporarily unavailable." });
+  }
 
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.authorizationUrl) {
-    console.error(
-      "CALENDAR SETUP LINK ERROR",
-      response.status,
-      data
-    );
-
     return send(res, 502, {
       ok: false,
+      ...publicDetails,
       error:
         "We could not prepare the calendar connection yet."
     });
@@ -351,3 +365,6 @@ return send(res, 200, {
   expiresInSeconds: data.expiresInSeconds || 600
   });
 };
+}
+module.exports = createHandler();
+module.exports.createHandler = createHandler;

@@ -1,6 +1,24 @@
 // /api/provision.js
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
+const { withLlm } = require("../lib/refinement-coordinator");
+
+async function coordinatedConfiguration(llmId, url, expected) {
+  const options = { headers: retellHeaders(), timeout: 20000 };
+  const llmUrl = `${RETELL_BASE}/get-retell-llm/${encodeURIComponent(llmId)}`;
+  const readUrl = url.replace("/update-retell-llm/", "/get-retell-llm/").replace("/update-agent/", "/get-agent/");
+  return withLlm({
+    kv, llmId, getPrompt: async () => (await axios.get(llmUrl, options)).data.general_prompt,
+    patchPrompt: () => { throw Error("PROVISIONING_PROMPT_WRITE_FORBIDDEN"); },
+  }, ({ applyConfiguration }) => applyConfiguration({
+    expected,
+    read: async () => {
+      const current = (await axios.get(readUrl, options)).data;
+      return Object.fromEntries(Object.keys(expected).map(key => [key, current[key]]));
+    },
+    patch: () => axios.patch(url, expected, options),
+  }));
+}
 
 // -------------------- CORS --------------------
 function setCors(res) {
@@ -130,7 +148,7 @@ async function updateRetellLlmTools(
 ) {
   if (!llmId || !Array.isArray(generalTools)) return;
 
-  await axios.patch(
+  await coordinatedConfiguration(llmId,
     `${RETELL_BASE}/update-retell-llm/${encodeURIComponent(
       llmId
     )}`,
@@ -1770,7 +1788,7 @@ module.exports = async (req, res) => {
         );
       }
 
-      await axios.patch(
+      await coordinatedConfiguration(llmId,
         `${RETELL_BASE}/update-agent/${encodeURIComponent(
           agentId
         )}`,
