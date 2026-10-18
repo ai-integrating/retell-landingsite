@@ -10,7 +10,7 @@
   "dependencies": {
     "@vercel/kv": "^1.0.0",
     "axios": "^1.13.2",
-    "express": "^5.1.0",
+    "express": "5.3.0",
     "googleapis": "^144.0.0",
     "twilio": "^5.4.0"
   }

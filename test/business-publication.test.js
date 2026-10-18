@@ -53,6 +53,27 @@ function fixture() {
   };
   return { p, old, current, state, values, send:()=>publishBusiness({body:p,kv,axios,base:"https://mock.invalid",headers:{}}) };
 }
+test("v2 publication binds renderer and section hash and retries without publishing twice", async () => {
+  const v2 = require("../lib/business-render-v2");
+  const f = fixture(), p = f.p;
+  p.operation = "publish_business_section_v2";
+  p.renderer_version = v2.RENDERER;
+  p.business_information = Object.fromEntries(v2.FIELDS.map(k => [k, null]));
+  p.field_states = Object.fromEntries(v2.FIELDS.map(k => [k, "not_supplied"]));
+  p.snapshot_hash = hash(JSON.stringify(p.business_information));
+  p.request_hash = v2.identity(p); p.idempotency_key = v2.key(p);
+  f.current.llm.general_prompt = f.old.llm.general_prompt + "\n\n" + v2.section(p);
+  f.values.set("refinement:v1:llm:llm_example:section", {
+    clientId: p.client_id, agentId: p.agent_id, revision: 1, hash: p.snapshot_hash, key: p.idempotency_key,
+    rendererVersion: v2.RENDERER, requestHash: p.request_hash, sectionHash: hash(v2.section(p)),
+  });
+  const r = await f.send();
+  assert.equal(r.renderer_version, v2.RENDERER);
+  assert.equal(r.rendered_section_hash, hash(v2.section(p)));
+  assert.equal(r.activation_verified, true);
+  await f.send();
+  assert.equal(f.state.posts, 1);
+});
 test("first managed section can publish only when all preexisting configuration is identical",async()=>{
   const f=fixture();assertNoUnrelatedDraft(f.current,f.old);
   const r=await f.send();assert.equal(r.state,"active");assert.equal(f.state.posts,1);
