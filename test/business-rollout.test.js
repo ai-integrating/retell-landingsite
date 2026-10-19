@@ -12,6 +12,14 @@ function request(operation = "replace_business_section_v1") {
     business_information: snapshot, publish: operation === "publish_business_section_v1",
     ...(operation === "publish_business_section_v1" ? {phone_number:"+15555550123"} : {}) };
 }
+test("version-specific operation cannot bypass disabled gates", async () => {
+  const r = await invoke({ ...request("apply_business_revision_v3"), enableSection: true, enablePilot: true });
+  assert.equal(r.statusCode, 503); assert.equal(r.reads, 0);
+});
+test("version-specific pilot rejects another customer before external reads", async () => {
+  const r = await invoke({ ...request("apply_business_revision_v3"), client_id: "other-client" }, true);
+  assert.equal(r.statusCode, 403); assert.equal(r.reads, 0);
+});
 async function invoke(body, enablePilot = false, mapped = true) {
   let reads = 0;
   const forbidden = async () => { throw Error("Writes forbidden in pilot gate tests"); };
