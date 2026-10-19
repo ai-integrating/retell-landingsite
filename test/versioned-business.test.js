@@ -48,6 +48,7 @@ function fixture() {
       if (path.startsWith("/create-agent-version")) {
         const d = clone(versions.get(data.base_version)), v = versions.size;
         d.agent.version = v; d.agent.is_published = false; d.agent.response_engine.version = v + 10;
+        d.agent.base_version = data.base_version;
         d.llm.version = v + 10; d.llm.is_published = false; versions.set(v, d); return { data: clone(d.agent) };
       }
       assert.equal(path, "/publish-agent-version/agent_mock"); assert.ok(Number.isSafeInteger(data.version));
@@ -77,6 +78,8 @@ test("real contract/lease/adapter: two saves, exact versions, published routing 
   assert.equal(f.calls.filter(c => c[1].startsWith("/create-agent-version")).length, 2);
   assert.equal(f.calls.filter(c => c[1].startsWith("/publish-agent-version")).length, 2);
   assert.equal(f.calls.filter(c => c[0] === "PATCH" && c[1].startsWith("/update-retell-llm")).length, 2);
+  assert.equal(f.versions.get(1).agent.base_version, 0);
+  assert.equal(f.versions.get(2).agent.base_version, 1);
   const serialized = JSON.stringify([...f.values.values()]);
   assert.ok(!serialized.includes("BOOKING TOOLS"), "No prompts in KV journals");
 });
@@ -101,6 +104,12 @@ test("outbound verification rejects drift in published prompt", async () => {
   f.versions.get(1).llm.general_prompt += "manual edit";
   await assert.rejects(outboundVersion({ ...f.args, agentId: "agent_mock", phoneNumber: "+15555550123" }),
     /OUTBOUND_VERSION_UNVERIFIED/);
+});
+test("outbound verification rejects incorrect published clone lineage", async () => {
+  const f = fixture(); await f.run(body()); await f.run(body(2, "active"));
+  f.versions.get(1).agent.base_version = 99;
+  await assert.rejects(outboundVersion({ ...f.args, agentId: "agent_mock", phoneNumber: "+15555550123" }),
+    /OUTBOUND_CONFIGURATION_CHANGED/);
 });
 test("reviewed already-published matching baseline seeds receipt without a new draft or publication", async () => {
   const f = fixture(); const result = await f.run(body(1, "active"));

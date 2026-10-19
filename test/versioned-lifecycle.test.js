@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { advance } = require("../lib/versioned-lifecycle");
+const { advance, sameConfiguration } = require("../lib/versioned-lifecycle");
 const clone = structuredClone;
 const contract = {
   range: () => ({ start: 0, end: 1 }),
@@ -30,6 +30,7 @@ function fixture(fault) {
     create: async v => mutation("create", () => {
       const d = clone(versions.get(v)), n = versions.size;
       d.agent.version = n; d.agent.is_published = false; d.agent.response_engine.version = n + 7;
+      d.agent.base_version = v;
       d.llm.version = n + 7; d.llm.is_published = false; versions.set(n, d);
     }),
     patch: async (id, v, prompt) => mutation("patch", () => {
@@ -53,6 +54,58 @@ test("two successive updates pin exact distinct agent/LLM versions; replay adds 
   assert.deepEqual(f.counts, { create: 2, patch: 2, publish: 2, route: 2 });
   assert.equal(f.versions.get(0).llm.general_prompt, "SCHEDULER_UNCHANGED\nprice=10");
   assert.deepEqual(f.versions.get(2).llm.general_tools, f.versions.get(0).llm.general_tools);
+  assert.equal(f.versions.get(1).agent.base_version, 0);
+  assert.equal(f.versions.get(2).agent.base_version, 1);
+});
+test("omitted baseline lineage accepts a clone with the exact parent", async () => {
+  const f = fixture();
+  assert.equal(Object.hasOwn(f.versions.get(0).agent, "base_version"), false);
+  assert.equal((await f.run(1, "draft")).agent_version, 1);
+  assert.equal(f.versions.get(1).agent.base_version, 0);
+});
+test("same-version adoption does not discard differing lineage metadata", () => {
+  const f = fixture(), baseline = f.versions.get(0), changed = clone(baseline);
+  changed.agent.base_version = 99;
+  assert.equal(sameConfiguration(changed, baseline), false);
+  assert.equal(sameConfiguration(baseline, clone(baseline)), true);
+});
+test("a missing expected parent version cannot validate omitted clone lineage", () => {
+  const f = fixture(), baseline = clone(f.versions.get(0)), child = clone(baseline);
+  delete baseline.agent.version; child.agent.version = 1;
+  assert.equal(sameConfiguration(child, baseline), false);
+});
+for (const lineage of [undefined, null, "0", 1, -1]) {
+  test(`lost clone response rejects incorrect or missing lineage ${String(lineage)}`, async () => {
+    const f = fixture("create:after"); await assert.rejects(f.run(), /TIMEOUT/);
+    if (lineage === undefined) delete f.versions.get(1).agent.base_version;
+    else f.versions.get(1).agent.base_version = lineage;
+    await assert.rejects(f.run(), /DRAFT_CREATION_UNRESOLVED/);
+    assert.deepEqual(f.counts, { create: 1, patch: 0, publish: 0, route: 0 });
+  });
+}
+test("lineage drift after draft completion blocks publication", async () => {
+  const f = fixture(); await f.run(1, "draft");
+  f.versions.get(1).agent.base_version = 99;
+  await assert.rejects(f.run(), /DRAFT_CONFIGURATION_CHANGED/);
+  assert.equal(f.counts.publish, 0);
+});
+test("lineage drift in active version blocks the next update before cloning", async () => {
+  const f = fixture(); await f.run();
+  f.versions.get(1).agent.base_version = 99;
+  await assert.rejects(f.run(2), /ACTIVE_BASELINE_CHANGED/);
+  assert.equal(f.counts.create, 1); assert.equal(f.history.length, 0);
+});
+test("baseline metadata changes remain protected by the exact baseline hash", async () => {
+  const f = fixture(); await f.run(1, "draft");
+  f.versions.get(0).agent.base_version = 99;
+  await assert.rejects(f.run(), /BASELINE_CHANGED/);
+  assert.equal(f.counts.publish, 0);
+});
+test("valid clone lineage does not hide unrelated agent configuration changes", async () => {
+  const f = fixture("create:after"); await assert.rejects(f.run(), /TIMEOUT/);
+  f.versions.get(1).agent.voice_id = "unreviewed";
+  await assert.rejects(f.run(), /DRAFT_CREATION_UNRESOLVED/);
+  assert.equal(f.counts.patch, 0);
 });
 for (const action of ["create", "patch", "publish", "route"]) {
   test(`${action} committed but response lost: reconcile without duplicate`, async () => {
