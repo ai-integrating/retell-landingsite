@@ -276,6 +276,12 @@ appointment_time: asString(appointment_time, ""),
       },
     };
 
+    const pinnedVersion = await require("../lib/versioned-outbound").outboundVersion({
+      kv, axios, base: "https://api.retellai.com", headers: { Authorization: `Bearer ${RETELL_API_KEY}` },
+      agentId: agent_id, phoneNumber: from_number,
+    });
+    if (pinnedVersion !== undefined) payload.override_agent_version = pinnedVersion;
+
     const resp = await axios.post(url, payload, {
       headers: {
         Authorization: `Bearer ${RETELL_API_KEY}`,
