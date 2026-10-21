@@ -33,11 +33,15 @@ async function invoke(body, enablePilot = false, mapped = true) {
   await handler({method:"POST",headers:{"x-refinement-secret":"test-only"},body},res);
   return {...res,reads};
 }
-test("pilot ships disabled and only the exact pair matches",()=>{
-  assert.equal(BUSINESS_SECTION_PILOT_ENABLED,false);
+test("pilot is enabled and only the exact pair matches",()=>{
+  assert.equal(BUSINESS_SECTION_PILOT_ENABLED,true);
   assert.equal(pilotMatches(request()),true);
   assert.equal(pilotMatches({...request(),client_id:"different-client"}),false);
   assert.equal(pilotMatches({...request(),agent_id:"different-agent"}),false);
+});
+test("enabled release default rejects a different customer before external reads", async () => {
+  const r = await invoke({...request("apply_business_revision_v3"),client_id:"other-client"}, BUSINESS_SECTION_PILOT_ENABLED);
+  assert.equal(r.statusCode,403); assert.equal(r.reads,0);
 });
 for(const operation of ["replace_business_section_v1","publish_business_section_v1"]){
   test(`${operation}: request flags cannot activate the shipped disabled gates`,async()=>{
