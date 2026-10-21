@@ -12,13 +12,13 @@ function request(operation = "replace_business_section_v1") {
     business_information: snapshot, publish: operation === "publish_business_section_v1",
     ...(operation === "publish_business_section_v1" ? {phone_number:"+15555550123"} : {}) };
 }
-test("version-specific operation cannot bypass disabled gates", async () => {
+test("version-specific operation without enrollment cannot bypass disabled gates", async () => {
   const r = await invoke({ ...request("apply_business_revision_v3"), enableSection: true, enablePilot: true });
-  assert.equal(r.statusCode, 503); assert.equal(r.reads, 0);
+  assert.equal(r.statusCode, 503); assert.equal(r.reads, 1);
 });
-test("version-specific pilot rejects another customer before external reads", async () => {
+test("version-specific pilot rejects another customer after read-only enrollment lookup", async () => {
   const r = await invoke({ ...request("apply_business_revision_v3"), client_id: "other-client" }, true);
-  assert.equal(r.statusCode, 403); assert.equal(r.reads, 0);
+  assert.equal(r.statusCode, 403); assert.equal(r.reads, 1);
 });
 async function invoke(body, enablePilot = false, mapped = true) {
   let reads = 0;
@@ -39,9 +39,9 @@ test("pilot is enabled and only the exact pair matches",()=>{
   assert.equal(pilotMatches({...request(),client_id:"different-client"}),false);
   assert.equal(pilotMatches({...request(),agent_id:"different-agent"}),false);
 });
-test("enabled release default rejects a different customer before external reads", async () => {
+test("enabled release default rejects a different unenrolled customer", async () => {
   const r = await invoke({...request("apply_business_revision_v3"),client_id:"other-client"}, BUSINESS_SECTION_PILOT_ENABLED);
-  assert.equal(r.statusCode,403); assert.equal(r.reads,0);
+  assert.equal(r.statusCode,403); assert.equal(r.reads,1);
 });
 for(const operation of ["replace_business_section_v1","publish_business_section_v1"]){
   test(`${operation}: request flags cannot activate the shipped disabled gates`,async()=>{
