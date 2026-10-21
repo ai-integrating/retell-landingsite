@@ -29,6 +29,12 @@ function fixture() {
       if (values.get(keys[0]) !== args[0]) return 0;
       if (script.includes('redis.call("del"')) values.delete(keys[0]);
       if (keys.length === 2) values.set(keys[1], JSON.parse(args[1]));
+      if (keys.length === 5) {
+        const previous = values.get(keys[1]);
+        if (previous && (!Number.isSafeInteger(previous.generation) || previous.generation >= args[4])) return -1;
+        values.set(keys[1], JSON.parse(args[1])); values.set(keys[2], JSON.parse(args[2]));
+        values.set(keys[3], JSON.parse(args[1])); values.set(keys[4], JSON.parse(args[3]));
+      }
       return 1;
     },
   };
@@ -120,4 +126,40 @@ test("publish:false can never enter publication phase", async () => {
   const f = fixture();
   await assert.rejects(f.run({ ...body(2, "active"), publish: false }), /INVALID_VERSIONED_REQUEST/);
   assert.equal(f.calls.length, 0);
+});
+test("enrollment authorizes two updates through the real dispatch and recovers lost approval response", async () => {
+  const f = fixture();
+  const { enrollment } = require("../lib/business-enrollment");
+  const inspectBody = { action: "inspect", client_id: "mock", agent_id: "agent_mock", phone_number: "+15555550123" };
+  const evidence = await enrollment({ ...f.args, body: inspectBody });
+  const approveBody = { ...inspectBody, action: "approve", generation: 1, request_id: "reviewed-enrollment", expected_fingerprint: evidence.fingerprint };
+  const grant = await enrollment({ ...f.args, body: approveBody });
+  assert.deepEqual(await enrollment({ ...f.args, body: approveBody }), grant);
+  const handler = require("../api/refinement").createHandler({ ...f.args, secret: "synthetic", apiKey: "synthetic",
+    enableSection: false, enablePilot: true });
+  const invoke = async input => {
+    const res = { setHeader() {}, statusCode: 200, status(n) { this.statusCode = n; return this; },
+      json(data) { this.data = data; return this; } };
+    await handler({ method: "POST", headers: { "x-refinement-secret": "synthetic" }, body: input }, res);
+    return res;
+  };
+  for (const revision of [2, 3]) {
+    const draft = await invoke(body(revision)); assert.equal(draft.statusCode, 200, JSON.stringify(draft.data));
+    const active = await invoke(body(revision, "active")); assert.equal(active.statusCode, 200, JSON.stringify(active.data));
+    assert.equal(active.data.activation_verified, true);
+    assert.deepEqual((await invoke(body(revision, "active"))).data, active.data);
+  }
+  assert.equal(f.calls.filter(c => c[1].startsWith("/create-agent-version")).length, 2);
+  assert.equal(f.calls.filter(c => c[1].startsWith("/publish-agent-version")).length, 2);
+  await enrollment({ ...f.args, body: { ...inspectBody, action: "revoke", generation: 2, request_id: "revoke", expected_fingerprint: evidence.fingerprint } });
+  assert.equal((await invoke(body(4))).statusCode, 403);
+});
+test("enrolled first save rejects changed baseline before any clone or patch", async () => {
+  const f = fixture();
+  const { enrollment } = require("../lib/business-enrollment");
+  const inspectBody = { action: "inspect", client_id: "mock", agent_id: "agent_mock", phone_number: "+15555550123" };
+  const e = await enrollment({ ...f.args, body: inspectBody });
+  f.versions.get(0).llm.general_prompt += "\nmanual change";
+  await assert.rejects(versionedBusiness({ ...f.args, body: body(2), enrollmentBaseline: e.baseline_hash }), /ENROLLMENT_BASELINE_CHANGED/);
+  assert.equal(f.calls.filter(c => c[0] === "PATCH" || c[1].startsWith("/create-agent-version")).length, 0);
 });

@@ -189,11 +189,19 @@ return async function handler(req, res) {
     // operations cannot silently fall back to legacy, even when null/empty.
     if (Object.hasOwn(body, "operation")) {
       if (![OPERATION, PUBLISH_OPERATION, "replace_business_section_v2", "publish_business_section_v2", "apply_business_revision_v3"].includes(body.operation)) fail(400, "UNKNOWN_OPERATION");
-      if (!enableSection && !enablePilot) fail(503, "SECTION_REPLACEMENT_DISABLED");
-      if (!enableSection && !pilotMatches(body)) fail(403, "PILOT_SCOPE_DENIED");
-      const expectedLlm = enableSection ? undefined : PILOT.llmId;
+      const pilot = enablePilot && pilotMatches(body);
+      const grant = !enableSection && !pilot && body.operation === "apply_business_revision_v3"
+        ? await require("../lib/business-enrollment").grantFor(kv, body) : null;
+      if (!enableSection && !enablePilot && !grant) fail(503, "SECTION_REPLACEMENT_DISABLED");
+      if (!enableSection && !pilot && !grant) fail(403, "PILOT_SCOPE_DENIED");
+      const expectedLlm = grant ? grant.llm_id : enableSection ? undefined : PILOT.llmId;
       if (body.operation === "apply_business_revision_v3") return res.status(200).json(await require("../lib/versioned-business").versionedBusiness({
         body, kv, axios, base: RETELL_BASE, headers: retellHeaders(), expectedLlm, findUpgradeHits,
+        enrollmentBaseline: grant?.baseline_hash,
+        authorize: grant ? async () => {
+          const current = await require("../lib/business-enrollment").grantFor(kv, body);
+          if (!current || current.request_id !== grant.request_id) fail(403, "ENROLLMENT_REVOKED");
+        } : undefined,
       }));
       if ([PUBLISH_OPERATION, "publish_business_section_v2"].includes(body.operation)) return res.status(200).json(await publishBusiness({
         expectedLlm,
