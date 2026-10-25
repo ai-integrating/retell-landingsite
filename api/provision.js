@@ -1684,6 +1684,9 @@ module.exports = async (req, res) => {
           idemKey,
           {
             ...(record || {}),
+            // Only genuinely new jobs get initialization provenance. Existing
+            // jobs/agents are never retroactively made eligible on a retry.
+            ...(!record ? { business_bootstrap: require("../lib/onboarding-business").capture(body, bizName) } : {}),
             status:
               "creating_agent",
             mode,

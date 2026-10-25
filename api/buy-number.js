@@ -1,5 +1,6 @@
 // /api/buy-number.js
 const axios = require("axios");
+const { kv } = require("@vercel/kv");
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -229,6 +230,9 @@ module.exports = async (req, res) => {
     }
     if (!agentId) {
       return res.status(400).json({ ok: false, error: "Missing agent_id" });
+    }
+    if (await require("../lib/onboarding-business").blocksNumberSetup(kv, agentId)) {
+      return res.status(423).json({ ok: false, error: "INITIALIZED_AGENT_NUMBER_SETUP_BLOCKED" });
     }
 
     const idempotencyKey = pick(body, ["idempotency_key", "job_id", "submission_id"], "");
