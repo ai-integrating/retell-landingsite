@@ -2,7 +2,7 @@ const { timingSafeEqual } = require("node:crypto");
 const { maintenance } = require("../lib/refinement-maintenance");
 const { verifyOwnership } = require("../lib/retell-ownership");
 function createHandler({ kv, axios, secret, apiKey }) {
-  return async (req, res) => {
+  return require("../lib/ownership-budget").handler(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
     const supplied = req.headers["x-maintenance-secret"];
@@ -35,7 +35,7 @@ function createHandler({ kv, axios, secret, apiKey }) {
       return res.status(known.has(error.code) ? error.status : 503)
         .json({ error: known.has(error.code) ? error.code : "MAINTENANCE_UNAVAILABLE" });
     }
-  };
+  });
 }
 module.exports = (req, res) => createHandler({
   kv: require("@vercel/kv").kv, axios: require("axios"),

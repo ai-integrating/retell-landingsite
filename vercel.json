@@ -1,5 +1,8 @@
 {
   "functions": {
+    "api/onboarding-business.js": { "maxDuration": 60 },
+    "api/business-enrollment.js": { "maxDuration": 60 },
+    "api/mcduffy-adoption.js": { "maxDuration": 60 },
     "api/refinement.js": { "maxDuration": 60 },
     "api/refinement-maintenance.js": { "maxDuration": 60 },
     "api/provision.js": { "maxDuration": 60 }

@@ -4,9 +4,10 @@ const {withLlm}=require("../lib/refinement-coordinator");
 const {createHandler}=require("../api/onboarding-business");
 const {enrollment}=require("../lib/business-enrollment");
 const clone=structuredClone;
+const budgets=require("../lib/ownership-budget");
 function fixture(){
- const agent={agent_id:"agent_new",version:0,is_published:false,metadata:{submission_id:"1234567890"},
-  agent_name:"Synthetic",response_engine:{type:"retell-llm",llm_id:"llm_new",version:0}};
+ // Minimal sanitized real-provider fixture: metadata is absent, not empty.
+ const agent=clone(require("./fixtures/retell-agent-without-metadata.json"));
  const llm={llm_id:"llm_new",version:0,is_published:false,general_prompt:"Keep Alex greeting.\nKeep Scheduler safety rules.",
   general_tools:[{name:"book",type:"custom",url:"https://invalid.example/tool"}],begin_message:"Hello, Alex speaking."};
  let phone={phone_number:"+15555550123",inbound_agents:[{agent_id:"agent_new",weight:1}],
@@ -14,6 +15,10 @@ function fixture(){
  const body={action:"prepare",client_id:"synthetic-new",agent_id:"agent_new",phone_number:phone.phone_number};
  const map=new Map([["agent:agent_new:client",body.client_id],["prov:1234567890",{status:"completed",agent_id:"agent_new",
   llm_id:"llm_new",business_bootstrap:capture({business_phone:"+15555559999",global_info:"Synthetic business facts."},"Synthetic")}]]),writes=[];
+ const evidence={version:1,submission_id:"1234567890",agent_id:"agent_new",llm_id:"llm_new",
+  business_bootstrap:clone(map.get("prov:1234567890").business_bootstrap)};
+ map.set("onboarding:provisioned:v1:agent_new",evidence);
+ map.set("onboarding:identity:v1:agent_new",{...clone(evidence),client_id:body.client_id});
  let fault,extraVersion=false;
  const kv={get:async k=>clone(map.get(k)??null),set:async(k,v)=>{if(map.has(k))return null;map.set(k,v);return"OK"},
   eval:async(s,k,a)=>{if(map.get(k[0])!==a[0])return 0;if(s.includes('redis.call("del"'))map.delete(k[0]);
@@ -38,6 +43,77 @@ function fixture(){
  return {agent,llm,map,body,deps,writes,phone:()=>phone,setFault:x=>fault=x,setExtra:()=>extraVersion=true,
   prepare:()=>initialize(deps),activate:fingerprint=>initialize({...deps,body:{...body,action:"activate",fingerprint}})};
 }
+async function invokeBudgetHandler(f,headers={}) {
+ const res={setHeader(){},status(n){this.code=n;return this},json(v){this.body=v;return this}};
+ await createHandler({...f.deps,secret:"mock-secret"})({method:"POST",
+  headers:{"x-maintenance-secret":"mock-secret",...headers},body:f.body},res);
+ return res;
+}
+const rateLimit=seconds=>Object.assign(Error("429"),{response:{status:429,headers:{"retry-after":String(seconds)}}});
+test("portal's remaining timeout includes pre-scan work and reserves follow-up time",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture(),get=f.deps.axios.get;
+ f.deps.axios.get=async(...args)=>{const result=await get(...args);clock+=10000;return result};
+ f.deps.axios.post=async()=>{throw rateLimit(20)};
+ const result=await invokeBudgetHandler(f,{"x-request-deadline-ms":String(Date.now()+65000)});
+ assert.equal(result.code,503);assert.equal(result.body.error,"OWNERSHIP_SCAN_DEADLINE");
+ assert.deepEqual(f.writes,[]);assert.ok(![...f.map.keys()].some(k=>k.endsWith(":lock")));
+});
+test("handler ceiling overrides a longer portal timeout and Retry-After fails closed",async()=>{
+ const f=fixture();let requests=0;
+ f.deps.axios.post=async()=>{requests++;throw rateLimit(40)};
+ const result=await invokeBudgetHandler(f,{"x-request-deadline-ms":String(Date.now()+90000)});
+ assert.equal(result.body.error,"OWNERSHIP_SCAN_DEADLINE");assert.equal(requests,1);
+ assert.deepEqual(f.writes,[]);
+});
+test("expired and malformed portal deadlines never start an ownership scan",async()=>{
+ for(const deadline of [String(Date.now()-1),"invalid"]){
+  const f=fixture();let scans=0;
+  f.deps.axios.post=async()=>{scans++;throw Error("must not scan")};
+  assert.equal((await invokeBudgetHandler(f,{"x-request-deadline-ms":deadline})).body.error,"OWNERSHIP_SCAN_DEADLINE");
+  assert.equal(scans,0);assert.deepEqual(f.writes,[]);
+ }
+});
+test("initialization's under-lease pagination stops before writes, releases and recovers",async()=>{
+ const f=fixture(),p=await f.prepare(),get=f.deps.axios.get;
+ f.deps.axios.get=async(url,...args)=>{
+  if(url.includes("list-agent-versions")&&[...f.map.keys()].some(k=>k.endsWith(":lock")))throw rateLimit(41);
+  return get(url,...args);
+ };
+ await assert.rejects(f.activate(p.fingerprint),/OWNERSHIP_SCAN_DEADLINE/);
+ assert.deepEqual(f.writes,[]);assert.ok(![...f.map.keys()].some(k=>k.endsWith(":lock")));
+ assert.equal(f.map.get("refinement:v1:llm:llm_new:bootstrap").status,"prepared");
+ f.deps.axios.get=get;
+ assert.equal((await f.activate(p.fingerprint)).state,"active");
+ assert.deepEqual(f.writes,["patch","publish","route"]);
+});
+test("lease renewal never resets a caller deadline across ownership scans",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture();let downstream=false;
+ await assert.rejects(budgets.run({now:()=>clock,requestDeadline:60000},()=>withLlm({
+  kv:f.deps.kv,llmId:"llm_new",getPrompt:async()=>"unchanged",
+ },async ctx=>{
+  clock=45000;await ctx.assertLease(); // lease now ends at105s; caller still ends60s
+  await require("../lib/retell-ownership").verifyOwnership(f.deps.axios,
+   f.deps.base,{},"agent_new","llm_new");
+  downstream=true;
+ })),/OWNERSHIP_SCAN_DEADLINE/);
+ assert.equal(downstream,false);assert.deepEqual(f.writes,[]);
+});
+test("a complete ownership scan under lease preserves reserve and permits subsequent verification",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture(),get=f.deps.axios.get,post=f.deps.axios.post;
+ f.deps.axios.get=async(...args)=>{clock+=5000;return get(...args)};
+ f.deps.axios.post=async(...args)=>{clock+=5000;return post(...args)};
+ await budgets.run({now:()=>clock,requestDeadline:60000},()=>withLlm({
+  kv:f.deps.kv,llmId:"llm_new",getPrompt:async()=>"unchanged",
+ },async ctx=>{
+  await require("../lib/retell-ownership").verifyOwnership(f.deps.axios,f.deps.base,{},"agent_new","llm_new");
+  assert.equal(clock,15000);assert.ok(60000-clock>=budgets.RESERVE_MS);
+  await ctx.assertLease();
+ }));
+ assert.deepEqual(f.writes,[]);
+});
 test("new initialization preserves surrounding prompt/tools/contact, verifies routes and queues review without enrollment",async()=>{
  const f=fixture(),original=clone(f.llm),p=await f.prepare();assert.equal(p.status,"initial_review_required");
  assert.equal(p.snapshot.businessPhone,"+15555559999");assert.equal(p.render_contract.fieldStates.salesPreference,"not_supplied");
@@ -70,7 +146,7 @@ test("no old-client adoption, missing provenance, unknown operations or disabled
   const f=fixture();f.body.client_id=id;await assert.rejects(f.prepare());assert.deepEqual(f.writes,[]);
  }
  const f=fixture(),p=await f.prepare();await assert.rejects(initialize({...f.deps,enabled:false,body:{...f.body,action:"activate",fingerprint:p.fingerprint}}));
- delete f.map.get("prov:1234567890").business_bootstrap;await assert.rejects(f.prepare());
+ f.map.delete("onboarding:identity:v1:agent_new");await assert.rejects(f.prepare());
  await assert.rejects(initialize({...f.deps,body:{...f.body,action:"other"}}));
 });
 test("durable proof supports receipt recovery after original provisioning record expires",async()=>{
@@ -111,4 +187,25 @@ test("actual number endpoint rejects an initializing target before any provider 
  const res={setHeader(){},status(n){this.code=n;return this},json(b){this.body=b;return this}};
  await handler({method:"POST",body:{agent_id:"agent_new"},headers:{}},res);
  assert.equal(res.code,423);assert.equal(reads,1);assert.equal(providerCalls,0);
+});
+test("expired legacy provisioning record is not needed before first preparation",async()=>{
+ const f=fixture();f.map.delete("prov:1234567890");
+ const p=await f.prepare();assert.equal((await f.activate(p.fingerprint)).state,"active");
+});
+test("changed durable provenance rejects recovery without another PATCH",async()=>{
+ const f=fixture(),p=await f.prepare();f.setFault("patch:after");
+ await assert.rejects(f.activate(p.fingerprint),/LOST_RESPONSE/);
+ f.map.get("onboarding:identity:v1:agent_new").submission_id="9876543210";
+ await assert.rejects(f.activate(p.fingerprint));
+ assert.deepEqual(f.writes,["patch"]);
+});
+test("missing or conflicting durable evidence never substitutes legacy record or metadata",async()=>{
+ for(const mutate of[
+  f=>f.map.delete("onboarding:identity:v1:agent_new"),
+  f=>f.map.delete("onboarding:provisioned:v1:agent_new"),
+  f=>f.map.get("onboarding:identity:v1:agent_new").client_id="another",
+  f=>f.map.get("onboarding:provisioned:v1:agent_new").llm_id="llm_other"]){
+  const f=fixture();f.agent.metadata={submission_id:"1234567890"};mutate(f);
+  await assert.rejects(f.prepare());assert.deepEqual(f.writes,[]);
+ }
 });

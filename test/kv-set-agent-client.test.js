@@ -18,6 +18,15 @@ function fixture({ mapping = "client_fixture", record = {
     async get(key) { return records.get(key); },
     async set(key, value) { writes.push(key); records.set(key, value); },
     async eval(script, keys, args) {
+      if (keys.length === 2) {
+        assert.match(script, /local old/);
+        if (records.get(keys[0]) !== args[0]) return 0;
+        const old = records.get(keys[1]);
+        if (old && JSON.stringify(old) !== args[1]) return 0;
+        records.set(keys[1], JSON.parse(args[1]));
+        writes.push(keys[1]);
+        return 1;
+      }
       assert.match(script, /"KEEPTTL"/);
       assert.match(script, /record\.agent_id ~= ARGV\[1\]/);
       assert.match(script, /record\.phone_number = ARGV\[2\]/);
@@ -37,6 +46,7 @@ function fixture({ mapping = "client_fixture", record = {
   };
   const sandbox = { module: { exports: {} }, process: { env: { KV_ADMIN_SECRET: "fixture-only" } },
     console: { error() {} }, require(name) {
+      if (name === "../lib/provisioning-evidence") return require("../lib/provisioning-evidence");
       assert.equal(name, "@vercel/kv"); return { kv };
     } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../api/kv-set-agent-client.js"), "utf8"), sandbox);
@@ -94,5 +104,24 @@ test("new client mapping and provisioning phone both persist", async () => {
 test("unauthorized call leaves every key unchanged", async () => {
   const f = fixture();
   assert.equal((await f.run({ admin_secret: "wrong" })).status, 401);
+  assert.equal(f.writes.length, 0);
+});
+test("authenticated mapping binds exact durable provisioning proof and safely replays", async () => {
+  const f = fixture();
+  f.records.set("onboarding:provisioned:v1:agent_fixture", {
+    version: 1, submission_id: "1234567890123", agent_id: "agent_fixture",
+    llm_id: "llm_fixture", business_bootstrap: { version: 1 },
+  });
+  assert.equal((await f.run()).status, 200);
+  assert.equal(f.records.get("onboarding:identity:v1:agent_fixture").client_id, "client_fixture");
+  assert.equal((await f.run()).status, 200);
+});
+test("mapping rejects a different submission before optional phone writes", async () => {
+  const f = fixture();
+  f.records.set("onboarding:provisioned:v1:agent_fixture", {
+    version: 1, submission_id: "9876543210123", agent_id: "agent_fixture",
+    llm_id: "llm_fixture", business_bootstrap: { version: 1 },
+  });
+  assert.equal((await f.run()).status, 500);
   assert.equal(f.writes.length, 0);
 });
