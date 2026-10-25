@@ -107,7 +107,7 @@ function retellHeaders() {
 }
 
 // --- 4. MAIN HANDLER ---
-return async function handler(req, res) {
+return require("../lib/ownership-budget").handler(async function handler(req, res) {
   setCors(res);
   res.setHeader("Cache-Control", "no-store");
 
@@ -454,7 +454,7 @@ if (nextPrompt.length > MAX_CHARS) {
       detail: { code: err?.code && err?.status ? err.code : "UPSTREAM_UNAVAILABLE" },
     });
   }
-};
+});
 }
 
 module.exports = (req, res) => createHandler({

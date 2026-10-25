@@ -4,6 +4,7 @@ const {withLlm}=require("../lib/refinement-coordinator");
 const {createHandler}=require("../api/onboarding-business");
 const {enrollment}=require("../lib/business-enrollment");
 const clone=structuredClone;
+const budgets=require("../lib/ownership-budget");
 function fixture(){
  // Minimal sanitized real-provider fixture: metadata is absent, not empty.
  const agent=clone(require("./fixtures/retell-agent-without-metadata.json"));
@@ -42,6 +43,77 @@ function fixture(){
  return {agent,llm,map,body,deps,writes,phone:()=>phone,setFault:x=>fault=x,setExtra:()=>extraVersion=true,
   prepare:()=>initialize(deps),activate:fingerprint=>initialize({...deps,body:{...body,action:"activate",fingerprint}})};
 }
+async function invokeBudgetHandler(f,headers={}) {
+ const res={setHeader(){},status(n){this.code=n;return this},json(v){this.body=v;return this}};
+ await createHandler({...f.deps,secret:"mock-secret"})({method:"POST",
+  headers:{"x-maintenance-secret":"mock-secret",...headers},body:f.body},res);
+ return res;
+}
+const rateLimit=seconds=>Object.assign(Error("429"),{response:{status:429,headers:{"retry-after":String(seconds)}}});
+test("portal's remaining timeout includes pre-scan work and reserves follow-up time",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture(),get=f.deps.axios.get;
+ f.deps.axios.get=async(...args)=>{const result=await get(...args);clock+=10000;return result};
+ f.deps.axios.post=async()=>{throw rateLimit(20)};
+ const result=await invokeBudgetHandler(f,{"x-request-deadline-ms":String(Date.now()+65000)});
+ assert.equal(result.code,503);assert.equal(result.body.error,"OWNERSHIP_SCAN_DEADLINE");
+ assert.deepEqual(f.writes,[]);assert.ok(![...f.map.keys()].some(k=>k.endsWith(":lock")));
+});
+test("handler ceiling overrides a longer portal timeout and Retry-After fails closed",async()=>{
+ const f=fixture();let requests=0;
+ f.deps.axios.post=async()=>{requests++;throw rateLimit(40)};
+ const result=await invokeBudgetHandler(f,{"x-request-deadline-ms":String(Date.now()+90000)});
+ assert.equal(result.body.error,"OWNERSHIP_SCAN_DEADLINE");assert.equal(requests,1);
+ assert.deepEqual(f.writes,[]);
+});
+test("expired and malformed portal deadlines never start an ownership scan",async()=>{
+ for(const deadline of [String(Date.now()-1),"invalid"]){
+  const f=fixture();let scans=0;
+  f.deps.axios.post=async()=>{scans++;throw Error("must not scan")};
+  assert.equal((await invokeBudgetHandler(f,{"x-request-deadline-ms":deadline})).body.error,"OWNERSHIP_SCAN_DEADLINE");
+  assert.equal(scans,0);assert.deepEqual(f.writes,[]);
+ }
+});
+test("initialization's under-lease pagination stops before writes, releases and recovers",async()=>{
+ const f=fixture(),p=await f.prepare(),get=f.deps.axios.get;
+ f.deps.axios.get=async(url,...args)=>{
+  if(url.includes("list-agent-versions")&&[...f.map.keys()].some(k=>k.endsWith(":lock")))throw rateLimit(41);
+  return get(url,...args);
+ };
+ await assert.rejects(f.activate(p.fingerprint),/OWNERSHIP_SCAN_DEADLINE/);
+ assert.deepEqual(f.writes,[]);assert.ok(![...f.map.keys()].some(k=>k.endsWith(":lock")));
+ assert.equal(f.map.get("refinement:v1:llm:llm_new:bootstrap").status,"prepared");
+ f.deps.axios.get=get;
+ assert.equal((await f.activate(p.fingerprint)).state,"active");
+ assert.deepEqual(f.writes,["patch","publish","route"]);
+});
+test("lease renewal never resets a caller deadline across ownership scans",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture();let downstream=false;
+ await assert.rejects(budgets.run({now:()=>clock,requestDeadline:60000},()=>withLlm({
+  kv:f.deps.kv,llmId:"llm_new",getPrompt:async()=>"unchanged",
+ },async ctx=>{
+  clock=45000;await ctx.assertLease(); // lease now ends at105s; caller still ends60s
+  await require("../lib/retell-ownership").verifyOwnership(f.deps.axios,
+   f.deps.base,{},"agent_new","llm_new");
+  downstream=true;
+ })),/OWNERSHIP_SCAN_DEADLINE/);
+ assert.equal(downstream,false);assert.deepEqual(f.writes,[]);
+});
+test("a complete ownership scan under lease preserves reserve and permits subsequent verification",async t=>{
+ let clock=0;t.mock.method(performance,"now",()=>clock);
+ const f=fixture(),get=f.deps.axios.get,post=f.deps.axios.post;
+ f.deps.axios.get=async(...args)=>{clock+=5000;return get(...args)};
+ f.deps.axios.post=async(...args)=>{clock+=5000;return post(...args)};
+ await budgets.run({now:()=>clock,requestDeadline:60000},()=>withLlm({
+  kv:f.deps.kv,llmId:"llm_new",getPrompt:async()=>"unchanged",
+ },async ctx=>{
+  await require("../lib/retell-ownership").verifyOwnership(f.deps.axios,f.deps.base,{},"agent_new","llm_new");
+  assert.equal(clock,15000);assert.ok(60000-clock>=budgets.RESERVE_MS);
+  await ctx.assertLease();
+ }));
+ assert.deepEqual(f.writes,[]);
+});
 test("new initialization preserves surrounding prompt/tools/contact, verifies routes and queues review without enrollment",async()=>{
  const f=fixture(),original=clone(f.llm),p=await f.prepare();assert.equal(p.status,"initial_review_required");
  assert.equal(p.snapshot.businessPhone,"+15555559999");assert.equal(p.render_contract.fieldStates.salesPreference,"not_supplied");
