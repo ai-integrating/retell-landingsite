@@ -1,0 +1,14 @@
+{
+  "client_id": "mcduffy-and-son-paving-6547488712412593990",
+  "internal_client_id": 9,
+  "agent_id": "agent_bf18f9091e7d42f79ae939388e",
+  "llm_id": "llm_c9d82f1e851fd1c8482f373a9a2e",
+  "phone_number": "+15082901403",
+  "phone_hash": "857a63f3ab6f7adfa2b3158825c20cf64ae9a65f131dd02be90969bdb6a100ac",
+  "business_phone": "(508) 326-0740",
+  "baseline_hash": "f7378ef77a5680ae4069af9b0f23d1620b7ad264312f72fd599176a592cc33c3",
+  "draft_agent_hash": "a940aba16659651e87c60b4b8bef43da5cf27dc4816c4cb4a6451bde8b2212d4",
+  "draft_llm_hash": "be76c56cf2c2eeda2264ef038e39d47a1ef28f3e051874479a697e74c24e42d5",
+  "snapshot_hash": "f781b7b28858a265bc78ac000143224863439e26f7b3d722b1e5d6d9cb5dd0de",
+  "request_hash": "223a645afd9e54dbc1224362d09708f9f87de071ead41e826e77efd681c5ad51"
+}
