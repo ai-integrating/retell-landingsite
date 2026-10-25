@@ -213,6 +213,9 @@ return async function handler(req, res) {
       }));
     }
 
+    if (require("../lib/mcduffy-write-guard").protectedSetup(body))
+      fail(423, "MCDUFFY_LEGACY_WRITES_PAUSED");
+
     refinement_request_id = decodeHtml(
       body.refinement_request_id || body.request_id || ""
     );

@@ -2,6 +2,7 @@
 const axios = require("axios");
 const { kv } = require("@vercel/kv");
 const { withLlm } = require("../lib/refinement-coordinator");
+const { protectedSetup } = require("../lib/mcduffy-write-guard");
 
 async function coordinatedConfiguration(llmId, url, expected) {
   const options = { headers: retellHeaders(), timeout: 20000 };
@@ -1213,6 +1214,10 @@ module.exports = async (req, res) => {
       );
     }
 
+    if (protectedSetup(body, record, submissionId)) {
+      return res.status(423).json({ ok: false, error: "MCDUFFY_LEGACY_WRITES_PAUSED" });
+    }
+
     const locked =
       await acquireLock(lockKey);
 
@@ -1266,6 +1271,10 @@ module.exports = async (req, res) => {
           resumed: false,
         })
       );
+    }
+
+    if (protectedSetup(body, record, submissionId)) {
+      return res.status(423).json({ ok: false, error: "MCDUFFY_LEGACY_WRITES_PAUSED" });
     }
 
     const purchaseNumber =
