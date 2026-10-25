@@ -224,6 +224,9 @@ module.exports = async (req, res) => {
     const body = await readJsonBody(req);
 
     const agentId = pick(body, ["agent_id", "retell_agent_id"], "");
+    if (require("../lib/mcduffy-write-guard").protectedSetup(body)) {
+      return res.status(423).json({ ok: false, error: "MCDUFFY_LEGACY_WRITES_PAUSED" });
+    }
     if (!agentId) {
       return res.status(400).json({ ok: false, error: "Missing agent_id" });
     }
