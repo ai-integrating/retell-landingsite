@@ -1,0 +1,12 @@
+{
+  "agent_id": "agent_new",
+  "channel": "voice",
+  "agent_name": "Synthetic",
+  "version": 0,
+  "is_published": false,
+  "response_engine": {
+    "type": "retell-llm",
+    "llm_id": "llm_new",
+    "version": 0
+  }
+}

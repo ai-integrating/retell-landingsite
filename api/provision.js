@@ -1206,6 +1206,7 @@ module.exports = async (req, res) => {
       await getProvisionRecord(idemKey);
 
     if (record?.status === "completed") {
+      await require("../lib/provisioning-evidence").retain(kv, record);
       return res.status(200).json(
         publicProvisionResult(record, {
           idempotent: true,
@@ -1237,6 +1238,7 @@ module.exports = async (req, res) => {
         if (
           after?.status === "completed"
         ) {
+          await require("../lib/provisioning-evidence").retain(kv, after);
           return res.status(200).json(
             publicProvisionResult(after, {
               idempotent: true,
@@ -1265,6 +1267,7 @@ module.exports = async (req, res) => {
       await getProvisionRecord(idemKey);
 
     if (record?.status === "completed") {
+      await require("../lib/provisioning-evidence").retain(kv, record);
       return res.status(200).json(
         publicProvisionResult(record, {
           idempotent: true,
@@ -2163,6 +2166,7 @@ module.exports = async (req, res) => {
         );
     }
 
+    await require("../lib/provisioning-evidence").retain(kv, record);
     return res.status(200).json(
       publicProvisionResult(
         record,
@@ -2235,7 +2239,9 @@ module.exports = async (req, res) => {
           )) || {};
 
         const failureStatus =
-          current.agent_id
+          current.status === "completed"
+            ? "completed"
+            : current.agent_id
             ? "agent_created"
             : "failed";
 

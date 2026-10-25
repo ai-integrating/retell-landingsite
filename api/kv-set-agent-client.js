@@ -185,6 +185,7 @@ const phoneNumberId = asString(body?.phone_number_id);
 
     // -------------------- EXISTING SAME --------------------
     if (existing && String(existing) === clientId) {
+      await require("../lib/provisioning-evidence").bind(kv, agentId, clientId, submissionId);
       await saveOptionalClientValues({
         agentId,
         clientId,
@@ -218,6 +219,7 @@ const phoneNumberId = asString(body?.phone_number_id);
 
     // -------------------- NEW SET --------------------
     await kv.set(mapKey, clientId);
+    await require("../lib/provisioning-evidence").bind(kv, agentId, clientId, submissionId);
 
     await saveOptionalClientValues({
       agentId,

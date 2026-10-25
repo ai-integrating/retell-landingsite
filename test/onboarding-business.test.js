@@ -5,8 +5,8 @@ const {createHandler}=require("../api/onboarding-business");
 const {enrollment}=require("../lib/business-enrollment");
 const clone=structuredClone;
 function fixture(){
- const agent={agent_id:"agent_new",version:0,is_published:false,metadata:{submission_id:"1234567890"},
-  agent_name:"Synthetic",response_engine:{type:"retell-llm",llm_id:"llm_new",version:0}};
+ // Minimal sanitized real-provider fixture: metadata is absent, not empty.
+ const agent=clone(require("./fixtures/retell-agent-without-metadata.json"));
  const llm={llm_id:"llm_new",version:0,is_published:false,general_prompt:"Keep Alex greeting.\nKeep Scheduler safety rules.",
   general_tools:[{name:"book",type:"custom",url:"https://invalid.example/tool"}],begin_message:"Hello, Alex speaking."};
  let phone={phone_number:"+15555550123",inbound_agents:[{agent_id:"agent_new",weight:1}],
@@ -14,6 +14,10 @@ function fixture(){
  const body={action:"prepare",client_id:"synthetic-new",agent_id:"agent_new",phone_number:phone.phone_number};
  const map=new Map([["agent:agent_new:client",body.client_id],["prov:1234567890",{status:"completed",agent_id:"agent_new",
   llm_id:"llm_new",business_bootstrap:capture({business_phone:"+15555559999",global_info:"Synthetic business facts."},"Synthetic")}]]),writes=[];
+ const evidence={version:1,submission_id:"1234567890",agent_id:"agent_new",llm_id:"llm_new",
+  business_bootstrap:clone(map.get("prov:1234567890").business_bootstrap)};
+ map.set("onboarding:provisioned:v1:agent_new",evidence);
+ map.set("onboarding:identity:v1:agent_new",{...clone(evidence),client_id:body.client_id});
  let fault,extraVersion=false;
  const kv={get:async k=>clone(map.get(k)??null),set:async(k,v)=>{if(map.has(k))return null;map.set(k,v);return"OK"},
   eval:async(s,k,a)=>{if(map.get(k[0])!==a[0])return 0;if(s.includes('redis.call("del"'))map.delete(k[0]);
@@ -70,7 +74,7 @@ test("no old-client adoption, missing provenance, unknown operations or disabled
   const f=fixture();f.body.client_id=id;await assert.rejects(f.prepare());assert.deepEqual(f.writes,[]);
  }
  const f=fixture(),p=await f.prepare();await assert.rejects(initialize({...f.deps,enabled:false,body:{...f.body,action:"activate",fingerprint:p.fingerprint}}));
- delete f.map.get("prov:1234567890").business_bootstrap;await assert.rejects(f.prepare());
+ f.map.delete("onboarding:identity:v1:agent_new");await assert.rejects(f.prepare());
  await assert.rejects(initialize({...f.deps,body:{...f.body,action:"other"}}));
 });
 test("durable proof supports receipt recovery after original provisioning record expires",async()=>{
@@ -111,4 +115,25 @@ test("actual number endpoint rejects an initializing target before any provider 
  const res={setHeader(){},status(n){this.code=n;return this},json(b){this.body=b;return this}};
  await handler({method:"POST",body:{agent_id:"agent_new"},headers:{}},res);
  assert.equal(res.code,423);assert.equal(reads,1);assert.equal(providerCalls,0);
+});
+test("expired legacy provisioning record is not needed before first preparation",async()=>{
+ const f=fixture();f.map.delete("prov:1234567890");
+ const p=await f.prepare();assert.equal((await f.activate(p.fingerprint)).state,"active");
+});
+test("changed durable provenance rejects recovery without another PATCH",async()=>{
+ const f=fixture(),p=await f.prepare();f.setFault("patch:after");
+ await assert.rejects(f.activate(p.fingerprint),/LOST_RESPONSE/);
+ f.map.get("onboarding:identity:v1:agent_new").submission_id="9876543210";
+ await assert.rejects(f.activate(p.fingerprint));
+ assert.deepEqual(f.writes,["patch"]);
+});
+test("missing or conflicting durable evidence never substitutes legacy record or metadata",async()=>{
+ for(const mutate of[
+  f=>f.map.delete("onboarding:identity:v1:agent_new"),
+  f=>f.map.delete("onboarding:provisioned:v1:agent_new"),
+  f=>f.map.get("onboarding:identity:v1:agent_new").client_id="another",
+  f=>f.map.get("onboarding:provisioned:v1:agent_new").llm_id="llm_other"]){
+  const f=fixture();f.agent.metadata={submission_id:"1234567890"};mutate(f);
+  await assert.rejects(f.prepare());assert.deepEqual(f.writes,[]);
+ }
 });
