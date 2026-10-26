@@ -65,13 +65,50 @@ function fixture() {
       const path = new URL(url).pathname; calls.push(["PATCH", path, options.params?.version]);
       if (path.startsWith("/update-phone-number")) { phone = { ...phone, ...clone(data) }; return { data: phone }; }
       assert.ok(Number.isSafeInteger(options.params.version));
-      [...versions.values()].find(d => d.llm.version === options.params.version).llm.general_prompt = data.general_prompt;
+      const llm = [...versions.values()].find(d => d.llm.version === options.params.version).llm;
+      llm.general_prompt = data.general_prompt;
+      if (Object.hasOwn(data,"begin_message")) llm.begin_message = data.begin_message;
       return { data: {} };
     },
   };
   const args = { kv, axios, base: "https://api.retellai.com", headers: {}, expectedLlm: "llm_mock", findUpgradeHits: () => [] };
   return { values, calls, versions, args, run: b => versionedBusiness({ ...args, body: b }) };
 }
+test("greeting contract through actual lease/adapter updates exact LLM field; replay and next business save preserve it",async()=>{
+  const f=fixture(),g=require("../lib/business-greeting");
+  f.versions.get(0).llm.begin_message="Brian here.";
+  function greetingBody(revision,phase="draft"){
+    const b={...body(revision,phase),renderer_version:g.RENDERER,
+      greeting:{text:"Welcome to the team.",expected_hash:g.greetingHash("Brian here.")}};
+    b.request_hash=g.identity(b);b.idempotency_key=g.key(b);return b;
+  }
+  const draft=await f.run(greetingBody(2));assert.equal(draft.greeting_hash,g.greetingHash("Welcome to the team."));
+  assert.equal(f.versions.get(1).llm.begin_message,"Welcome to the team.");
+  const active=await f.run(greetingBody(2,"active"));assert.equal(active.activation_verified,true);
+  const mutations=()=>f.calls.filter(x=>x[0]!=="GET" && x[1]!=="/v2/list-agents").length;
+  const writes=mutations();
+  await f.run(greetingBody(2,"active"));assert.equal(mutations(),writes);
+  const next=await f.run(greetingBody(3,"active"));assert.equal(next.agent_version,2);
+  const outbound=await outboundVersion({...f.args,agentId:"agent_mock",phoneNumber:"+15555550123"});
+  assert.equal(outbound,2);
+  assert.equal(f.versions.get(2).llm.begin_message,"Welcome to the team.");
+  assert.deepEqual(f.versions.get(2).llm.general_tools,f.versions.get(0).llm.general_tools);
+});
+test("published greeting inspection is exact-version, read-only and rejects mixed routes",async()=>{
+  const f=fixture();f.versions.get(0).llm.begin_message="Brian here.";
+  const {inspectGreeting}=require("../lib/greeting-inspection");
+  const b={operation:"inspect_greeting_v1",client_id:"mock",agent_id:"agent_mock",phone_number:"+15555550123"};
+  const result=await inspectGreeting({...f.args,body:b});
+  assert.equal(result.greeting,"Brian here.");assert.equal(result.agent_version,0);assert.equal(result.llm_version,10);
+  assert.ok(f.calls.every(c=>c[0]==="GET" || c[1]==="/v2/list-agents"));
+  const get=f.args.axios.get;
+  f.args.axios.get=async(url,options)=>{
+    const r=await get(url,options);
+    if(url.includes("/get-phone-number"))r.data.outbound_agents[0].agent_version=99;
+    return r;
+  };
+  await assert.rejects(inspectGreeting({...f.args,body:b}),/CALL_ROUTING_REVIEW_REQUIRED/);
+});
 test("real contract/lease/adapter: two saves, exact versions, published routing and outbound override", async () => {
   const f = fixture();
   for (const rev of [2, 3]) {

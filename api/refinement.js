@@ -188,13 +188,17 @@ return require("../lib/ownership-budget").handler(async function handler(req, re
     // Dispatch before ANY legacy parsing or append code. Unknown explicit
     // operations cannot silently fall back to legacy, even when null/empty.
     if (Object.hasOwn(body, "operation")) {
-      if (![OPERATION, PUBLISH_OPERATION, "replace_business_section_v2", "publish_business_section_v2", "apply_business_revision_v3"].includes(body.operation)) fail(400, "UNKNOWN_OPERATION");
+      if (![OPERATION, PUBLISH_OPERATION, "replace_business_section_v2", "publish_business_section_v2", "apply_business_revision_v3", "inspect_greeting_v1"].includes(body.operation)) fail(400, "UNKNOWN_OPERATION");
       const pilot = enablePilot && pilotMatches(body);
-      const grant = !enableSection && !pilot && body.operation === "apply_business_revision_v3"
+      const grant = !enableSection && !pilot && ["apply_business_revision_v3","inspect_greeting_v1"].includes(body.operation)
         ? await require("../lib/business-enrollment").grantFor(kv, body) : null;
       if (!enableSection && !enablePilot && !grant) fail(503, "SECTION_REPLACEMENT_DISABLED");
       if (!enableSection && !pilot && !grant) fail(403, "PILOT_SCOPE_DENIED");
       const expectedLlm = grant ? grant.llm_id : enableSection ? undefined : PILOT.llmId;
+      if (body.operation === "inspect_greeting_v1") return res.status(200).json(
+        await require("../lib/greeting-inspection").inspectGreeting({
+          body,kv,axios,base:RETELL_BASE,headers:retellHeaders(),expectedLlm
+        }));
       if (body.operation === "apply_business_revision_v3") return res.status(200).json(await require("../lib/versioned-business").versionedBusiness({
         body, kv, axios, base: RETELL_BASE, headers: retellHeaders(), expectedLlm, findUpgradeHits,
         enrollmentBaseline: grant?.baseline_hash,
