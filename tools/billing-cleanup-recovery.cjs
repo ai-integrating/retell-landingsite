@@ -1,4 +1,4 @@
-const {timingSafeEqual,createHash}=require("node:crypto");
+const {timingSafeEqual}=require("node:crypto");
 const {hash}=require("../lib/billing-cancellation");
 // This entry point has NO suspend/call/purchase/publication capability.
 async function recover({manifest,grant,token,secret,executionSecret,io}){
@@ -15,7 +15,8 @@ async function recover({manifest,grant,token,secret,executionSecret,io}){
  if(await io.inventoryHash(manifest.runId)!==hash(resources))throw Error("CREATION_INVENTORY_CHANGED");
  await io.assertIdle();
  await io.retainEvidence();
- for(const r of [...resources].sort((a,b)=>(a.kind==="number"?0:1)-(b.kind==="number"?0:1))){
+ const order={number:0,agent:1,llm:2};
+ for(const r of [...resources].sort((a,b)=>order[a.kind]-order[b.kind])){
  if(grant.expiresAt<=io.now())throw Error("CLEANUP_GRANT_EXPIRED");
  await io.assertIdle();
  if(await io.exists(r))await io.remove(r); // uncertainty stops; next invocation reads first
