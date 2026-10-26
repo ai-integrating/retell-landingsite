@@ -183,6 +183,7 @@ return require("../lib/ownership-budget").handler(async function handler(req, re
     }
 
     const body = await readJsonBody(req);
+    await require("../lib/billing-cancellation").assertAllowed("agent_routes",body.agent_id||body.agentId);
     if (!body || typeof body !== "object" || Array.isArray(body)) fail(400, "INVALID_REQUEST");
 
     // Dispatch before ANY legacy parsing or append code. Unknown explicit

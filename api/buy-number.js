@@ -223,6 +223,7 @@ module.exports = async (req, res) => {
 
   try {
     const body = await readJsonBody(req);
+    await require("../lib/billing-cancellation").assertAllowed("agent_routes",body.agent_id);
 
     const agentId = pick(body, ["agent_id", "retell_agent_id"], "");
     if (require("../lib/mcduffy-write-guard").protectedSetup(body)) {
