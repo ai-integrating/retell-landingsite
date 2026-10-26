@@ -68,7 +68,7 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  store.save(kind+"-grant.json",{grant,signature:sign(grant,store.read("keys.json")[kind])});
  return {authorizationCreated:true,kind,expiresAt:grant.expiresAt};
  }
- if(cmd==="status")return {runId:s.runId,source:s.source,created:s.created.length,attempts:s.attempts.length,
+ if(cmd==="status")return {runId:s.runId,source:provenance(),initializedSource:s.source,created:s.created.length,attempts:s.attempts.length,
  pending:Object.keys(s.pending).filter(k=>s.pending[k]),removed:s.removed.length};
  const cleanup=cmd==="cleanup",grant=verifyGrant(store,s,cleanup?"cleanup":"execution");
  check(cleanup||!s.closed,"RUN_CLOSED");
@@ -127,12 +127,16 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  await create("agent","/create-agent",{agent_name:"SYNTHETIC CANCELLATION "+s.runId,
  response_engine:{type:"retell-llm",llm_id:s.ids.llm,version:0},voice_id:"retell-Cimo",max_call_duration_ms:60000});
  let agent=await read("agent");check(agent?.version===0&&agent.max_call_duration_ms===60000,"AGENT_VERSION_OR_DURATION");
+ check(agent.response_engine?.llm_id===s.ids.llm&&agent.response_engine?.version===0,"AGENT_LLM_BINDING");
+ check(Array.isArray(llm.general_tools)&&llm.general_tools.length===0&&Array.isArray(llm.states)&&llm.states.length===0,"UNEXPECTED_TOOLS_OR_STATES");
  if(!agent.is_published){
  check(!s.pending.publish,"PUBLICATION_UNCERTAIN");
  s.pending.publish=true;save();await api("POST",`/publish-agent-version/${s.ids.agent}`,{version:0});
  }
  agent=await read("agent");check(agent?.is_published===true,"PUBLICATION_UNCONFIRMED");
- s.pending.publish=false;s.agentHash=hash(agent);s.llmHash=hash(await read("llm"));save();
+ const publishedLlm=await read("llm");
+ check(publishedLlm?.llm_id===s.ids.llm&&publishedLlm.version===0&&publishedLlm.is_published===true,"LLM_PUBLICATION_UNCONFIRMED");
+ s.pending.publish=false;s.agentHash=hash(agent);s.llmHash=hash(publishedLlm);save();
  return {prepared:true};
  }
  if(cmd==="purchase"){

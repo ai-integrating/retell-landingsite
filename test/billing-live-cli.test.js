@@ -12,7 +12,7 @@ test("live CLI is auth gated; isolated full flow and expired-execution cleanup u
  if(opt.method!=="GET")writes.push(p);
  if(p==="/create-retell-llm"){resources.llm={...body,llm_id:"llm_test",version:0};return Response.json(resources.llm);}
  if(p==="/create-agent"){resources.agent={...body,agent_id:"agent_test",version:0,is_published:false};return Response.json(resources.agent);}
- if(p==="/publish-agent-version/agent_test"){resources.agent.is_published=true;if(!lostPublish){lostPublish=true;throw Error("lost publication reply");}return Response.json({});}
+ if(p==="/publish-agent-version/agent_test"){resources.agent.is_published=true;resources.llm.is_published=true;if(!lostPublish){lostPublish=true;throw Error("lost publication reply");}return Response.json({});}
  if(p==="/create-phone-number"){resources.number={...body,phone_number:"+15550001111"};return Response.json(resources.number);}
  if(p==="/v2/create-phone-call"){
  assert.equal(body.to_number,process.env.RETELL_TEST_CONSENTING_PHONE);
@@ -57,6 +57,25 @@ test("live CLI is auth gated; isolated full flow and expired-execution cleanup u
  }finally{
  if(oldKey===undefined)delete process.env.RETELL_API_KEY;else process.env.RETELL_API_KEY=oldKey;
  if(oldPhone===undefined)delete process.env.RETELL_TEST_CONSENTING_PHONE;else process.env.RETELL_TEST_CONSENTING_PHONE=oldPhone;
+ fs.rmSync(dir,{recursive:true,force:true});
+ }
+});
+test("unknown creation response stops and never retries creation",async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),"billing-cli-unknown-"));
+ const beforeKey=process.env.RETELL_API_KEY,beforePhone=process.env.RETELL_TEST_CONSENTING_PHONE;
+ process.env.RETELL_API_KEY="offline";process.env.RETELL_TEST_CONSENTING_PHONE="+15550002222";
+ let requests=0;
+ const fetcher=async()=>{requests++;throw Error("unknown creation response");};
+ try{
+ await command("init",dir);
+ await command("authorize-execution",dir,{approval:{approved:true,reviewReference:"offline-unknown-test",expiresAt:Date.now()+60000,
+ workspaceId:"synthetic",accountConfirmed:true,pricingVerified:true,maxAttempts:3,maxSeconds:60}});
+ await assert.rejects(command("prepare",dir,{fetcher}),/unknown creation/);
+ await assert.rejects(command("prepare",dir,{fetcher}),/UNCERTAIN_OPERATION/);assert.equal(requests,1);
+ assert.deepEqual((await command("status",dir)).pending,["llm"]);
+ }finally{
+ if(beforeKey===undefined)delete process.env.RETELL_API_KEY;else process.env.RETELL_API_KEY=beforeKey;
+ if(beforePhone===undefined)delete process.env.RETELL_TEST_CONSENTING_PHONE;else process.env.RETELL_TEST_CONSENTING_PHONE=beforePhone;
  fs.rmSync(dir,{recursive:true,force:true});
  }
 });
