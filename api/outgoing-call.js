@@ -224,6 +224,8 @@ module.exports = async (req, res) => {
     }
 
     const url = "https://api.retellai.com/v2/create-phone-call";
+    await require("../lib/billing-cancellation").assertAllowed("outbound", agent_id);
+    await require("../lib/billing-cancellation").assertAllowed("phone_outbound", from_number);
 
     // Dynamic outbound-call information
     const safeClientName = asString(client_name, "there");

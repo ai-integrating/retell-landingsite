@@ -111,6 +111,8 @@ module.exports = async (req, res) => {
         client_id: clientId,
       });
     }
+    await require("../lib/billing-cancellation").assertAllowed("outbound", config.outbound_agent_id || "");
+    await require("../lib/billing-cancellation").assertAllowed("phone_outbound", config.from_number || "");
 
     if (config.enabled === false) {
       return json(res, 200, {

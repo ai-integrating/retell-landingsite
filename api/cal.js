@@ -671,6 +671,7 @@ return json(res, 200, {
 async function handleBook(req, res, body) {
   const ctx = await resolveCalContext(req, body);
   if (ctx.error) return json(res, 400, { error: ctx.error });
+  await require("../lib/billing-cancellation").assertAllowed("booking", ctx.agentId);
 
   const args = body.args || body;
   const originalBookingUid = asString(

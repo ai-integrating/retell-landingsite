@@ -1,0 +1,6 @@
+{
+  "phone_number": "+15550001111",
+  "outbound_agents": [
+    {"agent_id": "synthetic", "agent_version": 0, "weight": 1}
+  ]
+}
