@@ -1,5 +1,6 @@
 {
   "functions": {
+    "api/billing-live-service-control.js": { "maxDuration": 60 },
     "api/onboarding-business.js": { "maxDuration": 60 },
     "api/business-enrollment.js": { "maxDuration": 60 },
     "api/mcduffy-adoption.js": { "maxDuration": 60 },
