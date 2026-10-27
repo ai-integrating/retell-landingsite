@@ -4,6 +4,37 @@ const {execFileSync}=require("node:child_process");
 const {hash,operation}=require("../lib/billing-cancellation");
 const BASE="3df6a5db6f9b6c94176da0fc4cc37b6fadf031c1";
 const check=(ok,code)=>{if(!ok)throw Error(code);};
+const RESPONSE_LIMIT=65536;
+async function decodeProviderResponse(response,{method,p,record}){
+ const endpoint=p.split("?")[0].split("/")[1];
+ const type=response.headers.get("content-type")||"";
+ const contentType=/json/i.test(type)?"json":/html/i.test(type)?"html":/^text\//i.test(type)?"text":type?"other":"missing";
+ const note=outcome=>record({method,endpoint,status:response.status,contentType,...outcome});
+ // Only a resource GET may establish absence. A failed write is never an empty success.
+ if(response.status===404&&method==="GET"){note({outcome:"not_found"});return null;}
+ let text="",bytes=0;
+ try{
+ const reader=response.body?.getReader(),decoder=new TextDecoder();
+ if(reader)try{
+ for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;
+ if(bytes>RESPONSE_LIMIT){await reader.cancel();note({outcome:"body_limit",bytes:RESPONSE_LIMIT+1});throw Error("PROVIDER_RESPONSE_TOO_LARGE");}
+ text+=decoder.decode(value,{stream:true});}
+ text+=decoder.decode();
+ }finally{reader.releaseLock();}
+ }catch(e){
+ if(e.message==="PROVIDER_RESPONSE_TOO_LARGE")throw e;
+ note({outcome:"body_read_failure",bytes:Math.min(bytes,RESPONSE_LIMIT+1)});throw Error("PROVIDER_RESPONSE_READ_FAILED");
+ }
+ let parsed,format=text.trim()?"malformed_json":"empty";
+ if(text.trim())try{parsed=JSON.parse(text);format="json";}catch{if(!/^[{["\d\-tfn]/.test(text.trim()))format="non_json";}
+ note({outcome:response.ok?format:"http_error",bodyFormat:format,bytes});
+ if(!response.ok)throw Error("PROVIDER_HTTP_"+response.status);
+ const ackOnly=method==="DELETE"||method==="PATCH"||(method==="POST"&&endpoint==="publish-agent-version");
+ if(format==="empty"&&ackOnly)return {};
+ if(format!=="json")throw Error("PROVIDER_RESPONSE_"+format.toUpperCase());
+ if(parsed===null||typeof parsed!=="object")throw Error("PROVIDER_RESPONSE_INVALID_SHAPE");
+ return parsed;
+}
 function write(file,data){
  const tmp=file+"."+crypto.randomUUID()+".tmp",fd=fs.openSync(tmp,"wx",0o600);
  try{fs.writeFileSync(fd,JSON.stringify(data));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
@@ -87,15 +118,18 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  if(!cleanup){s.accountKeyHash=grant.keyHash;save();}
  const api=async(method,p,body)=>{
  verifyGrant(store,s,cleanup?"cleanup":"execution");
- const response=await fetcher("https://api.retellai.com"+p,{method,redirect:"error",signal:AbortSignal.timeout(20000),
+ const record=event=>{
+ const name="provider-diagnostics.json";
+ const previous=fs.existsSync(path.join(root,name))?store.read(name):[];
+ store.save(name,[...previous.slice(-19),{at:Date.now(),...event}]);
+ };
+ record({method,endpoint:p.split("?")[0].split("/")[1],outcome:"dispatch"});
+ let response;
+ try{response=await fetcher("https://api.retellai.com"+p,{method,redirect:"error",signal:AbortSignal.timeout(20000),
  headers:{Authorization:`Bearer ${process.env.RETELL_API_KEY}`,"Content-Type":"application/json"},
- ...(body?{body:JSON.stringify(body)}:{})});
- if(response.status===404)return null;
- if(!response.ok){let code="";try{const j=await response.json();code=String(j.error?.code||j.code||"").replace(/[^A-Za-z0-9_-]/g,"").slice(0,80);}catch{}
- store.save("provider-error.json",{status:response.status,method,endpoint:p.split("?")[0].replace(/\/(agent_|llm_).*/,"/[test-resource]"),code});
- throw Error("PROVIDER_HTTP_"+response.status);}
- if(response.status===204)return {};
- return response.json();
+ ...(body?{body:JSON.stringify(body)}:{})});}
+ catch(e){record({method,endpoint:p.split("?")[0].split("/")[1],outcome:"transport_failure"});throw e;}
+ return decodeProviderResponse(response,{method,p,record});
  };
  const ep=(kind,verb)=>`/${verb}-${{number:"phone-number",agent:"agent",llm:"retell-llm"}[kind]}/${encodeURIComponent(s.ids[kind])}`;
  const read=kind=>api("GET",ep(kind,"get")+(kind==="number"?"":"?version=0"));
@@ -220,4 +254,4 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
 if(require.main===module)command(process.argv[2],path.resolve(process.argv[3]||".local/billing-live-test"),
  {approval:process.argv[4]?JSON.parse(fs.readFileSync(process.argv[4],"utf8")):undefined})
  .then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(/^[A-Z_0-9]+$/.test(e.message)?e.message:"TEST_STOPPED_REVIEW_PRIVATE_STATE");process.exitCode=1;});
-module.exports={command,init,verifyGrant,sign,provenance};
+module.exports={command,init,verifyGrant,sign,provenance,decodeProviderResponse};

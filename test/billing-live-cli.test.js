@@ -1,5 +1,5 @@
 const {test}=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),os=require("node:os"),path=require("node:path");
-const {command,sign}=require("../tools/billing-live-cli.cjs");
+const {command,sign,decodeProviderResponse}=require("../tools/billing-live-cli.cjs");
 test("live CLI is auth gated; isolated full flow and expired-execution cleanup use only test IDs",async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"billing-cli-"));
  const oldKey=process.env.RETELL_API_KEY,oldPhone=process.env.RETELL_TEST_CONSENTING_PHONE;
@@ -60,6 +60,64 @@ test("live CLI is auth gated; isolated full flow and expired-execution cleanup u
  fs.rmSync(dir,{recursive:true,force:true});
  }
 });
+test("response parser bounds and sanitizes diagnostics; malformed reads and failed writes fail closed",async()=>{
+ const notes=[],record=e=>notes.push(e);
+ const parse=(response,method="GET",p="/get-agent/agent_private?version=0")=>decodeProviderResponse(response,{method,p,record});
+ await assert.rejects(parse(new Response("")),/RESPONSE_EMPTY/);
+ await assert.rejects(parse(new Response("<html>Bearer SECRET +15550002222 private@example.com</html>",{headers:{"content-type":"text/html"}})),/RESPONSE_NON_JSON/);
+ await assert.rejects(parse(new Response('{"secret":"PRIVATE",')),/RESPONSE_MALFORMED_JSON/);
+ await assert.rejects(parse(new Response("x".repeat(65537))),/TOO_LARGE/);
+ await assert.rejects(parse(new Response("",{status:404}),"POST","/create-agent"),/HTTP_404/);
+ assert.equal(await parse(new Response("",{status:404})),null);
+ assert.deepEqual(await parse(new Response("",{status:200}),"POST","/publish-agent-version/agent_private"),{});
+ assert.deepEqual(await parse(new Response(null,{status:204}),"DELETE","/delete-agent/agent_private"),{});
+ await assert.rejects(parse(new Response("null")),/INVALID_SHAPE/);
+ const encoded=JSON.stringify(notes);
+ for(const sensitive of ["SECRET","PRIVATE","private@example","15550002222","agent_private"])assert.ok(!encoded.includes(sensitive));
+});
+for(const variant of ["empty","malformed","non_json","unpublished","readback_malformed"]){
+ test("publication response "+variant+" recovers by exact read-back without duplicate publication",async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),"billing-parser-"));
+ const oldKey=process.env.RETELL_API_KEY,oldPhone=process.env.RETELL_TEST_CONSENTING_PHONE;
+ process.env.RETELL_API_KEY="offline";process.env.RETELL_TEST_CONSENTING_PHONE="+15550002222";
+ let llm,agent,publications=0,badRead=variant==="readback_malformed";
+ const fetcher=async(url,opt)=>{
+ const p=new URL(url).pathname,body=opt.body?JSON.parse(opt.body):null;
+ if(p==="/create-retell-llm"){llm={...body,llm_id:"llm_test",version:0};return Response.json(llm);}
+ if(p==="/create-agent"){agent={...body,agent_id:"agent_test",version:0,is_published:false};return Response.json(agent);}
+ if(p==="/get-retell-llm/llm_test")return Response.json(llm);
+ if(p==="/get-agent/agent_test"){
+ if(publications&&badRead){badRead=false;return new Response('{"broken":');}
+ return Response.json(agent);}
+ if(p==="/publish-agent-version/agent_test"){
+ publications++;if(variant!=="unpublished"){agent.is_published=true;llm.is_published=true;}
+ return new Response(variant==="malformed"?'{"broken":':variant==="non_json"?"<html>secret response</html>":"",{status:200});
+ }
+ throw Error("UNEXPECTED_OFFLINE_DISPATCH");
+ };
+ const run=()=>command("prepare",dir,{fetcher});
+ try{
+ await command("init",dir);
+ await command("authorize-execution",dir,{approval:{approved:true,reviewReference:"offline-parser-test",expiresAt:Date.now()+300000,
+ workspaceId:"synthetic",accountConfirmed:true,pricingVerified:true,maxAttempts:3,maxSeconds:60}});
+ // The legacy unconditional response.json() reproduces a SyntaxError for an empty 200 acknowledgment.
+ if(variant==="empty")await assert.rejects(new Response("").json(),SyntaxError);
+ if(variant==="empty")assert.equal((await run()).prepared,true);
+ else await assert.rejects(run(),variant==="unpublished"?/PUBLICATION_UNCONFIRMED/:/PROVIDER_RESPONSE_/);
+ if(variant==="unpublished")await assert.rejects(run(),/PUBLICATION_UNCERTAIN/);
+ else {assert.equal((await run()).prepared,true);assert.equal((await run()).prepared,true);}
+ assert.equal(publications,1);
+ const diagnostics=JSON.parse(fs.readFileSync(path.join(dir,"provider-diagnostics.json")));
+ assert.ok(diagnostics.length<=20);
+ assert.ok(!JSON.stringify(diagnostics).includes("secret response"));
+ if(variant!=="unpublished")assert.deepEqual((await command("status",dir)).pending,[]);
+ }finally{
+ if(oldKey===undefined)delete process.env.RETELL_API_KEY;else process.env.RETELL_API_KEY=oldKey;
+ if(oldPhone===undefined)delete process.env.RETELL_TEST_CONSENTING_PHONE;else process.env.RETELL_TEST_CONSENTING_PHONE=oldPhone;
+ fs.rmSync(dir,{recursive:true,force:true});
+ }
+ });
+}
 test("unknown creation response stops and never retries creation",async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"billing-cli-unknown-"));
  const beforeKey=process.env.RETELL_API_KEY,beforePhone=process.env.RETELL_TEST_CONSENTING_PHONE;
