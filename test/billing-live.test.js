@@ -4,6 +4,21 @@ const policy=require("../lib/billing-live-policy");
 test("live resources are disabled and no customer is approved",()=>{
  assert.equal(policy.LIVE_ENABLED,false);assert.deepEqual(policy.APPROVED_RESOURCES,[]);
 });
+test("live admission survives disabled gates, empty approvals and processing pause; storage failure closes admission",async()=>{
+ const holds=new Map();let failure=false;
+ const context={module:{exports:{}},process:{env:{BILLING_CANCELLATION_PAUSED:"true"}},
+ require:n=>n==="@vercel/kv"?{kv:{get:async k=>{if(failure)throw Error("STORAGE_UNAVAILABLE");return holds.get(k);}}}:require(n)};
+ vm.runInNewContext(fs.readFileSync(require.resolve("../lib/billing-cancellation"),"utf8"),context);
+ const admit=context.module.exports.assertAllowed;
+ for(const kind of ["booking","outbound","phone_inbound","phone_outbound","phone_writes","agent_routes"]){
+  holds.set(`billing:live:hold:${kind}:suspended`,{intentId:"retained"});
+  await assert.rejects(admit(kind,"suspended"),/BILLING_SERVICE_SUSPENDED/);
+  await admit(kind,"unheld-shared");
+ }
+ failure=true;await assert.rejects(admit("booking","unheld-shared"),/STORAGE_UNAVAILABLE/);
+ await assert.rejects(admit("outbound","unheld-shared"),/STORAGE_UNAVAILABLE/);
+ assert.equal(holds.size,6);
+});
 test("live namespace recovers lost routing response, retains number and rejects changed ownership",async()=>{
  const route=[{agent_id:"synthetic",agent_version:0,weight:1}];
  const r={key:"voice",clientId:900009,testOnly:false,numberPolicy:"retain_disconnected",
