@@ -28,7 +28,7 @@ test("setup identities detected in request/record despite different test submiss
 });
 test("actual legacy refinement rejects journal-free target, browser bypass flags ignored",async()=>{
  let gets=0;
- const handler=createHandler({apiKey:"mock",secret:"mock",kv:{get:async()=>{throw Error("NO_KV");}},
+ const handler=createHandler({apiKey:"mock",secret:"mock",kv:{get:async key=>{if(key.startsWith("billing:live:hold:"))return null;throw Error("NO_KV");}},
   axios:{get:async()=>{gets++;return {data:{response_engine:{type:"retell-llm",llm_id:review.llm_id}}};},
   patch:async()=>{throw Error("NO_PATCH");},post:async()=>{throw Error("NO_PUBLISH");}}});
  const res=response();

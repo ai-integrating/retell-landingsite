@@ -25,7 +25,7 @@ async function invoke(body, enablePilot = false, mapped = true) {
   const forbidden = async () => { throw Error("Writes forbidden in pilot gate tests"); };
   const handler = createHandler({
     secret: "test-only", apiKey: "mock-only", enableSection: false, enablePilot,
-    kv: {get:async()=>{reads++;return mapped ? PILOT.clientId : "different-client";},set:forbidden,eval:forbidden},
+    kv: {get:async key=>{if(key.startsWith("billing:live:hold:"))return null;reads++;return mapped ? PILOT.clientId : "different-client";},set:forbidden,eval:forbidden},
     axios: {get:async()=>{reads++;return {data:{agent_id:PILOT.agentId,response_engine:{type:"retell-llm",llm_id:mapped ? "llm_changed" : PILOT.llmId}}};},
       post:forbidden,patch:forbidden},
   });
