@@ -2,7 +2,7 @@
 const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto");
 const {execFileSync}=require("node:child_process");
 const {hash,operation,emptyRoute}=require("../lib/billing-cancellation");
-const BASE="a7f78399ab023f26e654dc2119d7db6c94305861";
+const BASE="9853fd7a62a52fb8c54dfa4a903021e575d0689b";
 const check=(ok,code)=>{if(!ok)throw Error(code);};
 const RESPONSE_LIMIT=65536;
 async function decodeProviderResponse(response,{method,p,record}){
