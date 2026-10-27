@@ -23,8 +23,9 @@ test("lost phone response recovers; opposite route, number and configuration sur
 });
 for(const representation of ["omitted","null","empty"]){
  test("cleared "+representation+" requires matching durable intent; recover and replay both directions",async()=>{
- const kv=new Map(),route=[{agent_id:"synthetic",agent_version:0,weight:1}];
- const phone={phone_number:"+15550001111",inbound_agents:structuredClone(route),outbound_agents:structuredClone(route)};
+ const fixture=require("./fixtures/retell-cleared-route.json");
+ const kv=new Map(),route=structuredClone(fixture.outbound_agents);
+ const phone={...structuredClone(fixture),inbound_agents:structuredClone(route)};
  kv.set("agent:synthetic:client","client");
  const intent={id:"intent",clientId:999,bindingId:"binding",action:"suspend",serviceKeys:["in","out"],effectiveAt:99};
  for(const [key,kind] of [["in","phone_inbound"],["out","phone_outbound"]])kv.set("billing:test:resource:"+key,
@@ -36,9 +37,21 @@ for(const representation of ["omitted","null","empty"]){
  const body=key=>({action:"suspend",key,clientId:999,bindingId:"binding",ownershipHash:"review-"+key,intent});
  await assert.rejects(operation(io,body("in")),/lost response/);
  assert.deepEqual(phone.outbound_agents,route);
+ if(representation==="omitted")assert.deepEqual(phone,fixture);
  assert.equal((await operation(io,body("in"))).state,"suspended");
  assert.equal((await operation(io,body("out"))).state,"suspended");
  await operation(io,body("in"));await operation(io,body("out"));assert.equal(writes,2);
+ const otherHold=kv.get("billing:test:hold:phone_outbound:"+phone.phone_number);
+ otherHold.ownershipHash="foreign";
+ await assert.rejects(operation(io,body("in")),/OTHER_ROUTE_CHANGED/);
+ otherHold.ownershipHash="review-out";
+ const otherJournal=kv.get("billing:test:journal:intent:"+hash("out")),originalHash=otherJournal.hash;
+ otherJournal.hash="foreign";
+ await assert.rejects(operation(io,body("in")),/OTHER_ROUTE_CHANGED/);
+ otherJournal.hash=originalHash;
+ phone.fallback_number="+15550009999";
+ await assert.rejects(operation(io,body("in")),/PHONE_SCOPE_CHANGED/);
+ delete phone.fallback_number;assert.equal(writes,2);
  // Wrong intent's hold must not validate an absent direction.
  kv.get("billing:test:hold:phone_inbound:"+phone.phone_number).intentId="old";
  await assert.rejects(operation(io,body("in")),/UNEXPLAINED_EMPTY_ROUTE/);

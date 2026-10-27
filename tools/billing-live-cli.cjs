@@ -1,8 +1,8 @@
 // Operator-only, never imported by the application. No operation runs on import.
 const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto");
 const {execFileSync}=require("node:child_process");
-const {hash,operation}=require("../lib/billing-cancellation");
-const BASE="3df6a5db6f9b6c94176da0fc4cc37b6fadf031c1";
+const {hash,operation,emptyRoute}=require("../lib/billing-cancellation");
+const BASE="9889b5e33cf95f38e2825f14595289b6f1c8d996";
 const check=(ok,code)=>{if(!ok)throw Error(code);};
 const RESPONSE_LIMIT=65536;
 async function decodeProviderResponse(response,{method,p,record}){
@@ -186,9 +186,10 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  if(["inbound","outbound","post-shutdown-inbound"].includes(cmd)){
  check(s.phone,"PURCHASE_FIRST");await idle();await preserve();
  const currentPhone=await read("number");
- check(currentPhone?.phone_number===s.ids.number&&!currentPhone.inbound_webhook_url&&!currentPhone.fallback_number,"PHONE_SCOPE_CHANGED");
+ check(currentPhone?.phone_number===s.ids.number&&!currentPhone.inbound_webhook_url&&!currentPhone.fallback_number&&
+ !currentPhone.fallback_numbers&&!currentPhone.inbound_agent_id&&!currentPhone.outbound_agent_id,"PHONE_SCOPE_CHANGED");
  for(const field of ["inbound_agents","outbound_agents"])
- check(hash(currentPhone[field])===hash(s.suspended?[]:s.phone[field]),"PHONE_ROUTING_CHANGED");
+ check(s.suspended?emptyRoute(currentPhone[field]):hash(currentPhone[field]??null)===hash(s.phone[field]),"PHONE_ROUTING_CHANGED");
  const wanted=["inbound","outbound","post-shutdown-inbound"][s.attempts.length];
  check(wanted===cmd&&s.attempts.length<3,"ATTEMPT_ORDER_OR_LIMIT");
  check(cmd!=="post-shutdown-inbound"||s.suspended,"SHUTDOWN_FIRST");
@@ -221,7 +222,8 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  if(cmd==="verify"){
  check(approval?.inboundShutdownObserved===true,"OPERATOR_SHUTDOWN_OBSERVATION_REQUIRED");
  await idle();await preserve();const p=await read("number");
- check(s.suspended&&p&&Array.isArray(p.inbound_agents)&&p.inbound_agents.length===0&&Array.isArray(p.outbound_agents)&&p.outbound_agents.length===0,"SHUTDOWN_UNCONFIRMED");
+ check(s.suspended&&p&&p.phone_number===s.ids.number&&!p.inbound_webhook_url&&!p.fallback_number&&
+ !p.fallback_numbers&&!p.inbound_agent_id&&!p.outbound_agent_id&&emptyRoute(p.inbound_agents)&&emptyRoute(p.outbound_agents),"SHUTDOWN_UNCONFIRMED");
  const rows=await calls();check(rows.length<=3,"UNEXPECTED_CALLS");
  check(s.attempts.length===3,"THREE_ATTEMPTS_NOT_RECORDED");
  check(rows.every(c=>!Number.isFinite(c.duration_ms)||c.duration_ms<=60000),"DURATION_EXCEEDED");
@@ -238,9 +240,10 @@ async function command(cmd,root,{fetcher=fetch,approval}={}){
  check(s.created.some(r=>r.kind===kind&&r.id===s.ids[kind]),"CLEANUP_SCOPE");
  const current=await read(kind);
  if(kind==="number"&&current){
- check(!current.inbound_webhook_url&&!current.fallback_number,"CLEANUP_ROUTING_REVIEW");
+ check(current.phone_number===s.ids.number&&!current.inbound_webhook_url&&!current.fallback_number&&
+ !current.fallback_numbers&&!current.inbound_agent_id&&!current.outbound_agent_id,"CLEANUP_ROUTING_REVIEW");
  for(const field of ["inbound_agents","outbound_agents"])
- check(Array.isArray(current[field])&&current[field].every(r=>r.agent_id===s.ids.agent&&r.agent_version===0),"CLEANUP_ROUTING_REVIEW");
+ check(emptyRoute(current[field])||Array.isArray(current[field])&&current[field].every(r=>r.agent_id===s.ids.agent&&r.agent_version===0),"CLEANUP_ROUTING_REVIEW");
  }
  if(current)await api("DELETE",ep(kind,"delete"));
  check(await read(kind)===null,"REMOVAL_UNCONFIRMED");

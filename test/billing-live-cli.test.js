@@ -25,7 +25,11 @@ test("live CLI is auth gated; isolated full flow and expired-execution cleanup u
  const expected={number:"+15550001111",agent:"agent_test",llm:"llm_test"}[kind];
  assert.ok(p.endsWith("/"+expected),"no customer IDs in any dispatch");
  if(opt.method==="DELETE"){delete resources[kind];if(!lostDelete){lostDelete=true;throw Error("lost deletion reply");}return new Response(null,{status:204});}
- if(opt.method==="PATCH"){Object.assign(resources[kind],body);return Response.json({});}
+ if(opt.method==="PATCH"){
+ Object.assign(resources[kind],body);
+ // Retained live response shape: a cleared direction is omitted, not [].
+ for(const field of ["inbound_agents","outbound_agents"])if(Array.isArray(resources[kind][field])&&!resources[kind][field].length)delete resources[kind][field];
+ return Response.json({});}
  return resources[kind]?Response.json(resources[kind]):new Response(null,{status:404});
  };
  const run=(cmd,approval)=>command(cmd,dir,{fetcher,approval});
@@ -50,6 +54,12 @@ test("live CLI is auth gated; isolated full flow and expired-execution cleanup u
  fs.writeFileSync(grantFile,JSON.stringify(grant));await assert.rejects(run("suspend"),/EXPIRED/);
  await assert.rejects(run("cleanup"));
  await run("authorize-cleanup",{approved:true,reviewReference:"cleanup-test-only",expiresAt:Date.now()+60000});
+ for(const [field,value] of [["fallback_number","+15550009999"],["inbound_agent_id","foreign"],["outbound_agents",[{agent_id:"foreign",agent_version:0,weight:1}]]]){
+ const prior=resources.number[field];resources.number[field]=value;
+ await assert.rejects(run("cleanup"),/CLEANUP_ROUTING_REVIEW/);
+ assert.equal(writes.filter(x=>x.startsWith("/delete-")).length,0);
+ if(prior===undefined)delete resources.number[field];else resources.number[field]=prior;
+ }
  await assert.rejects(run("cleanup"),/lost deletion/);
  assert.equal((await run("cleanup")).cleanupVerified,true);
  assert.deepEqual(Object.keys(resources),[]);
