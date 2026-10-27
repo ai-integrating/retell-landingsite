@@ -1,4 +1,26 @@
 const {test}=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),vm=require("node:vm"),path=require("node:path");
+test("buy-number resolves both aliases before hold admission; held alias never reaches provisioning",async()=>{
+ const holds=new Map([["billing:test:hold:agent_routes:held",{}]]),checked=[];let downstream=0,dispatches=0;
+ const kv={get:async k=>{checked.push(k);return holds.get(k);}};
+ const billing={module:{exports:{}},require:n=>n==="@vercel/kv"?{kv}:require(n)};
+ vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../lib/billing-cancellation.js"),"utf8")
+ .replace("const ENABLED = false;","const ENABLED = true;"),billing);
+ const sandbox={module:{exports:{}},console:{error(){}},process:{env:{}},require:n=>
+ n==="axios"?{post:async()=>{dispatches++;throw Error("UNEXPECTED_PROVIDER");}}:
+ n==="@vercel/kv"?{kv}:n==="../lib/billing-cancellation"?billing.module.exports:
+ n==="../lib/mcduffy-write-guard"?{protectedSetup:()=>false}:
+ n==="../lib/onboarding-business"?{blocksNumberSetup:async()=>{downstream++;return true;}}:require(n)};
+ vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../api/buy-number.js"),"utf8"),sandbox);
+ const run=async body=>{const res={setHeader(){},status(n){this.statusCode=n;return this;},json(v){this.body=v;return this;}};
+ await sandbox.module.exports({method:"POST",body},res);return res;};
+ for(const body of [{agent_id:"held"},{retell_agent_id:"held"}]){
+ const res=await run(body);assert.match(res.body.details,/BILLING_SERVICE_SUSPENDED/);
+ assert.equal(downstream,0);assert.equal(dispatches,0);
+ }
+ assert.ok(checked.every(k=>k.endsWith(":held")));
+ holds.clear();assert.equal((await run({retell_agent_id:"held"})).statusCode,423);
+ assert.equal(downstream,1);assert.equal(dispatches,0);
+});
 test("enabled admission rejects explicit agent and phone overrides; no hold preserves service",async()=>{
  const holds=new Map([["billing:test:hold:outbound:explicit-agent",{}],["billing:test:hold:phone_outbound:test-number",{}]]);
  const sandbox={module:{exports:{}},require:n=>n==="@vercel/kv"?{kv:{get:async k=>holds.get(k)}}:require(n)};
