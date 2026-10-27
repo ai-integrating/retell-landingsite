@@ -183,7 +183,6 @@ return require("../lib/ownership-budget").handler(async function handler(req, re
     }
 
     const body = await readJsonBody(req);
-    await require("../lib/billing-cancellation").assertAllowed("agent_routes",body.agent_id||body.agentId,kv);
     if (!body || typeof body !== "object" || Array.isArray(body)) fail(400, "INVALID_REQUEST");
 
     // Dispatch before ANY legacy parsing or append code. Unknown explicit
@@ -195,6 +194,7 @@ return require("../lib/ownership-budget").handler(async function handler(req, re
         ? await require("../lib/business-enrollment").grantFor(kv, body) : null;
       if (!enableSection && !enablePilot && !grant) fail(503, "SECTION_REPLACEMENT_DISABLED");
       if (!enableSection && !pilot && !grant) fail(403, "PILOT_SCOPE_DENIED");
+      await require("../lib/billing-cancellation").assertAllowed("agent_routes",body.agent_id||body.agentId,kv);
       const expectedLlm = grant ? grant.llm_id : enableSection ? undefined : PILOT.llmId;
       if (body.operation === "inspect_greeting_v1") return res.status(200).json(
         await require("../lib/greeting-inspection").inspectGreeting({
@@ -220,6 +220,7 @@ return require("../lib/ownership-budget").handler(async function handler(req, re
 
     if (require("../lib/mcduffy-write-guard").protectedSetup(body))
       fail(423, "MCDUFFY_LEGACY_WRITES_PAUSED");
+    await require("../lib/billing-cancellation").assertAllowed("agent_routes",body.agent_id||body.agentId,kv);
 
     refinement_request_id = decodeHtml(
       body.refinement_request_id || body.request_id || ""

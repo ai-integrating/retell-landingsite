@@ -179,7 +179,7 @@ test("actual number endpoint rejects an initializing target before any provider 
  const Module=require("node:module"),original=Module._load;
  let reads=0,providerCalls=0;
  Module._load=function(name,...args){
-  if(name==="@vercel/kv")return{kv:{get:async k=>{reads++;assert.equal(k,"agent:agent_new:initialization-llm");return"llm_new";}}};
+  if(name==="@vercel/kv")return{kv:{get:async k=>{if(k.startsWith("billing:live:hold:"))return null;reads++;assert.equal(k,"agent:agent_new:initialization-llm");return"llm_new";}}};
   if(name==="axios")return{post:async()=>{providerCalls++;throw Error("UNEXPECTED_PROVIDER_WRITE")}};
   return original.call(this,name,...args);
  };
