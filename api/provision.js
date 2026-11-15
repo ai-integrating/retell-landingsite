@@ -14,27 +14,39 @@ async function createMedicareFlow(body, businessName) {
     `${RETELL_BASE}/get-conversation-flow/${MEDICARE_FLOW_ID}`,
     { ...options, params: { version: MEDICARE_FLOW_VERSION } }
   );
-  // Preserve the existing onboarding blocks; do not require new JotForm fields.
+  // Reuse the current JotForm text blocks without adding required form fields.
   const globalInfo = String(pick(body, ["global_info", "universal_info", "global_setup"], ""));
   const schedulerSetup = String(pick(body, ["scheduler_setup", "scheduler_config"], ""));
+  const readLabel = (block, labels) => {
+    const accepted = labels.map(label => label.toLowerCase());
+    for (const line of String(block || "").split(/\r?\n/)) {
+      const match = line.match(/^\s*[-*]?\s*([^:=]+?)\s*[:=]\s*(.+?)\s*$/);
+      if (match && accepted.includes(match[1].trim().toLowerCase())) {
+        return match[2].trim();
+      }
+    }
+    return "";
+  };
+  const ownerName = String(pick(body, ["owner_name", "broker_name", "contact_name"], "")) ||
+    readLabel(globalInfo, ["Owner Name", "Contact Name", "Full Name", "Name"]);
+  const officePhone = String(pick(body, ["office_phone", "business_phone", "phone"], "")) ||
+    readLabel(globalInfo, ["Business Phone", "Business Phone Number", "Office Phone", "Primary Phone"]);
   const variables = {
     business_name: businessName,
     global_info: globalInfo,
     scheduler_setup: schedulerSetup,
     scheduling_rules: String(pick(body, ["scheduling_rules"], schedulerSetup)),
+    owner_name: ownerName,
+    broker_name: ownerName,
+    owner_first_name: String(pick(body, ["owner_first_name", "first_name"], "")) ||
+      (ownerName ? ownerName.split(/\s+/)[0] : ""),
+    office_phone: officePhone,
   };
-  // Explicit fields override derived setup. Never copy template customer defaults.
   for (const key of [
-    "owner_name", "owner_first_name", "office_phone",
     "location_1_name", "location_1_days", "location_1_hours", "location_1_address",
     "location_2_name", "location_2_days", "location_2_hours", "location_2_address",
   ]) {
     variables[key] = String(pick(body, [key], ""));
-  }
-  // The existing global_info formatter labels the business contact phone.
-  if (!variables.office_phone && globalInfo) {
-    const phoneMatch = globalInfo.match(/business_phone[^:\\n]*:\\s*([^\\n]+)/i);
-    if (phoneMatch) variables.office_phone = phoneMatch[1].trim();
   }
 
   const { data } = await axios.post(
