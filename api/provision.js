@@ -30,7 +30,11 @@ async function createMedicareFlow(body, businessName) {
   const ownerName = String(pick(body, ["owner_name", "broker_name", "contact_name"], "")) ||
     readLabel(globalInfo, ["Owner Name", "Contact Name", "Full Name", "Name"]);
   const officePhone = String(pick(body, ["office_phone", "business_phone", "phone"], "")) ||
-    readLabel(globalInfo, ["Business Phone", "Business Phone Number", "Office Phone", "Primary Phone"]);
+    readLabel(globalInfo, [
+      "business_phone (if you want them to reference it)",
+      "business_phone", "Business Phone", "Business Phone Number",
+      "Office Phone", "Primary Phone",
+    ]);
   const variables = {
     business_name: businessName,
     global_info: globalInfo,
