@@ -1353,11 +1353,11 @@ module.exports = async (req, res) => {
     const rawSubscription = pick(
       body,
       [
+        "purchased_package",
         "my_subscriptions_text",
         "my_subscriptions",
         "subscription",
         "product_name",
-        "purchased_package",
       ],
       ""
     );
