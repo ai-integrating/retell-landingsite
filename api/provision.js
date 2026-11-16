@@ -4,6 +4,75 @@ const { kv } = require("@vercel/kv");
 const { withLlm } = require("../lib/refinement-coordinator");
 const { protectedSetup } = require("../lib/mcduffy-write-guard");
 
+const MEDICARE_PACKAGE = "medicare premium scheduler";
+const MEDICARE_FLOW_ID = "conversation_flow_26e362c3b85e";
+const MEDICARE_FLOW_VERSION = 2;
+
+async function createMedicareFlow(body, businessName) {
+  const options = { headers: retellHeaders(), timeout: 20000 };
+  const { data: template } = await axios.get(
+    `${RETELL_BASE}/get-conversation-flow/${MEDICARE_FLOW_ID}`,
+    { ...options, params: { version: MEDICARE_FLOW_VERSION } }
+  );
+  // Reuse the current JotForm text blocks without adding required form fields.
+  const globalInfo = String(pick(body, ["global_info", "universal_info", "global_setup"], ""));
+  const schedulerSetup = String(pick(body, ["scheduler_setup", "scheduler_config"], ""));
+  const readLabel = (block, labels) => {
+    const accepted = labels.map(label => label.toLowerCase());
+    for (const line of String(block || "").split(/\r?\n/)) {
+      const match = line.match(/^\s*[-*]?\s*([^:=]+?)\s*[:=]\s*(.+?)\s*$/);
+      if (match && accepted.includes(match[1].trim().toLowerCase())) {
+        return match[2].trim();
+      }
+    }
+    return "";
+  };
+  const ownerName = String(pick(body, ["owner_name", "broker_name", "contact_name"], "")) ||
+    readLabel(globalInfo, ["Owner Name", "Contact Name", "Full Name", "Name"]);
+  const officePhone = String(pick(body, ["office_phone", "business_phone", "phone"], "")) ||
+    readLabel(globalInfo, [
+      "business_phone (if you want them to reference it)",
+      "business_phone", "Business Phone", "Business Phone Number",
+      "Office Phone", "Primary Phone",
+    ]);
+  const variables = {
+    business_name: businessName,
+    global_info: globalInfo,
+    scheduler_setup: schedulerSetup,
+    scheduling_rules: String(pick(body, ["scheduling_rules"], schedulerSetup)),
+    owner_name: ownerName,
+    broker_name: ownerName,
+    owner_first_name: String(pick(body, ["owner_first_name", "first_name"], "")) ||
+      (ownerName ? ownerName.split(/\s+/)[0] : ""),
+    office_phone: officePhone,
+  };
+  for (const key of [
+    "location_1_name", "location_1_days", "location_1_hours", "location_1_address",
+    "location_2_name", "location_2_days", "location_2_hours", "location_2_address",
+  ]) {
+    variables[key] = String(pick(body, [key], ""));
+  }
+
+  const { data } = await axios.post(
+    `${RETELL_BASE}/create-conversation-flow`,
+    {
+      model_choice: template.model_choice,
+      model_temperature: template.model_temperature,
+      global_prompt: template.global_prompt,
+      start_speaker: template.start_speaker,
+      start_node_id: template.start_node_id,
+      nodes: template.nodes,
+      tools: template.tools,
+      default_dynamic_variables: variables,
+    },
+    options
+  );
+  if (!data?.conversation_flow_id) {
+    throw new Error("Retell created no Conversation Flow ID.");
+  }
+  return data.conversation_flow_id;
+}
+
 async function coordinatedConfiguration(llmId, url, expected) {
   const options = { headers: retellHeaders(), timeout: 20000 };
   const llmUrl = `${RETELL_BASE}/get-retell-llm/${encodeURIComponent(llmId)}`;
@@ -1314,11 +1383,11 @@ module.exports = async (req, res) => {
     const rawSubscription = pick(
       body,
       [
+        "purchased_package",
         "my_subscriptions_text",
         "my_subscriptions",
         "subscription",
         "product_name",
-        "purchased_package",
       ],
       ""
     );
@@ -1396,8 +1465,10 @@ module.exports = async (req, res) => {
         ],
     };
 
-    const config =
-      AI_EMPLOYEES_BY_NAME[
+    const isMedicare = subscription === MEDICARE_PACKAGE;
+    const config = isMedicare
+      ? AI_EMPLOYEES["ava — ai scheduler"]
+      : AI_EMPLOYEES_BY_NAME[
         requestedAgentName
       ] ||
       AI_EMPLOYEES[subscription] ||
@@ -1501,11 +1572,11 @@ module.exports = async (req, res) => {
         ""
       );
 
-    const globalSetup =
+    const globalSetup = isMedicare ? "" :
       getGlobalSetupBlock(body) ||
       buildGlobalSetupFromFields(body);
 
-    const roleSetup =
+    const roleSetup = isMedicare ? "" :
       getRoleSetupBlock(
         body,
         roleKey
@@ -1548,7 +1619,9 @@ module.exports = async (req, res) => {
     let promptToUse = "";
     let promptSource = "";
 
-    if (explicitPrompt) {
+    if (isMedicare) {
+      promptSource = "medicare_conversation_flow";
+    } else if (explicitPrompt) {
       promptToUse = [
         explicitPrompt,
         universalLeadCapturePolicy
@@ -1673,6 +1746,7 @@ module.exports = async (req, res) => {
       null;
 
     let templateTools = null;
+    let conversationFlowId = record?.conversation_flow_id || null;
 
     let calendarConfig =
       extractCalendarConfig(body);
@@ -1715,48 +1789,59 @@ module.exports = async (req, res) => {
           }
         );
 
-      templateTools =
-        await getTemplateLlmTools(
-          templateLlmId
-        );
+      if (isMedicare) {
+        if (!conversationFlowId) {
+          conversationFlowId = await createMedicareFlow(body, bizName);
+          record = await saveProvisionRecord(idemKey, {
+            ...record,
+            conversation_flow_id: conversationFlowId,
+          });
+        }
+      } else {
+        templateTools =
+          await getTemplateLlmTools(
+            templateLlmId
+          );
 
-      const llmPayload = {
-        general_prompt:
-          promptToUse,
+        const llmPayload = {
+          general_prompt:
+            promptToUse,
 
-        model: pick(
-          body,
-          ["llm_model"],
-          "gpt-4o-mini"
-        ),
+          model: pick(
+            body,
+            ["llm_model"],
+            "gpt-4o-mini"
+          ),
 
-        ...(templateTools
-          ? {
-              general_tools:
-                templateTools,
+          ...(templateTools
+            ? {
+                general_tools:
+                  templateTools,
+              }
+            : {}),
+        };
+
+        const llmResp =
+          await axios.post(
+            `${RETELL_BASE}/create-retell-llm`,
+            llmPayload,
+            {
+              headers:
+                retellHeaders(),
+              timeout: 20000,
             }
-          : {}),
-      };
+          );
 
-      const llmResp =
-        await axios.post(
-          `${RETELL_BASE}/create-retell-llm`,
-          llmPayload,
-          {
-            headers:
-              retellHeaders(),
-            timeout: 20000,
-          }
-        );
+        llmId =
+          llmResp.data?.llm_id ||
+          llmResp.data?.id;
 
-      llmId =
-        llmResp.data?.llm_id ||
-        llmResp.data?.id;
+        if (!llmId) {
+          throw new Error(
+            "Retell created no LLM ID."
+          );
+        }
 
-      if (!llmId) {
-        throw new Error(
-          "Retell created no LLM ID."
-        );
       }
 
       const agentResp =
@@ -1769,7 +1854,10 @@ module.exports = async (req, res) => {
             voice_id:
               voiceId,
 
-            response_engine: {
+            response_engine: isMedicare ? {
+              type: "conversation-flow",
+              conversation_flow_id: conversationFlowId,
+            } : {
               type:
                 "retell-llm",
               llm_id: llmId,
@@ -1803,7 +1891,7 @@ module.exports = async (req, res) => {
         );
       }
 
-      await coordinatedConfiguration(llmId,
+      if (!isMedicare) await coordinatedConfiguration(llmId,
         `${RETELL_BASE}/update-agent/${encodeURIComponent(
           agentId
         )}`,
@@ -1889,6 +1977,9 @@ module.exports = async (req, res) => {
           idemKey,
           {
             ...record,
+
+            // Preserve the Retell Conversation Flow identity across provisioning retries.
+            ...(isMedicare ? { conversation_flow_id: conversationFlowId } : {}),
 
             status:
               "agent_created",

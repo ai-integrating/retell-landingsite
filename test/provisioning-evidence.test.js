@@ -46,3 +46,20 @@ test("interrupted binding recovers without replacing immutable evidence",async()
  a.deepEqual(f.map.get(boundKey("agent_new")),b);
  await a.rejects(retain(f.kv,{...f.record,llm_id:"llm_other"}));
 });
+
+test("Medicare completion does not grant prompt initialization eligibility", async () => {
+ const f = fixture();
+ const record = {
+  ...f.record,
+  submission_id: "medicare-test-example-benefits-001",
+  prompt_source: "medicare_conversation_flow",
+  conversation_flow_id: "conversation_flow_test",
+  llm_id: null,
+ };
+ await retain(f.kv, record);
+ await retain(f.kv, record);
+ a.equal(f.map.has(candidateKey(record.agent_id)), false);
+ await a.rejects(read(f.kv, record.agent_id, "client_new", "llm_new"));
+ await a.rejects(retain(f.kv, {...record, conversation_flow_id: null}));
+ await a.rejects(retain(f.kv, {...record, prompt_source: "built_prompt"}));
+});
