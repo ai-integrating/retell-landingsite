@@ -1978,6 +1978,9 @@ module.exports = async (req, res) => {
           {
             ...record,
 
+            // Preserve the Retell Conversation Flow identity across provisioning retries.
+            ...(isMedicare ? { conversation_flow_id: conversationFlowId } : {}),
+
             status:
               "agent_created",
 
