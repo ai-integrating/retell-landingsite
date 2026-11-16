@@ -29,5 +29,7 @@ jobs:
         run: node --check api/provision.js
       - name: Run offline provisioning evidence tests
         run: node --require ./test/network-block.cjs --test test/provisioning-evidence.test.js
+      - name: Check Medicare routing and recovery contracts
+        run: node --test test/medicare-provisioning-contract.test.js
       - name: Run offline refinement tests
         run: npm run test:refinement
